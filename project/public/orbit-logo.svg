@@ -1,0 +1,10 @@
+<svg width="512" height="160" viewBox="0 0 512 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g transform="translate(8,8)">
+    <circle cx="72" cy="72" r="46" stroke="#F8FAFC" stroke-width="5"/>
+    <path d="M24 92C42 120 78 134 113 120C147 106 170 74 170 39" stroke="#F8FAFC" stroke-width="5" stroke-linecap="round"/>
+    <path d="M117 42C100 19 72 8 45 16C20 23 4 42 4 66" stroke="#F8FAFC" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
+    <circle cx="116" cy="42" r="9" fill="#F8FAFC"/>
+    <circle cx="24" cy="92" r="9" fill="#E2E8F0" stroke="#F8FAFC" stroke-width="3"/>
+  </g>
+  <text x="206" y="95" fill="#F8FAFC" font-family="Inter, Segoe UI, sans-serif" font-size="58" font-weight="800" letter-spacing="12">ORBIT</text>
+</svg>
