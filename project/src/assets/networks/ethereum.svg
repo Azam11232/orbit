@@ -1,8 +1,15 @@
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M128 20L80 130L128 165L176 130L128 20Z" fill="#E9EEFF"/>
-  <path d="M128 165L80 130L128 236L176 130L128 165Z" fill="#8FA1FF"/>
-  <path d="M128 20L176 130L128 165L80 130L128 20Z" fill="#627EEA"/>
-  <path d="M128 20L176 130L128 165L80 130L128 20Z" fill="#C9D4FF" fill-opacity="0.2"/>
-  <path d="M128 165L80 130L128 236L176 130L128 165Z" fill="#627EEA" fill-opacity="0.9"/>
-  <path d="M128 49L146 112L128 127L110 112L128 49Z" fill="#F4F7FF" opacity="0.8"/>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="eth-grad" x1="68" y1="30" x2="182" y2="220" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C7D6FF"/>
+      <stop offset="1" stop-color="#7C88FF"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="104" fill="#0B0F1A"/>
+  <path d="M128 28 76 134l52 30 52-30L128 28Z" fill="url(#eth-grad)"/>
+  <path d="M128 28v102l52-30L128 28Z" fill="#DDE5FF" opacity="0.92"/>
+  <path d="M76 134l52 30v64L76 134Z" fill="#7190FF"/>
+  <path d="M128 164v64l52-94-52 30Z" fill="#4B66EE"/>
+  <path d="M128 128l-52 30 52 30 52-30-52-30Z" fill="#EEF3FF" opacity="0.8"/>
+  <path d="M128 70l19 31-19 11-19-11 19-31Z" fill="#F3F7FF" opacity="0.8"/>
 </svg>

@@ -1,11 +1,11 @@
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="base-grad" x1="36" y1="36" x2="220" y2="220" gradientUnits="userSpaceOnUse">
+    <linearGradient id="base-grad" x1="26" y1="24" x2="220" y2="220" gradientUnits="userSpaceOnUse">
       <stop stop-color="#0052FF"/>
-      <stop offset="1" stop-color="#1FB6FF"/>
+      <stop offset="1" stop-color="#0AA7FF"/>
     </linearGradient>
   </defs>
-  <circle cx="128" cy="128" r="106" fill="url(#base-grad)"/>
-  <path d="M128 48C83.5 48 48 83.5 48 128s35.5 80 80 80c30.5 0 57.2-17 71.2-42.1L152.4 145c-7.8 11.1-20.4 17.9-36.2 17.9-23.3 0-42.1-18.8-42.1-42.1s18.8-42.1 42.1-42.1c15.8 0 28.4 6.8 36.2 17.9l46.8-20.9C185.2 65 158.5 48 128 48Z" fill="white"/>
-  <path d="M154.7 96.5h19.8v19.8h-19.8v-19.8Zm0 42.9h22.4v19.8h-22.4v-19.8Zm-31.2 25.4h43.5v19.8h-43.5v-19.8Z" fill="white" opacity="0.9"/>
+  <rect width="256" height="256" rx="56" fill="url(#base-grad)"/>
+  <path d="M88 58h41.8c31.3 0 53.2 16.6 53.2 42.9 0 17.2-8.8 31-24.4 37.3 23.5 5.8 37.9 22.5 37.9 45 0 34-26.6 55.8-63.7 55.8H88V58Zm28 26.8v33.4h12.2c19.3 0 30.1-7.3 30.1-17.5 0-11-9.6-15.9-30.1-15.9H116Zm0 62.1v37.1h15.1c21.8 0 34-8.8 34-20.1 0-12.4-12.4-17-34-17H116Z" fill="white"/>
+  <path d="M118 88.8h13.8c12.4 0 19.1 4.8 19.1 11.8 0 7-6.8 11.4-19.1 11.4H118V88.8Zm0 58.9h17.2c14.8 0 22.9 6.2 22.9 15.4 0 9.3-8.1 15.7-22.9 15.7H118v-31.1Z" fill="#DDEBFF" opacity="0.55"/>
 </svg>

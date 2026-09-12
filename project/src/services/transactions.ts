@@ -11,6 +11,8 @@ export type TxCategory =
   | 'Lending'
   | 'Unknown';
 
+export type TxStatus = 'success' | 'failed' | 'pending' | 'unknown';
+
 export interface TokenTransfer {
   hash: string;
   symbol: string;
@@ -26,10 +28,10 @@ export interface ChainTransaction {
   from: string;
   to: string;
   value: string;
-  timestamp: number;
-  status: 'success' | 'failed';
+  timestamp: number | null;
+  status: TxStatus;
   category: TxCategory;
-  blockNumber: number;
+  blockNumber: number | null;
   gasUsed?: string;
   gasPrice?: string;
   feeEth?: string;
@@ -162,6 +164,15 @@ function classifyLending(input: string, to: string): boolean {
   return normalizeAddress(to) === normalizeAddress(AAVE_BASE_POOL) || AAVE_LENDING_SELECTOR.has(selector);
 }
 
+function normalizeTxStatus(statusValue?: string | number | null, fallbackValue?: string | number | null): TxStatus {
+  const raw = String(statusValue ?? fallbackValue ?? '').trim().toLowerCase();
+  if (!raw) return 'unknown';
+  if (raw === 'success' || raw === '1' || raw === 'ok' || raw === 'confirmed') return 'success';
+  if (raw === 'failed' || raw === 'reverted' || raw === 'error' || raw === '0' || raw === 'false') return 'failed';
+  if (raw === 'pending' || raw === 'submitted' || raw === 'inprogress' || raw === 'queued') return 'pending';
+  return 'unknown';
+}
+
 function categorize(
   from: string,
   to: string,
@@ -180,10 +191,14 @@ function categorize(
   if (classifySwap(normalizedInput)) return 'Swap';
 
   if (tokenTransfers.length > 0) {
-    const matchedDirection = tokenTransfers.some((transfer) => transfer.direction === 'sent' && normalizeAddress(from) === wallet);
-    if (matchedDirection) return 'Send';
-    const matchedReceive = tokenTransfers.some((transfer) => transfer.direction === 'received' && normalizeAddress(to) === wallet);
-    if (matchedReceive) return 'Receive';
+    const sentMatch = tokenTransfers.some(
+      (transfer) => transfer.direction === 'sent' && normalizeAddress(from) === wallet,
+    );
+    if (sentMatch) return 'Send';
+    const receivedMatch = tokenTransfers.some(
+      (transfer) => transfer.direction === 'received' && normalizeAddress(to) === wallet,
+    );
+    if (receivedMatch) return 'Receive';
   }
 
   const val = BigInt(value || '0');
@@ -194,16 +209,51 @@ function categorize(
   return 'Unknown';
 }
 
+export function normalizeTimestamp(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    const absolute = Math.abs(value);
+    if (absolute >= 1_000_000_000_000) return value;
+    if (absolute >= 1_000_000_000) return value * 1000;
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    if (/^[-+]?\d+(?:\.\d+)?$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      if (!Number.isFinite(numeric)) return null;
+      const absolute = Math.abs(numeric);
+      if (absolute >= 1_000_000_000_000) return numeric;
+      if (absolute >= 1_000_000_000) return numeric * 1000;
+      return null;
+    }
+
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
 function timeAgo(timestamp: number): string {
-  const diff = Date.now() - timestamp * 1000;
-  const mins = Math.floor(diff / 60000);
+  const validTimestamp = normalizeTimestamp(timestamp);
+  if (validTimestamp === null) return 'Time unavailable';
+
+  const diff = Date.now() - validTimestamp;
+  const seconds = Math.max(0, Math.floor(diff / 1000));
+  const mins = Math.floor(seconds / 60);
   if (mins < 1) return 'just now';
   if (mins < 60) return `${mins} min ago`;
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days} day${days > 1 ? 's' : ''} ago`;
-  return new Date(timestamp * 1000).toLocaleDateString();
+  return new Date(validTimestamp).toLocaleDateString();
 }
 
 interface BasescanTx {
@@ -243,6 +293,8 @@ interface BlockscoutTxItem {
   timestamp?: string;
   raw_input?: string;
   input?: string;
+  block_number?: number | string;
+  blockNumber?: number | string;
   from?: BlockscoutAddressRef | string;
   to?: BlockscoutAddressRef | string;
   gas_price?: string;
@@ -251,6 +303,13 @@ interface BlockscoutTxItem {
   status?: string | number | null;
   result?: string | null;
   token_transfers?: unknown[];
+}
+
+function normalizeBlockNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric;
 }
 
 function normalizeBlockscoutTokenTransfer(raw: any, walletAddress: string, transactionHashOverride?: string): TokenTransfer | null {
@@ -319,26 +378,26 @@ function normalizeBlockscoutTx(raw: BlockscoutTxItem, walletAddress: string, tok
   const to = getAddressValue(raw.to);
   const txValue = String(raw.value ?? '0');
   const input = String(raw.raw_input ?? raw.input ?? '0x');
-  const timestampValue = raw.timestamp ? new Date(raw.timestamp).getTime() / 1000 : 0;
+  const timestampValue = normalizeTimestamp(raw.timestamp);
   const gasPrice = String(raw.gas_price ?? '0');
   const gasUsed = String(raw.gas_used ?? raw.gasUsed ?? '0');
   const feeWei = BigInt(gasPrice || '0') * BigInt(gasUsed || '0');
-  const statusText = String(raw.status ?? raw.result ?? 'success').toLowerCase();
-  const status: 'success' | 'failed' = statusText === 'success' || statusText === '1' ? 'success' : statusText === 'failed' || statusText === 'reverted' || statusText === '0' || statusText === 'error' ? 'failed' : 'success';
+  const status = normalizeTxStatus(raw.status ?? raw.result, undefined);
   const isContract = Boolean(raw.to && typeof raw.to === 'object' && 'is_contract' in raw.to && raw.to.is_contract === true);
+  const blockNumber = normalizeBlockNumber(raw.block_number ?? raw.blockNumber);
 
   return {
     hash,
     from,
     to: to || '0x',
     value: (Number(BigInt(txValue || '0')) / 1e18).toFixed(6),
-    timestamp: Math.floor(timestampValue),
+    timestamp: timestampValue,
     status,
     category: categorize(from, to, txValue, input, walletAddress, isContract, tokenTransfers),
-    blockNumber: 0,
+    blockNumber,
     gasUsed: gasUsed || undefined,
     gasPrice: gasPrice || undefined,
-    feeEth: (Number(feeWei) / 1e18).toFixed(6),
+    feeEth: feeWei > 0n ? (Number(feeWei) / 1e18).toFixed(6) : undefined,
     input,
     contractAddress: to && to !== '0x' && typeof raw.to === 'object' && raw.to && 'is_contract' in raw.to && raw.to.is_contract === true ? to : null,
     tokenTransfers,
@@ -403,32 +462,40 @@ async function fetchBasescanTransactions(address: string, limit: number): Promis
     transferMap.set(key, bucket);
   }
 
-  return rows.map((tx) => {
-    const checksumHash = tx.hash.toLowerCase();
-    const tokenTransfers = transferMap.get(checksumHash) ?? [];
-    const isContract = Boolean(tx.contractAddress && tx.contractAddress !== '0x');
-    const category = categorize(tx.from, tx.to, tx.value, tx.input, address, isContract, tokenTransfers);
-    const gasPrice = BigInt(tx.gasPrice || '0');
-    const gasUsed = BigInt(tx.gasUsed || '0');
-    const feeWei = gasPrice * gasUsed;
+  return rows
+    .map((tx) => {
+      const checksumHash = tx.hash.toLowerCase();
+      const tokenTransfers = transferMap.get(checksumHash) ?? [];
+      const isContract = Boolean(tx.contractAddress && tx.contractAddress !== '0x');
+      const category = categorize(tx.from, tx.to, tx.value, tx.input, address, isContract, tokenTransfers);
+      const gasPrice = BigInt(tx.gasPrice || '0');
+      const gasUsed = BigInt(tx.gasUsed || '0');
+      const feeWei = gasPrice * gasUsed;
+      const blockNumber = normalizeBlockNumber(tx.blockNumber);
+      const ts = normalizeTimestamp(tx.timeStamp);
 
-    return {
-      hash: tx.hash,
-      from: tx.from,
-      to: tx.to || tx.contractAddress,
-      value: (Number(BigInt(tx.value || '0')) / 1e18).toFixed(6),
-      timestamp: Number(tx.timeStamp),
-      status: tx.isError === '1' ? 'failed' : 'success',
-      category,
-      blockNumber: Number(tx.blockNumber),
-      gasUsed: tx.gasUsed || undefined,
-      gasPrice: tx.gasPrice || undefined,
-      feeEth: (Number(feeWei) / 1e18).toFixed(6),
-      input: tx.input || '0x',
-      contractAddress: tx.contractAddress || null,
-      tokenTransfers,
-    };
-  });
+      return {
+        hash: tx.hash,
+        from: tx.from,
+        to: tx.to || tx.contractAddress,
+        value: (Number(BigInt(tx.value || '0')) / 1e18).toFixed(6),
+        timestamp: ts,
+        status: normalizeTxStatus(tx.isError === '1' ? 'failed' : String(tx.isError ?? ''), tx.isError),
+        category,
+        blockNumber,
+        gasUsed: tx.gasUsed || undefined,
+        gasPrice: tx.gasPrice || undefined,
+        feeEth: feeWei > 0n ? (Number(feeWei) / 1e18).toFixed(6) : undefined,
+        input: tx.input || '0x',
+        contractAddress: tx.contractAddress || null,
+        tokenTransfers,
+      };
+    })
+    .sort((left, right) => {
+      const leftTime = left.timestamp ?? 0;
+      const rightTime = right.timestamp ?? 0;
+      return rightTime - leftTime;
+    });
 }
 
 export function createBasescanProvider(): TransactionProvider {
@@ -461,14 +528,46 @@ export function createBasescanProvider(): TransactionProvider {
   };
 }
 
-export function getTimeAgo(timestamp: number): string {
-  return timeAgo(timestamp);
+export function getTimeAgo(timestamp: number | null | undefined): string {
+  const normalized = normalizeTimestamp(timestamp);
+  if (normalized === null) return 'Time unavailable';
+  return timeAgo(normalized);
+}
+
+export function formatTransactionDate(timestamp: number | null | undefined): string {
+  const normalized = normalizeTimestamp(timestamp);
+  if (normalized === null) return 'Time unavailable';
+  return new Date(normalized).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }
 
 export function shortAddr(addr: string): string {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
+function getPreferredExplorerBaseUrl(): string {
+  if (typeof window === 'undefined') return 'https://basescan.org';
+
+  try {
+    const stored = window.localStorage.getItem('orbit-settings-v1');
+    if (!stored) return 'https://basescan.org';
+
+    const parsed = JSON.parse(stored) as { explorer?: 'basescan' | 'blockscout' };
+    if (parsed.explorer === 'blockscout') {
+      return 'https://base.blockscout.com';
+    }
+  } catch {
+    // Ignore malformed local storage and fall back to BaseScan.
+  }
+
+  return 'https://basescan.org';
+}
+
 export function explorerTxUrl(hash: string): string {
-  return `https://basescan.org/tx/${hash}`;
+  return `${getPreferredExplorerBaseUrl()}/tx/${hash}`;
 }

@@ -270,20 +270,32 @@ export function usePortfolio(): PortfolioData {
     allocationPercent: 0,
   }));
 
-  const assets = [ethAsset, ...tokenAssets].map((asset) => ({
-    ...asset,
-    valueUsd: asset.priceUsd === null ? null : Number(asset.formatted) * asset.priceUsd,
-  }));
-  const totalValueUsd = assets.reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0);
+  const assets = [ethAsset, ...tokenAssets].map((asset) => {
+    const numericBalance = Number(asset.formatted);
+    const valueUsd = Number.isFinite(numericBalance) && asset.priceUsd !== null && Number.isFinite(asset.priceUsd)
+      ? numericBalance * asset.priceUsd
+      : null;
+
+    return {
+      ...asset,
+      valueUsd,
+    };
+  });
+
+  const validValueAssets = assets.filter((asset) => asset.valueUsd !== null && Number.isFinite(asset.valueUsd));
+  const totalValueUsd = validValueAssets.reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0);
   const assetsWithAllocation = assets.map((asset) => ({
     ...asset,
-    allocationPercent: totalValueUsd > 0 && asset.valueUsd !== null ? (asset.valueUsd / totalValueUsd) * 100 : 0,
+    allocationPercent: totalValueUsd > 0 && asset.valueUsd !== null && Number.isFinite(asset.valueUsd)
+      ? (asset.valueUsd / totalValueUsd) * 100
+      : 0,
   }));
-  const connectedAssets = assets.filter((a) => a.raw > 0n).length;
-  const anyLoading = assets.some((a) => a.isLoading) || prices.isLoading;
-  const hasNativeBalanceData = ethBalance.data !== undefined;
-  const anyOnchainError = (ethBalance.isError && !hasNativeBalanceData) || tokenResults.some((result) => result.isError && !result.raw);
-  const anyPriceIssue = prices.isError || assets.some((asset) => asset.priceUsd === null);
+
+  const connectedAssets = assets.filter((asset) => asset.raw > 0n).length;
+  const anyLoading = assets.some((asset) => asset.isLoading) || prices.isLoading;
+  const hasAnyBalanceData = assets.some((asset) => asset.raw > 0n);
+  const hasAnyPriceIssue = assets.some((asset) => asset.raw > 0n && asset.priceUsd === null);
+  const hasAnyOnchainError = ethBalance.isError || tokenResults.some((result) => result.isError);
 
   return {
     assets: assetsWithAllocation,
@@ -291,8 +303,8 @@ export function usePortfolio(): PortfolioData {
     totalAssets: assets.length,
     connectedAssets,
     isLoading: anyLoading,
-    isError: !isDisconnected && !isWrongNetwork && anyOnchainError && !anyLoading,
-    hasUnavailablePrices: !isDisconnected && !isWrongNetwork && !anyOnchainError && anyPriceIssue && !prices.isLoading,
+    isError: !isDisconnected && !isWrongNetwork && !anyLoading && !hasAnyBalanceData && hasAnyOnchainError,
+    hasUnavailablePrices: !isDisconnected && !isWrongNetwork && !anyLoading && hasAnyPriceIssue,
     isDisconnected,
     isWrongNetwork,
   };

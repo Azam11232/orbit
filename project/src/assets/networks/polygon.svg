@@ -1,10 +1,11 @@
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="poly-grad" x1="51" y1="36" x2="190" y2="218" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#6A4DF7"/>
-      <stop offset="1" stop-color="#A14FFF"/>
+    <linearGradient id="poly-grad" x1="34" y1="28" x2="214" y2="218" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#A855F7"/>
     </linearGradient>
   </defs>
   <circle cx="128" cy="128" r="104" fill="url(#poly-grad)"/>
-  <path d="M88 86L128 62L168 86V170L128 194L88 170V86ZM128 90L104 105V151L128 166L152 151V105L128 90ZM110 109H120V159H110V109ZM136 109H146V159H136V109Z" fill="white"/>
+  <path d="M128 52 182 82v92l-54 30-54-30V82l54-30Zm0 26 30 17v48l-30 17-30-17V95l30-17Zm-22 22h20v44h12v18h-32v-18h12v-26Z" fill="white"/>
+  <path d="M94 96h20v58H94z" fill="#F2E9FF" opacity="0.8"/>
 </svg>

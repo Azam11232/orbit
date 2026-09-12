@@ -1,10 +1,13 @@
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="arb-grad" x1="53" y1="44" x2="196" y2="190" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#12A7FF"/>
-      <stop offset="1" stop-color="#1B6BFF"/>
+    <linearGradient id="arb-grad" x1="40" y1="36" x2="210" y2="214" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7DE1FF"/>
+      <stop offset="0.5" stop-color="#27B2FF"/>
+      <stop offset="1" stop-color="#0D5AE9"/>
     </linearGradient>
   </defs>
-  <path d="M128 34L62 188H90L111 138H145L166 188H194L128 34ZM118 111L136 111L128 92L118 111Z" fill="url(#arb-grad)"/>
-  <path d="M78 188H178" stroke="#0F2342" stroke-width="12" stroke-linecap="round" opacity="0.18"/>
+  <circle cx="128" cy="128" r="104" fill="url(#arb-grad)"/>
+  <path d="M70 174 128 56l58 118h-28l-30-58-30 58H70Zm36-20h44l-22-42-22 42Z" fill="white"/>
+  <path d="M127 84 106 126h42L127 84Z" fill="#DFF7FF" opacity="0.9"/>
+  <path d="M94 178h68l-10 24H104l-10-24Z" fill="#0C2F6D" opacity="0.15"/>
 </svg>

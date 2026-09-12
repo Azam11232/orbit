@@ -10,12 +10,13 @@ import { useLendingPositions } from "../hooks/useLendingPositions";
 import { AAVE_BASE_ASSETS, AAVE_BASE_POOL } from "../services/lending/aave";
 import { explorerTxUrl, shortAddr } from "../services/transactions";
 import { Card, Button, Label } from "./ui";
+import { getPreferredConnector } from "../wallet";
 
 type EarnOperation = "supply" | "withdraw";
 
 function WalletButton() {
   const { connectors, connect, isPending } = useConnect();
-  const connector = connectors.find((item) => item.id === "injected") ?? connectors[0];
+  const connector = getPreferredConnector(connectors);
   return <Button onClick={() => connector && connect({ connector })} disabled={!connector || isPending}>{isPending ? "Connecting..." : "Connect Wallet"}</Button>;
 }
 

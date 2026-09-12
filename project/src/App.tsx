@@ -31,7 +31,7 @@ import { useLendingOperation } from "./hooks/useLendingOperation";
 import { useTransactions } from "./hooks/useTransactions";
 import { useOrbitSettings } from "./hooks/useOrbitSettings";
 import { useWatchlist, type WatchlistItem } from "./hooks/useWatchlist";
-import { getTimeAgo, shortAddr, explorerTxUrl } from "./services/transactions";
+import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type TxStatus } from "./services/transactions";
 import { buildWalletSecurityReport } from "./services/security";
 import { BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
 import { usePrices } from "./hooks/usePrices";
@@ -91,7 +91,7 @@ import {
 import { EarnPage } from "./components/EarnPage";
 import { OrbitBrand } from "./components/OrbitBrand";
 import { useDiscover } from "./hooks/useDiscover";
-import { supportedChains } from "./wallet";
+import { getPreferredConnector, supportedChains } from "./wallet";
 
 type Page =
   | "home"
@@ -152,12 +152,69 @@ function bridgeExplorerUrl(chainId: number, hash: string) {
 function formatRefreshMode(mode: "manual" | "balanced" | "live") {
   return mode === "manual" ? "Manual" : mode === "balanced" ? "Balanced" : "Live";
 }
+
+function getWalletBrandIcon(name: string, id: string, icon?: string) {
+  const normalizedName = name.toLowerCase();
+  const normalizedId = id.toLowerCase();
+
+  if (normalizedId === "coinbasewallet" || normalizedName.includes("coinbase")) {
+    return `data:image/svg+xml;utf8,${encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
+        <defs>
+          <linearGradient id="coinbaseGradient" x1="0%" x2="100%" y1="0%" y2="100%">
+            <stop offset="0%" stop-color="#1A7FFF"/>
+            <stop offset="100%" stop-color="#0052FF"/>
+          </linearGradient>
+        </defs>
+        <circle cx="40" cy="40" r="32" fill="url(#coinbaseGradient)"/>
+        <path d="M56 28.2c-6.2-5.7-15.9-6.2-23.4-1.9-6.1 3.5-10.1 10.2-10.1 17.7 0 11.4 9.3 20.7 20.7 20.7 8.5 0 15.7-5.6 18.6-13.3l-7.7-2.3c-1.9 3.9-6 6.5-10.6 6.2-6-.5-10.6-5.4-10.6-11.4 0-6.2 5.1-11.1 11.3-11.1 4.1 0 7.9 2.2 9.8 5.9l7.9-2.4Z" fill="#fff"/>
+      </svg>
+    `)}`;
+  }
+
+  if (normalizedId === "injected" || normalizedName.includes("injected")) {
+    return `data:image/svg+xml;utf8,${encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
+        <rect x="16" y="18" width="48" height="42" rx="12" fill="#0F172A" stroke="#38BDF8" stroke-width="3"/>
+        <path d="M25 30h30v22H25z" fill="#0EA5E9" opacity="0.18"/>
+        <path d="M40 28v8m-4-4h8M30 42c0-5.5 4.5-10 10-10s10 4.5 10 10-4.5 10-10 10-10-4.5-10-10Z" fill="none" stroke="#E2E8F0" stroke-width="3" stroke-linecap="round"/>
+        <path d="M40 42v10m-5-5h10" stroke="#E2E8F0" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+    `)}`;
+  }
+
+  return icon;
+}
+
 function WalletButton({ className = "" }: { className?: string }) {
   const { address, isConnected } = useAccount();
   const { connectors, connect, isPending } = useConnect();
   const { disconnect } = useDisconnect();
-  const connector =
-    connectors.find((item) => item.id === "injected") ?? connectors[0];
+  const [walletPickerOpen, setWalletPickerOpen] = useState(false);
+  const connector = getPreferredConnector(connectors);
+
+  const orderedConnectors = [...connectors].sort((a, b) => {
+    const aInjected = a.id === "injected" ? 1 : 0;
+    const bInjected = b.id === "injected" ? 1 : 0;
+    return aInjected - bInjected;
+  });
+
+  const handleConnectClick = () => {
+    if (isPending) return;
+
+    if (!connectors.length) {
+      setWalletPickerOpen(true);
+      return;
+    }
+
+    if (connectors.length === 1) {
+      connect({ connector: connectors[0] });
+      return;
+    }
+
+    setWalletPickerOpen(true);
+  };
+
   if (isConnected)
     return (
       <button
@@ -168,14 +225,78 @@ function WalletButton({ className = "" }: { className?: string }) {
         {shortAddress(address)}
       </button>
     );
+
   return (
-    <Button
-      onClick={() => connector && connect({ connector })}
-      className={className}
-      disabled={!connector || isPending}
-    >
-      {isPending ? "Connecting..." : "Connect Wallet"}
-    </Button>
+    <>
+      <Button
+        onClick={handleConnectClick}
+        className={className}
+        disabled={isPending}
+      >
+        {isPending ? "Connecting..." : "Connect Wallet"}
+      </Button>
+
+      {walletPickerOpen && createPortal(
+        <div
+          className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm"
+          onClick={() => setWalletPickerOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border border-slate-700 bg-slate-950/95 p-4 shadow-[0_30px_80px_rgba(2,6,23,0.6)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500">Connect wallet</p>
+                <h3 className="mt-2 text-lg font-bold text-white">Choose a wallet</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setWalletPickerOpen(false)}
+                className="rounded-lg border border-slate-700 bg-slate-900 p-2 text-slate-300 hover:bg-slate-800"
+                aria-label="Close wallet picker"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {orderedConnectors.length === 0 ? (
+              <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4 text-sm text-slate-300">
+                No browser wallet was detected. Refresh the page after installing an EIP-6963-compatible wallet.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {orderedConnectors.map((candidate) => (
+                  <button
+                    key={candidate.uid ?? candidate.id}
+                    type="button"
+                    onClick={() => {
+                      setWalletPickerOpen(false);
+                      connect({ connector: candidate });
+                    }}
+                    className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-3 py-3 text-left transition hover:border-sky-400/40 hover:bg-slate-800"
+                  >
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={getWalletBrandIcon(candidate.name, candidate.id, candidate.icon)}
+                        alt={candidate.name}
+                        className="h-8 w-8 rounded-full object-cover"
+                      />
+                      <div>
+                        <p className="text-sm font-semibold text-white">{candidate.name}</p>
+                        <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-slate-500">{candidate.id}</p>
+                      </div>
+                    </div>
+                    {candidate.id === connector?.id && <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 function NetworkWarning() {
@@ -791,7 +912,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
   const notificationButtonRef = useRef<HTMLButtonElement | null>(null);
   const { switchChain, isPending: isSwitchPending } = useSwitchChain();
   const { connectors, connect } = useConnect();
-  const connector = connectors.find((item) => item.id === "injected") ?? connectors[0];
+  const connector = getPreferredConnector(connectors);
 
   const activeNetwork = supportedChains.find((item) => item.id === chainId) ?? supportedChains[0];
 
@@ -1359,6 +1480,43 @@ function txIcon(cat: string) {
       return Activity;
   }
 }
+
+function formatTxValue(value: string | number | undefined, fallback = '—') {
+  if (value === undefined || value === null || value === '') return fallback;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  if (numeric === 0) return '0 ETH';
+  const precision = numeric >= 1 ? 4 : 6;
+  const trimmed = numeric.toFixed(precision).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  return `${trimmed} ETH`;
+}
+
+function getStatusLabel(status: TxStatus): string {
+  switch (status) {
+    case 'success':
+      return 'SUCCESS';
+    case 'failed':
+      return 'FAILED';
+    case 'pending':
+      return 'PENDING';
+    default:
+      return 'STATUS UNAVAILABLE';
+  }
+}
+
+function getStatusClasses(status: TxStatus): string {
+  switch (status) {
+    case 'success':
+      return 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300';
+    case 'failed':
+      return 'border-rose-400/30 bg-rose-500/10 text-rose-300';
+    case 'pending':
+      return 'border-amber-400/30 bg-amber-500/10 text-amber-200';
+    default:
+      return 'border-slate-500/30 bg-slate-500/10 text-slate-300';
+  }
+}
+
 function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
   const { address, isConnected } = useAccount();
   const { transactions, isLoading, isError } = useTransactions(
@@ -1462,24 +1620,29 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const networkLabel = supportedChains.find((item) => item.id === chainId)?.name ?? "Current network";
+  const hasRealPortfolioValue = Number.isFinite(portfolio.totalValueUsd) && portfolio.totalValueUsd > 0;
   const value = portfolio.isDisconnected
     ? "Connect wallet"
     : portfolio.isWrongNetwork
       ? "Switch to Base"
       : portfolio.isLoading
         ? "Loading..."
-        : portfolio.hasUnavailablePrices
-          ? "Pricing unavailable"
-          : `$${portfolio.totalValueUsd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        : hasRealPortfolioValue
+          ? `$${portfolio.totalValueUsd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          : portfolio.hasUnavailablePrices
+            ? "Price data unavailable"
+            : "$0.00";
   const valueDetail = portfolio.isDisconnected
     ? 'Awaiting wallet connection'
     : portfolio.isWrongNetwork
       ? `Your wallet is on ${networkLabel}. Switch to Base to view your ORBIT portfolio.`
       : portfolio.isLoading
         ? 'Loading portfolio balance'
-        : portfolio.hasUnavailablePrices
-          ? 'Live pricing is temporarily unavailable — retrying'
-          : 'Current net worth on Base';
+        : hasRealPortfolioValue
+          ? 'Current net worth on Base'
+          : portfolio.hasUnavailablePrices
+            ? 'Partial pricing data is unavailable for some holdings'
+            : 'No wallet balances are currently detected';
   const lastSync = portfolio.isLoading ? "UPDATING" : portfolio.isError ? "DEGRADED" : "LIVE";
 
   return (
@@ -1643,17 +1806,24 @@ function Portfolio() {
   const formatUsd = (value: number | null, fallback = 'N/A') =>
     value === null || !Number.isFinite(value) ? fallback : `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+  const hasLivePortfolioValue = Number.isFinite(portfolio.totalValueUsd) && portfolio.totalValueUsd > 0;
   const value = portfolio.isDisconnected
     ? 'Connect wallet'
     : portfolio.isLoading
       ? 'Loading...'
-      : portfolio.isError
-        ? 'Unavailable'
-        : formatUsd(portfolio.totalValueUsd, 'Unavailable');
+      : portfolio.isWrongNetwork
+        ? 'Switch to Base'
+        : hasLivePortfolioValue
+          ? formatUsd(portfolio.totalValueUsd, '$0.00')
+          : portfolio.hasUnavailablePrices
+            ? 'Price data unavailable'
+            : portfolio.isError
+              ? 'Price data unavailable'
+              : 'No balances';
 
   const allocationSegments = analytics.allocation
     .filter((asset: { valueUsd: number; allocationPercent: number }) => asset.valueUsd > 0 && asset.allocationPercent > 0)
-    .map((asset: { color: string; allocationPercent: number }) => `${asset.color} ${asset.allocationPercent}%`)
+    .map((asset: { color: string; allocationPercent: number; valueUsd: number }) => `${asset.color} ${asset.allocationPercent}%`)
     .join(', ');
 
   const portfolioHealthy = !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && !portfolio.isError && !analytics.zeroBalance;
@@ -1738,7 +1908,11 @@ function Portfolio() {
           </div>
           <div className="mt-5 rounded-2xl border border-dashed border-slate-700/80 bg-slate-950/40 p-4">
             <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-500">Current snapshot</p>
-            <p className="mt-2 text-sm text-slate-300">{analytics.history.note}</p>
+            <p className="mt-2 text-sm text-slate-300">
+              {analytics.history.available
+                ? 'Historical portfolio snapshots are available for this wallet.'
+                : 'ORBIT currently does not have a reliable historical portfolio snapshot or cost-basis record for this wallet, so this section intentionally avoids fabricated P&L.'}
+            </p>
           </div>
         </Card>
         <Card className="p-5">
@@ -1773,7 +1947,7 @@ function Portfolio() {
           <h2 className="mt-2 text-xl font-bold">Portfolio analytics</h2>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
             {[
-              ['Current value', value],
+              ['Current value', formatUsd(portfolio.totalValueUsd, 'N/A')],
               ['Top allocation', analytics.topAsset ? `${analytics.topAsset.allocationPercent.toFixed(1)}%` : '0.0%'],
               ['ETH exposure', `${analytics.ethExposurePercent.toFixed(1)}%`],
               ['cbBTC exposure', `${analytics.btcExposurePercent.toFixed(1)}%`],
@@ -1829,7 +2003,7 @@ function Portfolio() {
             <p className="font-semibold text-slate-200">{analytics.history.title}</p>
             <p className="mt-1 text-slate-400">{analytics.history.note}</p>
           </div>
-          {analytics.recentInsights.length > 0 && (
+          {analytics.recentInsights.length > 0 ? (
             <div className="space-y-3">
               {analytics.recentInsights.map((insight: { title: string; value: string; tone: string; detail: string }) => (
                 <div key={`${insight.title}-${insight.value}`} className="data-card flex items-center justify-between rounded-xl p-3">
@@ -1844,6 +2018,10 @@ function Portfolio() {
                   </div>
                 </div>
               ))}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/30 p-4 text-sm text-slate-400">
+              No recent wallet signals were found for this account on Base.
             </div>
           )}
         </div>
@@ -2247,6 +2425,17 @@ function Approvals() {
     </div>
   );
 }
+function calculateMinimumReceived(amountOut: bigint | null, slippageBps: number): bigint | null {
+  if (amountOut === null || amountOut <= 0n) return null;
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 10_000) return null;
+  return amountOut * BigInt(10_000 - slippageBps) / 10_000n;
+}
+
+function formatPercent(label: number | null | undefined): string {
+  if (label === null || label === undefined || !Number.isFinite(label) || label < 0) return 'Not provided by route';
+  return `${label.toFixed(2)}%`;
+}
+
 function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
   const isSwap = type === "swap";
   const isBridge = type === "bridge";
@@ -2269,8 +2458,9 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
   const [slippageBps, setSlippageBps] = useState(50);
   const [showSwapConfirmation, setShowSwapConfirmation] = useState(false);
   const swapDirection = () => { setFromSymbol(toSymbol); setToSymbol(fromSymbol); setSwapAmount(""); };
-  const minimumReceived = quote ? quote.amountOut * BigInt(10_000 - slippageBps) / 10_000n : null;
-  const swapReady = Boolean(isConnected && chainId === base.id && quote && quote.amountIn === rawSwapAmount && swapAmountValid && !swapAmountError && !swapApproval.isApprovalRequired && !swapApproval.isLoading && Date.now() - (quote?.quotedAt ?? 0) <= 15_000);
+  const quoteFresh = Boolean(quote && Date.now() - quote.quotedAt <= 15_000);
+  const minimumReceived = quoteFresh ? calculateMinimumReceived(quote?.amountOut ?? null, slippageBps) : null;
+  const swapReady = Boolean(isConnected && chainId === base.id && quote && quoteFresh && quote.amountIn === rawSwapAmount && swapAmountValid && !swapAmountError && !swapApproval.isApprovalRequired && !swapApproval.isLoading);
   const bridgeChains: BridgeChain[] = [{ id: 8453, name: "Base" }, { id: 1, name: "Ethereum" }, { id: 42161, name: "Arbitrum" }, { id: 10, name: "Optimism" }];
   const [bridgeFromChainId, setBridgeFromChainId] = useState(8453);
   const [bridgeToChainId, setBridgeToChainId] = useState(1);
@@ -2351,23 +2541,23 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Minimum received</span>
-                  <span className="font-mono text-slate-300">{quote?.minimumReceived !== null && quote?.minimumReceived !== undefined ? `${formatUnits(quote.minimumReceived, toAsset.decimals)} ${toAsset.symbol}` : "Unavailable"}</span>
+                  <span className="font-mono text-slate-300">{quote && minimumReceived !== null ? `${formatUnits(minimumReceived, toAsset.decimals)} ${toAsset.symbol}` : quote ? "Not available from quote" : "Quote unavailable"}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Network fee</span>
-                  <span className="font-mono text-slate-300">{quote?.gasUsd !== null && quote?.gasUsd !== undefined ? `$${quote.gasUsd.toFixed(2)}` : "Unavailable"}</span>
+                  <span className="font-mono text-slate-300">{quote?.gasUsd !== null && quote?.gasUsd !== undefined ? `$${quote.gasUsd.toFixed(2)}` : "Not provided by route"}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500">Slippage</span>
                   <select value={slippageBps} onChange={(event) => setSlippageBps(Number(event.target.value))} disabled={isQuoteFetching || swapExecution.status === "pending"} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={10}>0.1%</option><option value={50}>0.5%</option><option value={100}>1%</option></select>
                 </div>
               </div>
-              <p className={`mt-4 text-xs ${swapAmountError || isQuoteError || swapExecution.status === "failed" ? "text-rose-300" : swapExecution.status === "confirmed" ? "text-emerald-300" : "text-slate-500"}`}>{swapAmountError ?? swapExecution.error?.message ?? (fromSymbol === toSymbol ? "Select two different assets." : !swapAmountValid ? "Enter an amount to request a quote." : isQuoteError ? `${quoteProvider} quote error: ${quoteError instanceof Error ? quoteError.message : "provider unavailable"}` : swapApproval.isApprovalRequired ? "Approval required for this router." : quote && Date.now() - quote.quotedAt > 15_000 ? "Quote expired. Refresh the quote." : quote ? "Ready to review route." : "No route available.")}</p>
+              <p className={`mt-4 text-xs ${swapAmountError || isQuoteError || swapExecution.status === "failed" ? "text-rose-300" : swapExecution.status === "confirmed" ? "text-emerald-300" : "text-slate-500"}`}>{swapAmountError ?? swapExecution.error?.message ?? (fromSymbol === toSymbol ? "Select two different assets." : !swapAmountValid ? "Enter an amount to request a quote." : isQuoteError ? `${quoteProvider} quote error: ${quoteError instanceof Error ? quoteError.message : "provider unavailable"}` : swapApproval.isApprovalRequired ? "Approval required for this router." : !quote ? "Quote unavailable." : !quoteFresh ? "Quote expired. Refresh the quote." : "Ready to review route.")}</p>
               {swapApproval.isApprovalRequired ? <Button className="mt-4 w-full" onClick={() => void swapApproval.approve()} disabled={swapApproval.approvalStatus === "confirmation" || swapApproval.approvalStatus === "pending" || !quote} icon>{swapApproval.approvalStatus === "pending" ? "Approval pending..." : swapApproval.approvalStatus === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : <Button className="mt-4 w-full" onClick={() => setShowSwapConfirmation(true)} icon disabled={!swapReady || swapExecution.status === "pending" || swapExecution.status === "confirmation"}>{swapExecution.status === "pending" ? "Swap pending..." : swapExecution.status === "confirmed" ? "Swap confirmed" : "Review swap"}</Button>}
               {swapApproval.approvalStatus === "failed" && swapApproval.approvalError && <p className="mt-3 text-xs text-rose-300">Approval failed: {swapApproval.approvalError.message}</p>}
               {swapApproval.approvalHash && <p className="mt-2 text-xs text-cyan-300">Approval transaction submitted.</p>}
               {swapExecution.transactionHash && <p className="mt-2 text-xs text-emerald-300">Swap hash: <a className="underline" href={explorerTxUrl(swapExecution.transactionHash)} target="_blank" rel="noopener noreferrer">{shortAddr(swapExecution.transactionHash)}</a></p>}
-              {showSwapConfirmation && quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{formatUnits(quote.amountIn, fromAsset.decimals)} {fromAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span>{formatUnits(quote.amountOut, toAsset.decimals)} {toAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{minimumReceived ? `${formatUnits(minimumReceived, toAsset.decimals)} ${toAsset.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Base Mainnet</span></div><div className="flex justify-between"><span className="text-slate-500">Deadline</span><span>5 minutes</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the route and transaction in your wallet before signing. Digital assets can lose value.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowSwapConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowSwapConfirmation(false); void swapExecution.execute(quote, address as Address, slippageBps); }} disabled={!swapReady} icon>Confirm swap</Button></div></div>}
+              {showSwapConfirmation && quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{formatUnits(quote.amountIn, fromAsset.decimals)} {fromAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span>{formatUnits(quote.amountOut, toAsset.decimals)} {toAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{minimumReceived !== null ? `${formatUnits(minimumReceived, toAsset.decimals)} ${toAsset.symbol}` : "Not available from quote"}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Base Mainnet</span></div><div className="flex justify-between"><span className="text-slate-500">Deadline</span><span>5 minutes</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the route and transaction in your wallet before signing. Digital assets can lose value.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowSwapConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowSwapConfirmation(false); void swapExecution.execute(quote, address as Address, slippageBps); }} disabled={!swapReady} icon>Confirm swap</Button></div></div>}
             </>
           ) : isBridge ? (
             <>
@@ -2439,10 +2629,38 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
           <div className="mt-6 space-y-4">
             {(isSwap
               ? [
-                  ["Portfolio impact", swapReady ? "Quote available" : "Unavailable"],
-                  ["Price impact", quote?.priceImpact !== null && quote?.priceImpact !== undefined ? `${quote.priceImpact.toFixed(2)}%` : "Unavailable"],
-                  ["Contract risk", quote ? "Review router in wallet" : "Unavailable"],
-                  ["Recommended", swapReady ? "Ready to review" : "Unavailable"],
+                  ["Portfolio impact", quote ? `${formatUnits(quote.amountOut, toAsset.decimals)} ${toAsset.symbol}` : "Quote unavailable"],
+                  ["Price impact", formatPercent(quote?.priceImpact ?? null)],
+                  [
+                    "Contract / router",
+                    quote?.routerAddress
+                      ? <div key="router" className="flex flex-col items-end gap-1 text-right">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-slate-200">KyberSwap Router</span>
+                            <button
+                              type="button"
+                              onClick={() => void navigator.clipboard?.writeText(quote.routerAddress as string)}
+                              className="rounded border border-white/10 bg-white/[.02] px-1.5 py-0.5 text-[9px] uppercase tracking-[0.14em] text-cyan-300"
+                            >
+                              Copy
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-2 font-mono text-[11px] text-slate-200">
+                            <span>{shortAddr(quote.routerAddress)}</span>
+                            <a
+                              href={`https://basescan.org/address/${quote.routerAddress}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-cyan-300 underline underline-offset-2"
+                            >
+                              View on BaseScan
+                            </a>
+                          </div>
+                          <span className="text-[10px] text-slate-400">Contract identity available; verification not independently confirmed.</span>
+                        </div>
+                      : "Not available from quote",
+                  ],
+                  ["Recommended", !quote ? "Quote unavailable" : !quoteFresh ? "Quote expired" : swapApproval.isApprovalRequired ? "Approval required" : "Ready to review"],
                 ]
               : isBridge
                 ? [
@@ -2459,8 +2677,8 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
                   ]
             ).map(([a, b], i) => (
               <div
-                key={a}
-                className="flex items-center justify-between border-b border-white/[.06] pb-3 text-xs"
+                key={String(a)}
+                className="flex items-center justify-between gap-3 border-b border-white/[.06] pb-3 text-xs"
               >
                 <span className="text-slate-500">{a}</span>
                 <span
@@ -2470,7 +2688,7 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
                       : "font-semibold text-slate-200"
                   }
                 >
-                  {b}
+                  {typeof b === 'string' ? b : b}
                 </span>
               </div>
             ))}
@@ -2968,6 +3186,8 @@ function WatchlistPage() {
     </div>
   );
 }
+declare const __APP_VERSION__: string;
+
 function SettingsPage() {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
@@ -2976,24 +3196,22 @@ function SettingsPage() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearMessage, setClearMessage] = useState<string | null>(null);
 
-  const formatNetwork = (network: number | undefined) => {
-    if (!network) return "Not connected";
-    if (network === base.id) return "Base Mainnet";
-    return `Network ${network}`;
-  };
+  const activeChain = supportedChains.find((item) => item.id === chainId);
+  const isSupportedNetwork = Boolean(activeChain);
+  const walletStateLabel = !isConnected ? 'Wallet disconnected' : !activeChain ? 'Unsupported network' : activeChain.name;
+  const networkStatusPill = !isConnected ? 'amber' : !activeChain ? 'amber' : 'green';
 
   const handleClearWatchlist = () => {
     if (!confirmClear) {
       setConfirmClear(true);
-      setClearMessage("This will remove only the local ORBIT watchlist entries from this browser. No wallet data or blockchain state will be affected.");
+      setClearMessage('This removes all locally stored watchlist entries from this browser.');
       return;
     }
 
-    watchlist.remove({ id: "__all__", kind: "asset" });
-    const current = watchlist.items;
+    const current = watchlist.items.slice();
     current.forEach((item) => watchlist.remove(item));
     setConfirmClear(false);
-    setClearMessage("Local watchlist cleared.");
+    setClearMessage('Local watchlist cleared.');
   };
 
   return (
@@ -3002,9 +3220,13 @@ function SettingsPage() {
         label="ORBIT / Settings"
         title="Configuration center."
         action={
-          <Button variant="secondary" onClick={() => switchChain({ chainId: base.id })} disabled={!isConnected || chainId === base.id}>
+          <Button
+            variant="secondary"
+            onClick={() => switchChain({ chainId: base.id })}
+            disabled={!isConnected || chainId === base.id}
+          >
             <RefreshCw size={15} />
-            {chainId === base.id ? "On Base" : "Switch to Base"}
+            {!isConnected ? 'Connect wallet' : chainId === base.id ? 'Base ready' : 'Switch to Base'}
           </Button>
         }
       />
@@ -3015,34 +3237,36 @@ function SettingsPage() {
           <div className="mt-4 space-y-4 text-sm">
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet</p>
-              <p className="mt-2 font-semibold text-slate-200">{isConnected && address ? shortAddr(address) : "Not connected"}</p>
+              <p className="mt-2 font-semibold text-slate-200">{isConnected && address ? shortAddr(address) : 'Wallet disconnected'}</p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Current network</p>
               <div className="mt-2 flex items-center justify-between gap-3">
-                <p className="font-semibold text-slate-200">{formatNetwork(chainId)}</p>
-                {chainId === base.id ? <Pill color="green">Base ready</Pill> : <Pill color="amber">Needs Base</Pill>}
+                <p className="font-semibold text-slate-200">{walletStateLabel}</p>
+                <Pill color={networkStatusPill === 'green' ? 'green' : 'amber'}>{!isConnected ? 'Disconnected' : !activeChain ? 'Unsupported' : 'Connected'}</Pill>
               </div>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet security</p>
-              <p className="mt-2 text-slate-300">ORBIT does not sign or execute transactions without your wallet approval. No private keys or seeds are exposed here.</p>
+              <p className="mt-2 text-slate-300">ORBIT reads wallet state, network status, and transaction history with your explicit wallet approval. ORBIT does not store private keys or seed phrases.</p>
             </div>
           </div>
         </Card>
 
         <Card className="p-5" glow>
-          <Label>RPC / data providers</Label>
+          <Label>Supported networks</Label>
           <div className="mt-4 space-y-4 text-sm">
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet provider</p>
-              <p className="mt-2 text-slate-200">Wagmi + wallet connector</p>
-              <p className="mt-1 text-xs text-slate-500">ORBIT uses the active injected wallet / Coinbase connector for signing and chain state. No separate paid API is required for wallet access.</p>
+              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet chains</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {supportedChains.map((chain) => (
+                  <Pill key={chain.id} color={chain.id === base.id ? 'green' : 'cyan'}>{chain.name}</Pill>
+                ))}
+              </div>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Public data source</p>
-              <p className="mt-2 text-slate-200">BaseScan primary, Blockscout fallback</p>
-              <p className="mt-1 text-xs text-slate-500">The transaction provider is intentionally hardcoded to the existing ORBIT public-data flow. Switching providers without a supported architecture would risk broken links and missing history.</p>
+              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Base-specific features</p>
+              <p className="mt-2 text-slate-200">ETH, USDC, and cbBTC on Base are the active Base asset set for portfolio and Base-native actions.</p>
             </div>
           </div>
         </Card>
@@ -3068,7 +3292,7 @@ function SettingsPage() {
                   Blockscout
                 </button>
               </div>
-              <p className="mt-2 text-[11px] text-slate-500">Active explorer is used for informational labels and link generation; values remain valid ORBIT links to real Base transaction pages.</p>
+              <p className="mt-2 text-[11px] text-slate-500">This preference controls generated transaction links after page reload. ORBIT still reads onchain data from the supported Base public providers.</p>
             </div>
 
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
@@ -3084,7 +3308,7 @@ function SettingsPage() {
                   </button>
                 ))}
               </div>
-              <p className="mt-2 text-[11px] text-slate-500">Manual keeps refresh under your control; balanced uses a moderate stale window; live keeps active queries refreshed without constant page reloads.</p>
+              <p className="mt-2 text-[11px] text-slate-500">Manual gives you full control; balanced uses a reasonable stale window; live refreshes more aggressively when supported.</p>
             </div>
           </div>
         </Card>
@@ -3108,13 +3332,13 @@ function SettingsPage() {
                   Compact
                 </button>
               </div>
-              <p className="mt-2 text-[11px] text-slate-500">This adjusts the page density through existing layout classes without changing the underlying data model.</p>
+              <p className="mt-2 text-[11px] text-slate-500">Density affects ORBIT’s supported layout spacing and content density while keeping the same underlying data and actions.</p>
             </div>
 
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="mb-2 text-xs font-semibold text-slate-400">Persistence</p>
-              <p className="text-sm text-slate-300">All settings are stored in localStorage under the ORBIT settings key.</p>
-              <p className="mt-2 text-[11px] text-slate-500">{hasStorage ? 'Browser storage is available for persisted settings.' : 'Local storage is unavailable in this environment, so settings are only kept for this session.'}</p>
+              <p className="text-sm text-slate-300">Explorer, refresh behavior, and density are persisted in browser local storage only.</p>
+              <p className="mt-2 text-[11px] text-slate-500">{hasStorage ? 'Browser storage is available for persisted preferences.' : 'Local storage is unavailable in this environment, so these settings are temporary.'}</p>
             </div>
           </div>
         </Card>
@@ -3127,13 +3351,27 @@ function SettingsPage() {
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Storage mode</p>
               <p className="mt-2 text-slate-200">Local browser persistence only</p>
-              <p className="mt-1 text-xs text-slate-500">Watchlist entries are stored in localStorage and are not tied to wallet ownership, chain state, or blockchain data.</p>
+              <p className="mt-1 text-xs text-slate-500">Watchlist entries are stored locally in this browser. They are not wallet-owned, blockchain data, or synced to another device unless a separate sync system is added.</p>
             </div>
             <div className="rounded-xl border border-rose-300/20 bg-rose-300/[.05] p-3">
-              <p className="mb-2 text-xs font-semibold text-rose-200">Clear local watchlist</p>
-              <Button variant="secondary" className="w-full justify-center" onClick={handleClearWatchlist}>
-                {confirmClear ? "Confirm clear local watchlist" : "Clear local watchlist"}
-              </Button>
+              <p className="mb-2 text-xs font-semibold text-rose-200">Clear local watchlist?</p>
+              <p className="mb-3 text-xs text-rose-100/80">This removes all locally stored watchlist entries from this browser.</p>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  className="flex-1 justify-center"
+                  onClick={() => {
+                    setConfirmClear(false);
+                    setClearMessage(null);
+                  }}
+                  disabled={!confirmClear}
+                >
+                  Cancel
+                </Button>
+                <Button variant="secondary" className="flex-1 justify-center" onClick={handleClearWatchlist}>
+                  {confirmClear ? 'Clear watchlist' : 'Clear local watchlist'}
+                </Button>
+              </div>
               {clearMessage && <p className="mt-2 text-[11px] text-rose-100/80">{clearMessage}</p>}
             </div>
           </div>
@@ -3144,19 +3382,19 @@ function SettingsPage() {
           <div className="mt-4 space-y-3 text-sm">
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Network in use</p>
-              <p className="mt-2 text-slate-200">{formatNetwork(chainId)}</p>
+              <p className="mt-2 text-slate-200">{walletStateLabel}</p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Supported assets</p>
-              <p className="mt-2 text-slate-200">ETH, USDC, cbBTC on Base</p>
+              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Supported chains</p>
+              <p className="mt-2 text-slate-200">Base, Ethereum, Arbitrum, Optimism, Polygon</p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">App version</p>
-              <p className="mt-2 text-slate-200">{import.meta.env.PKG_VERSION ?? "0.0.0"}</p>
+              <p className="mt-2 text-slate-200">{__APP_VERSION__}</p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Data-provider status</p>
-              <p className="mt-2 text-slate-200">BaseScan primary / Blockscout fallback / public JSON APIs only</p>
+              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Data-provider architecture</p>
+              <p className="mt-2 text-slate-200">BaseScan primary, Blockscout fallback</p>
             </div>
           </div>
         </Card>
@@ -3210,6 +3448,9 @@ function ActivityPage() {
   >('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedTxHash, setSelectedTxHash] = useState<string | null>(null);
+  const [copiedHash, setCopiedHash] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [showAllTransactions, setShowAllTransactions] = useState(false);
 
   const wrongNetwork = isConnected && chainId !== base.id;
 
@@ -3240,10 +3481,12 @@ function ActivityPage() {
   const summary = useMemo(() => {
     const successful = transactions.filter((tx) => tx.status === 'success').length;
     const failed = transactions.filter((tx) => tx.status === 'failed').length;
+    const pending = transactions.filter((tx) => tx.status === 'pending').length;
     return {
       total: transactions.length,
       successful,
       failed,
+      pending,
       sends: transactions.filter((tx) => tx.category === 'Send').length,
       receives: transactions.filter((tx) => tx.category === 'Receive').length,
       approvals: transactions.filter((tx) => tx.category === 'Approval').length,
@@ -3252,10 +3495,42 @@ function ActivityPage() {
     };
   }, [transactions]);
 
+  const pendingTransactions = useMemo(
+    () => transactions.filter((tx) => tx.status === 'pending'),
+    [transactions],
+  );
+
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(filteredTransactions.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleTransactions = showAllTransactions
+    ? filteredTransactions
+    : filteredTransactions.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+    setShowAllTransactions(false);
+  }, [selectedCategory, searchTerm]);
+
   const selectedTx =
-    filteredTransactions.find((tx) => tx.hash === selectedTxHash) ??
-    filteredTransactions[0] ??
+    visibleTransactions.find((tx) => tx.hash === selectedTxHash) ??
+    visibleTransactions[0] ??
     null;
+
+  useEffect(() => {
+    if (!copiedHash) return;
+    const timer = window.setTimeout(() => setCopiedHash(null), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copiedHash]);
+
+  const handleCopyText = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedHash(value);
+    } catch (error) {
+      console.warn('Clipboard copy failed', error);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -3341,7 +3616,7 @@ function ActivityPage() {
         </Card>
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-7">
             <div className="rounded-2xl border border-white/10 bg-white/[.03] p-4">
               <p className="font-mono text-[9px] uppercase tracking-[.18em] text-slate-500">Total</p>
               <p className="mt-2 text-2xl font-extrabold">{summary.total}</p>
@@ -3353,6 +3628,10 @@ function ActivityPage() {
             <div className="rounded-2xl border border-white/10 bg-white/[.03] p-4">
               <p className="font-mono text-[9px] uppercase tracking-[.18em] text-slate-500">Failed</p>
               <p className="mt-2 text-2xl font-extrabold text-rose-300">{summary.failed}</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/[.03] p-4">
+              <p className="font-mono text-[9px] uppercase tracking-[.18em] text-slate-500">Pending</p>
+              <p className="mt-2 text-2xl font-extrabold text-amber-300">{summary.pending}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-white/[.03] p-4">
               <p className="font-mono text-[9px] uppercase tracking-[.18em] text-slate-500">Sends</p>
@@ -3374,7 +3653,7 @@ function ActivityPage() {
                 <div>
                   <Label>Transaction History</Label>
                   <p className="mt-2 text-sm text-slate-400">
-                    Showing latest {filteredTransactions.length} of {transactions.length} Base transactions
+                    Showing {filteredTransactions.length} loaded Base transaction{filteredTransactions.length === 1 ? '' : 's'}
                   </p>
                 </div>
                 <Pill color="cyan">LIVE DATA</Pill>
@@ -3416,155 +3695,249 @@ function ActivityPage() {
                 No transactions match the current filters or search terms.
               </div>
             ) : (
-              <div className="grid gap-0 xl:grid-cols-[1.4fr_0.8fr]">
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[800px] text-left">
-                    <thead className="border-b border-white/[.06] font-mono text-[9px] uppercase tracking-widest text-slate-600">
-                      <tr>
-                        <th className="px-5 py-3">Type</th>
-                        <th className="px-5 py-3">Tx Hash</th>
-                        <th className="px-5 py-3">From</th>
-                        <th className="px-5 py-3">To</th>
-                        <th className="px-5 py-3">Value</th>
-                        <th className="px-5 py-3">Status</th>
-                        <th className="px-5 py-3">Time</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/[.05]">
-                      {filteredTransactions.map((tx) => {
-                        const Icon = txIcon(tx.category);
-                        const isSelected = selectedTx?.hash === tx.hash;
-                        return (
-                          <tr
-                            key={tx.hash}
-                            className={`cursor-pointer text-xs transition ${isSelected ? 'bg-cyan-300/[.04]' : 'hover:bg-white/[.025]'}`}
-                            onClick={() => setSelectedTxHash(tx.hash)}
-                          >
-                            <td className="px-5 py-4">
-                              <div className="flex items-center gap-2">
-                                <Icon size={14} className="text-slate-400" />
-                                <span className="font-semibold">{tx.category}</span>
-                              </div>
-                            </td>
-                            <td className="px-5 py-4">
-                              <div className="flex items-center gap-1 font-mono text-cyan-300 hover:text-cyan-200">
-                                {shortAddr(tx.hash)}
-                                <ExternalLink size={11} />
-                              </div>
-                            </td>
-                            <td className="px-5 py-4 font-mono text-slate-400">
-                              {shortAddr(tx.from)}
-                            </td>
-                            <td className="px-5 py-4 font-mono text-slate-400">
-                              {shortAddr(tx.to)}
-                            </td>
-                            <td className="px-5 py-4 font-mono text-slate-300">
-                              {tx.value !== '0.000000' ? `${tx.value} ETH` : tx.tokenTransfers.length > 0 ? 'Token transfer' : '—'}
-                            </td>
-                            <td className="px-5 py-4">
-                              {tx.status === 'success' ? (
-                                <span className="text-emerald-300">Success</span>
-                              ) : (
-                                <span className="text-rose-300">Failed</span>
-                              )}
-                            </td>
-                            <td className="px-5 py-4 text-slate-500">
-                              {getTimeAgo(tx.timestamp)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+              <>
+                <div className="grid gap-0 xl:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.72fr)]">
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[980px] table-fixed text-left xl:min-w-0">
+                      <thead className="border-b border-white/[.06] font-mono text-[9px] uppercase tracking-widest text-slate-600">
+                        <tr>
+                          <th className="w-[10%] px-3 py-3 text-left">Type</th>
+                          <th className="w-[18%] min-w-[150px] px-3 py-3 text-left">Tx Hash</th>
+                          <th className="w-[12%] min-w-[110px] px-3 py-3 text-left">From</th>
+                          <th className="w-[12%] min-w-[110px] px-3 py-3 text-left">To</th>
+                          <th className="w-[12%] min-w-[110px] px-3 py-3 text-left">Value</th>
+                          <th className="w-[12%] px-3 py-3 text-left">Status</th>
+                          <th className="w-[14%] min-w-[130px] px-3 py-3 text-left">Time</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/[.05]">
+                        {visibleTransactions.map((tx) => {
+                          const Icon = txIcon(tx.category);
+                          const isSelected = selectedTx?.hash === tx.hash;
+                          return (
+                            <tr
+                              key={tx.hash}
+                              className={`cursor-pointer text-xs transition ${isSelected ? 'bg-cyan-300/[.04]' : 'hover:bg-white/[.025]'}`}
+                              onClick={() => setSelectedTxHash(tx.hash)}
+                            >
+                              <td className="overflow-hidden px-3 py-4 align-top">
+                                <div className="flex items-center gap-2">
+                                  <Icon size={14} className="text-slate-400" />
+                                  <span className="truncate font-semibold">{tx.category}</span>
+                                </div>
+                              </td>
+                              <td className="overflow-hidden px-3 py-4 align-top">
+                                <div className="flex max-w-[150px] items-center gap-2 font-mono text-cyan-300 hover:text-cyan-200">
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void handleCopyText(tx.hash);
+                                    }}
+                                    title={tx.hash}
+                                    className="flex min-w-0 items-center gap-1 text-left"
+                                  >
+                                    <span className="truncate">{shortAddr(tx.hash)}</span>
+                                    <Copy size={11} className="shrink-0" />
+                                  </button>
+                                </div>
+                              </td>
+                              <td className="overflow-hidden px-3 py-4 align-top font-mono text-slate-400">
+                                <span title={tx.from} className="block max-w-[110px] truncate">{shortAddr(tx.from)}</span>
+                              </td>
+                              <td className="overflow-hidden px-3 py-4 align-top font-mono text-slate-400">
+                                <span title={tx.to} className="block max-w-[110px] truncate">{shortAddr(tx.to)}</span>
+                              </td>
+                              <td className="overflow-hidden px-3 py-4 align-top font-mono text-slate-300">
+                                <span className="block max-w-[120px] truncate">{formatTxValue(tx.value)}</span>
+                              </td>
+                              <td className="overflow-hidden px-3 py-4 align-top">
+                                <span className={`inline-flex rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[.14em] ${getStatusClasses(tx.status)}`}>
+                                  {getStatusLabel(tx.status)}
+                                </span>
+                              </td>
+                              <td className="overflow-hidden px-3 py-4 align-top text-slate-500">
+                                <span className="block text-[11px]">{getTimeAgo(tx.timestamp)}</span>
+                                {tx.timestamp ? <span className="mt-1 block text-[10px] text-slate-500">{formatTransactionDate(tx.timestamp)}</span> : null}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
 
-                {selectedTx && (
-                  <div className="border-t border-white/[.06] p-5 xl:border-l xl:border-t-0">
-                    <Label>Transaction details</Label>
-                    <div className="mt-4 space-y-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-semibold text-slate-200">{selectedTx.category}</span>
-                        <span className={`rounded-full border px-2 py-1 text-[9px] uppercase tracking-[.12em] ${selectedTx.status === 'success' ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-300' : 'border-rose-300/20 bg-rose-300/10 text-rose-300'}`}>
-                          {selectedTx.status}
-                        </span>
-                      </div>
+                  {selectedTx && (
+                    <aside className="border-t border-white/[.06] bg-slate-950/60 p-5 xl:border-l xl:border-t-0">
+                      <Label>Transaction details</Label>
+                      <div className="mt-4 space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="font-semibold text-slate-200">{selectedTx.category}</span>
+                          <span className={`inline-flex rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[.12em] ${getStatusClasses(selectedTx.status)}`}>
+                            {getStatusLabel(selectedTx.status)}
+                          </span>
+                        </div>
 
-                      <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-                        <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Hash</p>
-                        <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" className="mt-2 block break-all text-sm text-cyan-300 hover:text-cyan-200">
-                          {selectedTx.hash}
-                        </a>
-                      </div>
-
-                      <div className="grid gap-3 sm:grid-cols-2">
                         <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-                          <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Block</p>
-                          <p className="mt-2 text-sm font-semibold">#{selectedTx.blockNumber}</p>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Hash</p>
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyText(selectedTx.hash)}
+                              className="inline-flex items-center gap-1 text-[10px] text-cyan-300"
+                              title="Copy transaction hash"
+                            >
+                              {copiedHash === selectedTx.hash ? 'Copied' : 'Copy'} <Copy size={11} />
+                            </button>
+                          </div>
+                          <div className="mt-2 flex items-center gap-2">
+                            <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" title={selectedTx.hash} className="min-w-0 flex-1 truncate text-sm text-cyan-300 hover:text-cyan-200">
+                              {`${selectedTx.hash.slice(0, 8)}...${selectedTx.hash.slice(-6)}`}
+                            </a>
+                            <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-slate-200" aria-label="View transaction on BaseScan">
+                              <ExternalLink size={14} />
+                            </a>
+                          </div>
                         </div>
-                        <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-                          <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Time</p>
-                          <p className="mt-2 text-sm font-semibold">{new Date(selectedTx.timestamp * 1000).toLocaleString()}</p>
-                        </div>
-                      </div>
 
-                      <div className="space-y-3 text-sm">
-                        <div>
-                          <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">From</p>
-                          <p className="mt-1 break-all font-mono text-slate-300">{selectedTx.from}</p>
-                        </div>
-                        <div>
-                          <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">To</p>
-                          <p className="mt-1 break-all font-mono text-slate-300">{selectedTx.to}</p>
-                        </div>
-                        <div>
-                          <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Value</p>
-                          <p className="mt-1 font-mono text-slate-300">{selectedTx.value !== '0.000000' ? `${selectedTx.value} ETH` : '0 ETH'}</p>
-                        </div>
-                        {selectedTx.gasUsed || selectedTx.feeEth ? (
-                          <div>
-                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Gas / fee</p>
-                            <p className="mt-1 font-mono text-slate-300">
-                              {selectedTx.gasUsed ? `Used: ${selectedTx.gasUsed}` : 'Used: Unavailable'}
-                              {selectedTx.feeEth ? ` • Fee: ${selectedTx.feeEth} ETH` : ''}
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Block</p>
+                            <p className="mt-2 text-sm font-semibold text-slate-200">
+                              {selectedTx.blockNumber !== null ? `#${selectedTx.blockNumber}` : selectedTx.status === 'pending' ? 'Pending' : 'Not mined'}
                             </p>
                           </div>
-                        ) : null}
-                      </div>
-
-                      {selectedTx.tokenTransfers.length > 0 && (
-                        <div>
-                          <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Token transfers</p>
-                          <div className="mt-2 space-y-2">
-                            {selectedTx.tokenTransfers.map((transfer, index) => (
-                              <div key={`${transfer.contractAddress}-${index}`} className="rounded-xl border border-white/10 bg-white/[.02] p-3 text-xs">
-                                <div className="flex items-center justify-between gap-3">
-                                  <span className="font-semibold text-slate-200">{transfer.symbol}</span>
-                                  <span className={`font-mono ${transfer.direction === 'sent' ? 'text-rose-300' : 'text-emerald-300'}`}>
-                                    {transfer.direction}
-                                  </span>
-                                </div>
-                                <p className="mt-2 font-mono text-slate-300">{transfer.amount} {transfer.symbol}</p>
-                                <p className="mt-1 break-all text-[10px] text-slate-500">{transfer.contractAddress}</p>
-                              </div>
-                            ))}
+                          <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Time</p>
+                            <p className="mt-2 text-sm font-semibold text-slate-200">
+                              {selectedTx.timestamp ? formatTransactionDate(selectedTx.timestamp) : 'Pending'}
+                            </p>
                           </div>
                         </div>
-                      )}
 
-                      <div>
-                        <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Detected interaction</p>
-                        <p className="mt-2 text-sm text-slate-300">{selectedTx.category}</p>
+                        <div className="space-y-3 text-sm">
+                          <div>
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">From</p>
+                            <div className="mt-1 flex items-center gap-2">
+                              <span title={selectedTx.from} className="min-w-0 flex-1 truncate font-mono text-slate-300">{shortAddr(selectedTx.from)}</span>
+                              <button type="button" onClick={() => void handleCopyText(selectedTx.from)} className="text-slate-400 hover:text-slate-200" title="Copy address"><Copy size={12} /></button>
+                            </div>
+                          </div>
+                          <div>
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">To</p>
+                            <div className="mt-1 flex items-center gap-2">
+                              <span title={selectedTx.to} className="min-w-0 flex-1 truncate font-mono text-slate-300">{shortAddr(selectedTx.to)}</span>
+                              <button type="button" onClick={() => void handleCopyText(selectedTx.to)} className="text-slate-400 hover:text-slate-200" title="Copy address"><Copy size={12} /></button>
+                            </div>
+                          </div>
+                          <div>
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Value</p>
+                            <p className="mt-1 font-mono text-slate-300">{formatTxValue(selectedTx.value)}</p>
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Detected interaction</p>
+                          <p className="mt-2 text-sm text-slate-300">{selectedTx.category}</p>
+                        </div>
+
+                        <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-cyan-300 hover:text-cyan-200">
+                          View on BaseScan
+                          <ExternalLink size={13} />
+                        </a>
                       </div>
+                    </aside>
+                  )}
+                </div>
 
-                      <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-cyan-300 hover:text-cyan-200">
-                        View on BaseScan
-                        <ExternalLink size={13} />
-                      </a>
-                    </div>
+                <div className="mt-5 flex flex-col gap-4 border-t border-white/[.06] pt-5">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm text-slate-400">
+                      Showing {filteredTransactions.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}-{Math.min(currentPage * pageSize, filteredTransactions.length)} of {filteredTransactions.length} transactions
+                    </p>
+                    {filteredTransactions.length > pageSize && (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPage((value) => Math.max(1, value - 1))}
+                          disabled={currentPage === 1}
+                          className="rounded-full border border-white/10 bg-white/[.02] px-3 py-1.5 text-xs font-medium text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Previous
+                        </button>
+                        <div className="flex items-center gap-1">
+                          {Array.from({ length: pageCount }, (_, index) => index + 1).map((pageNum) => (
+                            <button
+                              key={pageNum}
+                              type="button"
+                              onClick={() => setPage(pageNum)}
+                              className={`h-8 min-w-[2rem] rounded-full border px-2 text-xs ${pageNum === currentPage ? 'border-cyan-300/40 bg-cyan-300/10 text-cyan-200' : 'border-white/10 bg-white/[.02] text-slate-400'}`}
+                            >
+                              {pageNum}
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
+                          disabled={currentPage === pageCount}
+                          className="rounded-full border border-white/10 bg-white/[.02] px-3 py-1.5 text-xs font-medium text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowAllTransactions((value) => !value)}
+                    className="inline-flex items-center gap-2 self-start text-sm font-medium text-cyan-300 transition hover:text-cyan-200"
+                  >
+                    {showAllTransactions ? 'Show paged view' : 'View all transactions'}
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              </>
             )}
+
+            <div className="mt-6 rounded-2xl border border-white/10 bg-white/[.02] p-5">
+              {pendingTransactions.length > 0 ? (
+                <div>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-bold text-white">Pending transactions</h3>
+                    <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-[9px] font-semibold uppercase tracking-[.14em] text-amber-200">
+                      {pendingTransactions.length} ACTIVE
+                    </span>
+                  </div>
+                  <div className="space-y-3">
+                    {pendingTransactions.map((tx) => (
+                      <div key={tx.hash} className="rounded-xl border border-white/10 bg-slate-950/40 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="font-semibold text-slate-200">{tx.category}</span>
+                          <span className={`inline-flex rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[.14em] ${getStatusClasses(tx.status)}`}>
+                            {getStatusLabel(tx.status)}
+                          </span>
+                        </div>
+                        <p className="mt-2 truncate font-mono text-xs text-cyan-300">{shortAddr(tx.hash)}</p>
+                        <p className="mt-2 text-xs text-slate-400">Submitted {tx.timestamp ? formatTransactionDate(tx.timestamp) : 'recently'} · waiting to be mined</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-6 text-center">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-200">
+                    <RefreshCw size={18} />
+                  </div>
+                  <h3 className="mt-4 text-xl font-bold text-white">No pending transactions</h3>
+                  <p className="mt-2 max-w-md text-sm leading-6 text-slate-400">
+                    You don't have any pending transactions right now.
+                    Pending transactions will appear here while they are being mined.
+                  </p>
+                </div>
+              )}
+            </div>
           </Card>
         </>
       )}

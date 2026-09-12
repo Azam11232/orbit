@@ -11,6 +11,7 @@ interface KyberRouteResponse {
       gas?: string;
       gasPrice?: string;
       gasUsd?: number | string;
+      priceImpact?: number | string;
       route?: unknown;
       limitReturnAmount?: string;
     };
@@ -19,6 +20,7 @@ interface KyberRouteResponse {
     code?: number | string;
     message?: string;
     limitReturnAmount?: string;
+    priceImpact?: number | string;
   };
   code?: number | string;
   message?: string;
@@ -35,6 +37,17 @@ function asBigInt(value: unknown): bigint | null {
 
 function asAddress(value: unknown): Address | null {
   return typeof value === 'string' && /^0x[a-fA-F0-9]{40}$/.test(value) ? value as Address : null;
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const numeric = Number(trimmed.replace(/%/g, ''));
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+  return null;
 }
 
 function parseGasPriceWei(value: unknown): bigint | null {
@@ -70,17 +83,19 @@ export function createKyberSwapProvider(): SwapProvider {
       const gas = asBigInt(routeSummary?.gas);
       const gasPriceWei = asBigInt(routeSummary?.gasPrice) ?? parseGasPriceWei(routeSummary?.gasPrice);
       const gasUsd = typeof routeSummary?.gasUsd === 'number' ? routeSummary.gasUsd : typeof routeSummary?.gasUsd === 'string' ? Number(routeSummary.gasUsd) : null;
+      const priceImpact = asNumber(routeSummary?.priceImpact ?? json.data.priceImpact ?? null);
+      const minimumReceivedSource = asBigInt(json.data.limitReturnAmount ?? routeSummary?.limitReturnAmount ?? null);
       return {
         tokenIn,
         tokenOut,
         amountIn,
         amountOut,
-        minimumReceived: null,
+        minimumReceived: minimumReceivedSource,
         routerAddress: asAddress(json.data.routerAddress),
         gas,
         gasPriceWei,
         gasUsd: gasUsd !== null && Number.isFinite(gasUsd) ? gasUsd : null,
-        priceImpact: null,
+        priceImpact: priceImpact !== null && Number.isFinite(priceImpact) && priceImpact >= 0 ? priceImpact : null,
         routeLabel: 'KyberSwap route',
         routeSummary: routeSummary ?? null,
         quotedAt: Date.now(),
@@ -108,7 +123,7 @@ export function createKyberSwapProvider(): SwapProvider {
       if (!data || !encodedData || !/^0x[0-9a-fA-F]*$/.test(encodedData) || !routerAddress || (json.code !== undefined && String(json.code) !== '0')) {
         throw new Error(data?.message || json.message || 'Swap transaction data could not be verified');
       }
-      const minimumReceived = asBigInt(data.limitReturnAmount ?? data.routeSummary?.limitReturnAmount);
+      const minimumReceived = asBigInt(data.limitReturnAmount ?? data.routeSummary?.limitReturnAmount) ?? (quote.amountOut * BigInt(10_000 - slippageBps) / 10_000n);
       return {
         to: routerAddress,
         data: encodedData as `0x${string}`,
