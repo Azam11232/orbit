@@ -6,8 +6,8 @@ import {
   type Address,
   type PublicClient,
 } from 'viem';
-import { base } from 'wagmi/chains';
-import { BASE_ERC20_ASSETS } from '../data/tokens';
+import { arcTestnet } from 'wagmi/chains';
+import { ARC_ERC20_ASSETS } from '../data/tokens';
 import type { ChainTransaction } from './transactions';
 
 export type ApprovalRisk = 'High' | 'Medium' | 'Low' | 'Unknown';
@@ -65,29 +65,13 @@ export interface WalletSecurityReport {
   trackedContractStatus: ContractSafetyStatus[];
 }
 
-export const APPROVAL_TOKENS: ApprovalTokenConfig[] = [
-  {
-    symbol: 'WETH',
-    name: 'Wrapped Ether',
-    address: '0x4200000000000000000000000000000000000006',
-    decimals: 18,
-    color: '#627EEA',
-  },
-  {
-    symbol: 'USDC',
-    name: 'USD Coin',
-    address: '0x833589fCD6EDB6E08f4c7C32D4f71b54bDA02913',
-    decimals: 6,
-    color: '#2775CA',
-  },
-  {
-    symbol: 'cbBTC',
-    name: 'Coinbase Wrapped BTC',
-    address: '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf',
-    decimals: 8,
-    color: '#F7931A',
-  },
-];
+export const APPROVAL_TOKENS: ApprovalTokenConfig[] = ARC_ERC20_ASSETS.map((asset) => ({
+  symbol: asset.symbol,
+  name: asset.name,
+  address: asset.address,
+  decimals: asset.decimals,
+  color: asset.color,
+}));
 
 const approvalEvent = parseAbiItem(
   'event Approval(address indexed owner, address indexed spender, uint256 value)',
@@ -169,7 +153,7 @@ export function createApprovalProvider(client: PublicClient): ApprovalProvider {
         }),
         scannedFromBlock: fromBlock,
         scannedToBlock: latestBlock,
-        scope: 'Configured Base tokens, recent Approval events',
+        scope: 'Official Arc Testnet USDC, recent Approval events',
       };
     },
   };
@@ -212,7 +196,7 @@ export function buildWalletSecurityReport({
       severity: 'High',
       factors: [{
         label: 'Wallet disconnected',
-        detail: 'Connect a Base wallet to run a live security analysis.',
+        detail: 'Connect an Arc Testnet wallet to run a live security analysis.',
         severity: 'warning',
         impact: 100,
       }],
@@ -225,7 +209,7 @@ export function buildWalletSecurityReport({
       trackedContractStatus: portfolio.assets
         .filter((asset) => !asset.isNative)
         .map((asset) => {
-          const match = BASE_ERC20_ASSETS.find((token) => token.symbol === asset.symbol);
+          const match = ARC_ERC20_ASSETS.find((token) => token.symbol === asset.symbol);
           return {
             symbol: asset.symbol,
             address: match?.address ?? 'Unknown / not verified by ORBIT',
@@ -235,11 +219,11 @@ export function buildWalletSecurityReport({
     };
   }
 
-  if (chainId !== base.id) {
+  if (chainId !== arcTestnet.id) {
     score = Math.max(0, score - 25);
     factors.push({
       label: 'Wrong network',
-      detail: 'The wallet is not currently on Base Mainnet.',
+      detail: 'The wallet is not currently on Arc Testnet.',
       severity: 'warning',
       impact: 25,
     });
@@ -287,14 +271,14 @@ export function buildWalletSecurityReport({
     score = Math.max(0, score - impact);
     factors.push({
       label: 'Failed transactions',
-      detail: `${failedTransactions} recent transaction${failedTransactions > 1 ? 's failed' : ' failed'} on Base.`,
+      detail: `${failedTransactions} recent Arc transaction${failedTransactions > 1 ? 's failed' : ' failed'}.`,
       severity: 'warning',
       impact,
     });
   }
 
   const knownContractAddresses = new Set(
-    BASE_ERC20_ASSETS.map((asset) => asset.address?.toLowerCase()).filter(Boolean) as string[],
+    ARC_ERC20_ASSETS.map((asset) => asset.address?.toLowerCase()).filter(Boolean) as string[],
   );
 
   const walletAddressLower = walletAddress.toLowerCase();
@@ -346,7 +330,7 @@ export function buildWalletSecurityReport({
   const trackedContractStatus = portfolio.assets
     .filter((asset) => !asset.isNative)
     .map((asset) => {
-      const match = BASE_ERC20_ASSETS.find((token) => token.symbol === asset.symbol);
+      const match = ARC_ERC20_ASSETS.find((token) => token.symbol === asset.symbol);
       return {
         symbol: asset.symbol,
         address: match?.address ?? 'Unknown / not verified by ORBIT',
@@ -356,7 +340,7 @@ export function buildWalletSecurityReport({
 
   const recommendations: string[] = [];
   if (unrestrictedApprovals.length > 0) recommendations.push('Revoke unnecessary unlimited approvals from the approval review flow.');
-  if (chainId !== base.id) recommendations.push('Switch back to Base Mainnet to keep wallet activity within the supported network.');
+  if (chainId !== arcTestnet.id) recommendations.push('Switch to Arc Testnet to keep wallet activity within the supported network.');
   if (unknownContractInteractions > 0) recommendations.push('Review the unknown contract interactions in your recent transaction history.');
   if (failedTransactions > 0) recommendations.push('Review failed transactions to confirm there were no unexpected or repeated calls.');
   if (largeOutgoingTransfers > 0) recommendations.push('Review large outgoing transfers against your current portfolio before repeating similar actions.');

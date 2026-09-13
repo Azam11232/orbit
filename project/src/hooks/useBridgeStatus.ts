@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { createLifiProvider } from '../services/bridge/lifi';
+import { createCctpProvider } from '../services/bridge/cctp';
 import type { BridgeQuote, BridgeStatus } from '../types/bridge';
 
-const provider = createLifiProvider();
+const provider = createCctpProvider();
 
 export function useBridgeStatus(quote: BridgeQuote | undefined, sourceHash: string | undefined, enabled = true) {
   const query = useQuery<BridgeStatus>({

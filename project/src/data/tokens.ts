@@ -1,5 +1,5 @@
 import type { Address } from 'viem';
-import { base } from 'wagmi/chains';
+import { arcTestnet, base } from 'wagmi/chains';
 
 export interface BaseAssetConfig {
   symbol: string;
@@ -54,3 +54,26 @@ export const BASE_ERC20_ASSETS = BASE_ASSETS.filter(
 );
 
 export const BASE_SWAP_ASSETS = BASE_ASSETS.filter((asset) => asset.symbol !== 'WETH');
+
+export const ARC_USDC: BaseAssetConfig & { address: Address } = {
+  symbol: 'USDC',
+  name: 'USD Coin',
+  address: '0x3600000000000000000000000000000000000000',
+  decimals: 6,
+  color: '#2775CA',
+  isNative: false,
+  chainId: arcTestnet.id,
+};
+
+export const ARC_EURC: BaseAssetConfig & { address: Address } = {
+  symbol: 'EURC',
+  name: 'Euro Coin',
+  address: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a',
+  decimals: 6,
+  color: '#6B8AFD',
+  isNative: false,
+  chainId: arcTestnet.id,
+};
+
+export const ARC_ERC20_ASSETS = [ARC_USDC];
+export const ARC_SWAP_ASSETS = [ARC_USDC, ARC_EURC];

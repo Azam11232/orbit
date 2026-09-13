@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi';
-import { base } from 'wagmi/chains';
+import { arcTestnet } from 'wagmi/chains';
 import { erc20Abi, type Hash } from 'viem';
 import type { TokenApproval } from '../services/security';
 
@@ -16,8 +16,8 @@ export interface UseRevokeApprovalResult {
 }
 
 export function useRevokeApproval(): UseRevokeApprovalResult {
-  const { address } = useAccount();
-  const publicClient = usePublicClient({ chainId: base.id });
+  const { address, chainId } = useAccount();
+  const publicClient = usePublicClient({ chainId: arcTestnet.id });
   const { writeContractAsync } = useWriteContract();
   const queryClient = useQueryClient();
   const [activeApprovalId, setActiveApprovalId] = useState<string | null>(null);
@@ -26,8 +26,8 @@ export function useRevokeApproval(): UseRevokeApprovalResult {
   const [error, setError] = useState<Error | null>(null);
 
   const revoke = async (approval: TokenApproval) => {
-    if (!address || !publicClient) {
-      setError(new Error('Connect your wallet on Base to revoke an approval'));
+    if (!address || chainId !== arcTestnet.id || !publicClient) {
+      setError(new Error('Connect your wallet on Arc Testnet to revoke an approval'));
       setStatus('error');
       return;
     }
@@ -52,12 +52,12 @@ export function useRevokeApproval(): UseRevokeApprovalResult {
         abi: erc20Abi,
         functionName: 'approve',
         args: [approval.spenderAddress, 0n],
-        chainId: base.id,
+        chainId: arcTestnet.id,
       });
       setTransactionHash(hash);
       await publicClient.waitForTransactionReceipt({ hash });
       setStatus('success');
-      await queryClient.invalidateQueries({ queryKey: ['approvals', address, base.id] });
+      await queryClient.invalidateQueries({ queryKey: ['approvals', address, arcTestnet.id] });
     } catch (caughtError) {
       setStatus('error');
       setError(caughtError instanceof Error ? caughtError : new Error('Revoke transaction failed'));

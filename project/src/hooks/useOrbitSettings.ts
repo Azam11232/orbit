@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 
 export type DensityMode = 'comfortable' | 'compact';
 export type RefreshMode = 'manual' | 'balanced' | 'live';
-export type ExplorerPreference = 'basescan' | 'blockscout';
+export type ExplorerPreference = 'arcscan';
 
 export interface OrbitSettings {
   density: DensityMode;
@@ -15,7 +15,7 @@ const STORAGE_KEY = 'orbit-settings-v1';
 const DEFAULT_SETTINGS: OrbitSettings = {
   density: 'comfortable',
   refreshMode: 'balanced',
-  explorer: 'basescan',
+  explorer: 'arcscan',
 };
 
 function readSettings(): OrbitSettings {
@@ -31,7 +31,7 @@ function readSettings(): OrbitSettings {
     return {
       density: parsed.density === 'compact' ? 'compact' : 'comfortable',
       refreshMode: parsed.refreshMode === 'manual' || parsed.refreshMode === 'live' ? parsed.refreshMode : 'balanced',
-      explorer: parsed.explorer === 'blockscout' ? 'blockscout' : 'basescan',
+      explorer: 'arcscan',
     };
   } catch {
     return DEFAULT_SETTINGS;

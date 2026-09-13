@@ -1,5 +1,7 @@
-import type { Address } from 'viem';
+import { formatUnits, type Address } from 'viem';
+import { arcTestnet } from 'viem/chains';
 import { AAVE_BASE_POOL } from './lending/aave';
+import { ARC_USDC } from '../data/tokens';
 
 export type TxCategory =
   | 'Send'
@@ -21,6 +23,8 @@ export interface TokenTransfer {
   decimals: number;
   direction: 'sent' | 'received';
   rawAmount: string;
+  from?: string;
+  to?: string;
 }
 
 export interface ChainTransaction {
@@ -38,6 +42,7 @@ export interface ChainTransaction {
   input?: string;
   contractAddress?: string | null;
   tokenTransfers: TokenTransfer[];
+  nativeSymbol?: string;
 }
 
 export interface TransactionQuery {
@@ -73,8 +78,12 @@ const AAVE_LENDING_SELECTOR = new Set([
   '0x7854cd0f',
   '0x6f9b8d07',
 ]);
+export const ARC_USDC_ADDRESS = ARC_USDC.address;
+export const ARC_USDC_DECIMALS = ARC_USDC.decimals;
+const ARCSCAN_API_BASE_URL = 'https://testnet.arcscan.app/api/v2';
 
 const txRequestCache = new Map<string, Promise<ChainTransaction[]>>();
+const arcTxRequestCache = new Map<string, Promise<ChainTransaction[]>>();
 let lastTransactionRequestAt = 0;
 
 function sleep(ms: number): Promise<void> {
@@ -287,6 +296,30 @@ interface BlockscoutAddressRef {
   [key: string]: unknown;
 }
 
+interface BlockscoutTokenTransferRaw {
+  transaction_hash?: string;
+  hash?: string;
+  amount?: string | number;
+  value?: string | number;
+  decimals?: string | number;
+  contract_address?: string;
+  token_symbol?: string;
+  symbol?: string;
+  from?: BlockscoutAddressRef | string;
+  to?: BlockscoutAddressRef | string;
+  token?: {
+    decimals?: string | number;
+    address_hash?: string;
+    address?: string;
+    symbol?: string;
+    name?: string;
+  };
+  total?: {
+    value?: string | number;
+    decimals?: string | number;
+  };
+}
+
 interface BlockscoutTxItem {
   hash?: string;
   value?: string | number;
@@ -302,7 +335,7 @@ interface BlockscoutTxItem {
   gas_used?: string;
   status?: string | number | null;
   result?: string | null;
-  token_transfers?: unknown[];
+  token_transfers?: BlockscoutTokenTransferRaw[];
 }
 
 function normalizeBlockNumber(value: unknown): number | null {
@@ -312,7 +345,7 @@ function normalizeBlockNumber(value: unknown): number | null {
   return numeric;
 }
 
-function normalizeBlockscoutTokenTransfer(raw: any, walletAddress: string, transactionHashOverride?: string): TokenTransfer | null {
+function normalizeBlockscoutTokenTransfer(raw: BlockscoutTokenTransferRaw, walletAddress: string, transactionHashOverride?: string): TokenTransfer | null {
   if (!raw) return null;
 
   const transactionHash = String(transactionHashOverride ?? raw.transaction_hash ?? raw.hash ?? '');
@@ -320,10 +353,16 @@ function normalizeBlockscoutTokenTransfer(raw: any, walletAddress: string, trans
 
   const token = raw.token ?? {};
   const fromValue = getAddressValue(raw.from);
-  const amountRaw = String(raw.amount ?? raw.value ?? raw.total ?? '0');
-  const decimals = Number(token.decimals ?? raw.decimals ?? 0);
-  const amount = decimals > 0 ? (BigInt(amountRaw || '0') / 10n ** BigInt(decimals)).toString() : amountRaw || '0';
-  const contractAddress = String(token.address ?? raw.contract_address ?? '0x0000000000000000000000000000000000000000');
+  const rawTotal = raw.total && typeof raw.total === 'object' ? raw.total : null;
+  const amountRaw = String(raw.amount ?? raw.value ?? rawTotal?.value ?? '0');
+  const decimals = Number(token.decimals ?? rawTotal?.decimals ?? raw.decimals ?? 0);
+  const amount = decimals > 0 ? formatUnits(BigInt(amountRaw || '0'), decimals) : amountRaw || '0';
+  const contractAddress = String(token.address_hash ?? token.address ?? raw.contract_address ?? '0x0000000000000000000000000000000000000000');
+  const toValue = getAddressValue(raw.to);
+  const normalizedWallet = normalizeAddress(walletAddress);
+  const fromAddress = normalizeAddress(fromValue);
+  const toAddress = normalizeAddress(toValue);
+  if (fromAddress !== normalizedWallet && toAddress !== normalizedWallet) return null;
 
   return {
     hash: transactionHash,
@@ -331,15 +370,17 @@ function normalizeBlockscoutTokenTransfer(raw: any, walletAddress: string, trans
     contractAddress,
     amount,
     decimals,
-    direction: normalizeAddress(fromValue) === normalizeAddress(walletAddress) ? 'sent' : 'received',
+    direction: fromAddress === normalizedWallet ? 'sent' : 'received',
     rawAmount: amountRaw || '0',
+    from: fromValue,
+    to: toValue,
   };
 }
 
 function normalizeBaseScanTransfer(raw: BasescanTokenTransfer, walletAddress: string): TokenTransfer {
   const decimals = Number(raw.tokenDecimal || 0);
   const amountRaw = raw.value || '0';
-  const amount = decimals > 0 ? (BigInt(amountRaw) / 10n ** BigInt(decimals)).toString() : amountRaw;
+  const amount = decimals > 0 ? formatUnits(BigInt(amountRaw), decimals) : amountRaw;
   const direction = normalizeAddress(raw.from) === normalizeAddress(walletAddress) ? 'sent' : 'received';
 
   return {
@@ -350,7 +391,80 @@ function normalizeBaseScanTransfer(raw: BasescanTokenTransfer, walletAddress: st
     decimals,
     direction,
     rawAmount: amountRaw,
+    from: raw.from,
+    to: raw.to,
   };
+}
+
+function normalizeArcTransaction(
+  raw: BlockscoutTxItem,
+  walletAddress: string,
+  tokenTransfers: TokenTransfer[],
+): ChainTransaction {
+  const hash = String(raw.hash ?? '');
+  const from = getAddressValue(raw.from);
+  const to = getAddressValue(raw.to) || '0x';
+  const input = String(raw.raw_input ?? raw.input ?? '0x');
+  const valueRaw = String(raw.value ?? '0');
+  const isContract = Boolean(raw.to && typeof raw.to === 'object' && 'is_contract' in raw.to && raw.to.is_contract === true);
+  const gasPrice = String(raw.gas_price ?? '0');
+  const gasUsed = String(raw.gas_used ?? raw.gasUsed ?? '0');
+  const feeWei = BigInt(gasPrice || '0') * BigInt(gasUsed || '0');
+
+  return {
+    hash,
+    from,
+    to,
+    value: formatUnits(BigInt(valueRaw), 18),
+    timestamp: normalizeTimestamp(raw.timestamp),
+    status: normalizeTxStatus(raw.status ?? raw.result, undefined),
+    category: categorize(from, to, valueRaw, input, walletAddress, isContract, tokenTransfers),
+    blockNumber: normalizeBlockNumber(raw.block_number ?? raw.blockNumber),
+    gasUsed: gasUsed || undefined,
+    gasPrice: gasPrice || undefined,
+    feeEth: feeWei > 0n ? formatUnits(feeWei, 18) : undefined,
+    input,
+    contractAddress: isContract ? to : null,
+    tokenTransfers,
+    nativeSymbol: 'USDC',
+  };
+}
+
+async function fetchArcTransactions(address: string, limit: number): Promise<ChainTransaction[]> {
+  const itemsCount = Math.max(limit, 20);
+  const transactionsUrl = `${ARCSCAN_API_BASE_URL}/addresses/${address}/transactions?items_count=${itemsCount}`;
+  const transfersUrl = `${ARCSCAN_API_BASE_URL}/addresses/${address}/token-transfers?items_count=${itemsCount}`;
+  const [{ items: transactionItems }, { items: transferItems }] = await Promise.all([
+    fetchJson<{ items?: BlockscoutTxItem[] }>(transactionsUrl),
+    fetchJson<{ items?: BlockscoutTokenTransferRaw[] }>(transfersUrl),
+  ]);
+
+  if (!Array.isArray(transactionItems) || !Array.isArray(transferItems)) {
+    throw new Error('ArcScan returned an invalid activity response');
+  }
+
+  const transferMap = new Map<string, TokenTransfer[]>();
+  for (const rawTransfer of transferItems) {
+    const transfer = normalizeBlockscoutTokenTransfer(rawTransfer, address);
+    if (!transfer || normalizeAddress(transfer.contractAddress) !== normalizeAddress(ARC_USDC_ADDRESS)) continue;
+    const key = transfer.hash.toLowerCase();
+    const bucket = transferMap.get(key) ?? [];
+    bucket.push({
+      ...transfer,
+      amount: formatUnits(BigInt(transfer.rawAmount), ARC_USDC_DECIMALS),
+      decimals: ARC_USDC_DECIMALS,
+      symbol: ARC_USDC.symbol,
+    });
+    transferMap.set(key, bucket);
+  }
+
+  return transactionItems
+    .filter((transaction) => Boolean(transaction.hash))
+    .map((transaction) => normalizeArcTransaction(
+      transaction,
+      address,
+      transferMap.get(String(transaction.hash).toLowerCase()) ?? [],
+    ));
 }
 
 async function fetchTokenTransfers(address: string, limit: number): Promise<TokenTransfer[]> {
@@ -512,7 +626,7 @@ export function createBasescanProvider(): TransactionProvider {
 
         try {
           return await fetchBasescanTransactions(address, limit);
-        } catch (basescanError) {
+        } catch {
           return await fetchBlockscoutTransactions(address, limit);
         }
       })();
@@ -523,6 +637,32 @@ export function createBasescanProvider(): TransactionProvider {
         return await request;
       } finally {
         txRequestCache.delete(cacheKey);
+      }
+    },
+  };
+}
+
+export function createArcProvider(): TransactionProvider {
+  return {
+    async fetchTransactions(query: TransactionQuery): Promise<ChainTransaction[]> {
+      const { address, limit = 20 } = query;
+      if (query.chainId !== arcTestnet.id) {
+        throw new Error('Arc provider requires Arc Testnet');
+      }
+      const cacheKey = `${address.toLowerCase()}:${limit}`;
+      const cached = arcTxRequestCache.get(cacheKey);
+      if (cached) return cached;
+
+      const request = (async (): Promise<ChainTransaction[]> => {
+        await throttleTransactionRequests();
+        return fetchArcTransactions(address, limit);
+      })();
+
+      arcTxRequestCache.set(cacheKey, request);
+      try {
+        return await request;
+      } finally {
+        arcTxRequestCache.delete(cacheKey);
       }
     },
   };
@@ -568,6 +708,7 @@ function getPreferredExplorerBaseUrl(): string {
   return 'https://basescan.org';
 }
 
-export function explorerTxUrl(hash: string): string {
-  return `${getPreferredExplorerBaseUrl()}/tx/${hash}`;
+export function explorerTxUrl(hash: string, chainId?: number): string {
+  const explorerBaseUrl = chainId === arcTestnet.id ? 'https://testnet.arcscan.app' : getPreferredExplorerBaseUrl();
+  return `${explorerBaseUrl}/tx/${hash}`;
 }

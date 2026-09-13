@@ -9,7 +9,7 @@ import {
   useDisconnect,
   useSwitchChain,
 } from "wagmi";
-import { arbitrum, base, mainnet, optimism, polygon } from "wagmi/chains";
+import { arcTestnet, base } from "wagmi/chains";
 import { formatEther, formatUnits, isAddress, parseUnits, type Address } from "viem";
 import { getPortfolioAnalytics, usePortfolio } from "./hooks/usePortfolio";
 import { useApprovals } from "./hooks/useApprovals";
@@ -20,24 +20,20 @@ import { useSwapApproval } from "./hooks/useSwapApproval";
 import { useSwapExecution } from "./hooks/useSwapExecution";
 import { useBridgeTokens } from "./hooks/useBridgeTokens";
 import { useBridgeBalance } from "./hooks/useBridgeBalance";
-import { useBridgeQuote } from "./hooks/useBridgeQuote";
+import { isBridgeReviewable, useBridgeQuote } from "./hooks/useBridgeQuote";
 import { useBridgeApproval } from "./hooks/useBridgeApproval";
 import { useBridgeExecution } from "./hooks/useBridgeExecution";
 import { useBridgeStatus } from "./hooks/useBridgeStatus";
-import { useLendingPositions } from "./hooks/useLendingPositions";
-import { useLendingBalance } from "./hooks/useLendingBalance";
-import { useLendingApproval } from "./hooks/useLendingApproval";
-import { useLendingOperation } from "./hooks/useLendingOperation";
 import { useTransactions } from "./hooks/useTransactions";
 import { useOrbitSettings } from "./hooks/useOrbitSettings";
 import { useWatchlist, type WatchlistItem } from "./hooks/useWatchlist";
 import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type TxStatus } from "./services/transactions";
 import { buildWalletSecurityReport } from "./services/security";
-import { BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
+import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
+import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, getOrbitNetwork } from "./data/networks";
 import { usePrices } from "./hooks/usePrices";
-import { fetchPortfolioHistoricalCandles, PORTFOLIO_PRICES, type PriceAssetConfig } from "./services/prices";
+import { fetchPortfolioHistoricalCandles, PORTFOLIO_PRICES } from "./services/prices";
 import type { BridgeChain } from "./types/bridge";
-import { AAVE_BASE_ASSETS, AAVE_BASE_POOL } from "./services/lending/aave";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Activity,
@@ -46,32 +42,24 @@ import {
   ArrowUpRight,
   Bell,
   BookOpen,
-  Boxes,
   ChevronRight,
   CircleDollarSign,
   Compass,
   Copy,
-  Cpu,
   CreditCard,
   Crosshair,
   ExternalLink,
-  Gauge,
-  Gem,
   Globe2,
   Landmark,
   LayoutDashboard,
   LockKeyhole,
   Menu,
-  Moon,
   MoreHorizontal,
   Network,
-  Plus,
   Radar,
   RefreshCw,
-  ScanLine,
   Search,
   Send,
-  Settings,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -85,11 +73,13 @@ import {
   ChainLogo,
   Label,
   Pill,
-  SelectPill,
   TokenIcon,
 } from "./components/ui";
-import { EarnPage } from "./components/EarnPage";
+import { ArcPayPage } from "./components/ArcPayPage";
+import { ArcSwapPage } from "./components/ArcSwapPage";
+import { UnifiedBalancePage } from "./components/UnifiedBalancePage";
 import { OrbitBrand } from "./components/OrbitBrand";
+import type { ArcPaymentRequest } from "./services/arcPayment";
 import { useDiscover } from "./hooks/useDiscover";
 import { getPreferredConnector, supportedChains } from "./wallet";
 
@@ -101,13 +91,13 @@ type Page =
   | "security"
   | "approvals"
   | "swap"
+  | "unified-balance"
   | "bridge"
-  | "borrow"
   | "discover"
   | "watchlist"
   | "send"
   | "receive"
-  | "earn"
+  | "arc-pay"
   | "about";
 
 function Space({ children }: { children: ReactNode }) {
@@ -221,7 +211,6 @@ function WalletButton({ className = "" }: { className?: string }) {
         onClick={() => disconnect()}
         className={`flex items-center gap-2 rounded-xl border border-emerald-300/20 bg-emerald-300/10 px-3 py-2.5 text-xs font-bold text-emerald-200 transition hover:bg-emerald-300/15 ${className}`}
       >
-        <span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_8px_#6ee7b7]" />
         {shortAddress(address)}
       </button>
     );
@@ -302,25 +291,26 @@ function WalletButton({ className = "" }: { className?: string }) {
 function NetworkWarning() {
   const { chainId, isConnected } = useAccount();
   const { switchChain, isPending } = useSwitchChain();
-  if (!isConnected || chainId === base.id) return null;
+  const isSupportedNetwork = supportedChains.some((chain) => chain.id === chainId);
+  if (!isConnected || isSupportedNetwork) return null;
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-300/15 bg-amber-300/[.06] px-5 py-3 text-xs lg:px-8">
       <div className="flex items-center gap-2 text-amber-200">
         <ShieldCheck size={15} />
         <span>
-          ORBIT is optimized for Base. Your wallet is on an unsupported network.
+            ORBIT requires Arc Testnet. Your wallet is on an unsupported network. Please switch to Arc Testnet.
         </span>
       </div>
       <button
-        onClick={() => switchChain({ chainId: base.id })}
+        onClick={() => switchChain({ chainId: arcTestnet.id })}
         className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-1.5 font-bold text-amber-200 transition hover:bg-amber-300/15"
       >
-        {isPending ? "Switching..." : "Switch to Base"}
+        {isPending ? "Switching..." : "Switch to Arc Testnet"}
       </button>
     </div>
   );
 }
-function WalletBalanceStat() {
+export function WalletBalanceStat() {
   const { address } = useAccount();
   const { data: balance, isLoading } = useBalance({
     address,
@@ -446,10 +436,10 @@ function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (
               className="mt-12 flex flex-wrap items-center gap-8 text-xs text-slate-500"
             >
               <span>
-                <b className="text-white">12,840+</b> wallets secured
+                <b className="text-white">Arc Testnet</b> primary network
               </span>
               <span>
-                <b className="text-white">$2.4B</b> assets tracked
+                <b className="text-white">CCTP V2</b> bridge routes
               </span>
             </motion.div>
           </motion.div>
@@ -477,7 +467,7 @@ function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (
               ],
               [
                 "MOVE",
-                "Swap, bridge and transfer assets.",
+                "Bridge and transfer Arc USDC.",
                 ArrowLeftRight,
                 "violet",
               ],
@@ -543,7 +533,7 @@ function OrbitalVisual() {
       <div className="orbit-ring orbit-ring-inner" />
       <div className="orbit-ring orbit-ring-deep" />
 
-      {nodes.map((n, index) => (
+      {nodes.map((n) => (
         <div
           key={n.t}
           className="orbit-path"
@@ -578,39 +568,33 @@ function OrbitalVisual() {
 
 const navGroups = [
   {
-    title: "Main",
+    title: "CORE",
     items: [
       ["home", "Home", LayoutDashboard],
       ["portfolio", "Portfolio", Wallet],
       ["activity", "Activity", Activity],
-      ["settings", "Settings", Settings],
     ],
   },
   {
-    title: "Actions",
+    title: "ACTIONS",
     items: [
-      ["swap", "Swap", ArrowLeftRight],
-      ["bridge", "Bridge", Network],
       ["send", "Send", Send],
       ["receive", "Receive", ArrowDownLeft],
+      ["arc-pay", "Arc Pay", CreditCard],
+      ["bridge", "Bridge", Network],
+      ["swap", "Swap", ArrowLeftRight],
+      ["unified-balance", "Unified Balance", CircleDollarSign],
     ],
   },
   {
-    title: "DeFi",
-    items: [
-      ["borrow", "Borrow", Landmark],
-      ["earn", "Earn", TrendingUp],
-    ],
-  },
-  {
-    title: "Security",
+    title: "SECURITY",
     items: [
       ["security", "Security Center", ShieldCheck],
       ["approvals", "Approvals & Revoke", LockKeyhole],
     ],
   },
   {
-    title: "Explore",
+    title: "EXPLORE",
     items: [
       ["discover", "Discover", Compass],
       ["watchlist", "Watchlist", Radar],
@@ -618,6 +602,7 @@ const navGroups = [
     ],
   },
 ];
+
 function Sidebar({
   page,
   setPage,
@@ -633,13 +618,17 @@ function Sidebar({
   const { disconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
   const [walletMenuOpen, setWalletMenuOpen] = useState(false);
+  const activeNetwork = supportedChains.find((network) => network.id === chainId);
 
   return (
     <aside
       className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-700/80 bg-slate-950/95 px-4 py-6 shadow-[0_32px_80px_rgba(2,6,23,0.65)] backdrop-blur-xl transition-all duration-300 lg:relative lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
     >
       <div className="flex items-center justify-between px-3">
-        <Logo />
+        <div className="flex items-center gap-3">
+          <Logo />
+          <ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />
+        </div>
         <button
           className="rounded-xl border border-slate-700 bg-slate-900 p-1.5 text-slate-300 lg:hidden"
           onClick={() => setOpen(false)}
@@ -687,7 +676,7 @@ function Sidebar({
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold text-slate-100">{isConnected && address ? shortAddress(address) : "Wallet"}</p>
               <p className="font-mono text-[9px] text-slate-400">
-                {isConnected ? (chainId === base.id ? 'Base Mainnet' : `Chain ${chainId}`) : 'Awaiting wallet'}
+                {isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : 'Awaiting wallet'}
               </p>
             </div>
             <MoreHorizontal size={15} className="text-slate-400" />
@@ -699,16 +688,16 @@ function Sidebar({
                 {isConnected && address ? (
                   <>
                     <p className="break-all font-mono text-[11px] text-slate-200">{address}</p>
-                    <p className="text-[11px] text-slate-400">{chainId === base.id ? 'Base Mainnet connected' : 'Wrong network'}</p>
+                    <p className="text-[11px] text-slate-400">{activeNetwork?.name ?? `Chain ${chainId}`} connected</p>
                     <button
                       type="button"
                       className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-left font-medium text-slate-100 hover:bg-slate-700"
                       onClick={() => {
-                        if (chainId !== base.id) switchChain({ chainId: base.id });
+                        if (chainId !== arcTestnet.id) switchChain({ chainId: arcTestnet.id });
                         setWalletMenuOpen(false);
                       }}
                     >
-                      {chainId === base.id ? 'Base is active' : 'Switch to Base'}
+                      {chainId === arcTestnet.id ? 'Arc Testnet is active' : 'Switch to Arc Testnet'}
                     </button>
                     <button
                       type="button"
@@ -820,7 +809,7 @@ function FloatingPopover({
 function NotificationPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { address, isConnected, chainId } = useAccount();
   const approvals = useApprovals();
-  const txState = useTransactions(address, isConnected && Boolean(address));
+  const txState = useTransactions(address, isConnected && chainId === arcTestnet.id && Boolean(address), chainId);
   const report = buildWalletSecurityReport({
     approvals: approvals.data?.approvals ?? [],
     transactions: txState.transactions ?? [],
@@ -835,8 +824,8 @@ function NotificationPanel({ open, onClose }: { open: boolean; onClose: () => vo
     if (!isConnected) {
       return next;
     }
-    if (chainId !== base.id) {
-      next.push({ title: 'Wrong network', detail: 'Your wallet is not on Base Mainnet. Switch to Base to keep ORBIT in sync.', tone: 'warning' });
+    if (chainId !== arcTestnet.id) {
+      next.push({ title: 'Wrong network', detail: 'Your wallet is not on Arc Testnet. Switch to Arc Testnet to keep ORBIT in sync.', tone: 'warning' });
     }
     if ((approvals.data?.approvals ?? []).length > 0) {
       next.push({
@@ -896,11 +885,7 @@ function NotificationPanel({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 const networkOptions = [
-  { id: base.id, name: "Base", label: "PRIMARY", shortName: "Base" },
-  { id: mainnet.id, name: "Ethereum", label: "NETWORK", shortName: "Ethereum" },
-  { id: arbitrum.id, name: "Arbitrum One", label: "NETWORK", shortName: "Arbitrum" },
-  { id: optimism.id, name: "OP Mainnet", label: "NETWORK", shortName: "Optimism" },
-  { id: polygon.id, name: "Polygon", label: "NETWORK", shortName: "Polygon" },
+  { id: arcTestnet.id, name: "Arc Testnet", label: "NETWORK", shortName: "Arc" },
 ] as const;
 
 function Topbar({ onMenu }: { onMenu: () => void }) {
@@ -908,13 +893,23 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [networkMenuOpen, setNetworkMenuOpen] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  const [requestedChainId, setRequestedChainId] = useState<number | null>(null);
   const networkButtonRef = useRef<HTMLButtonElement | null>(null);
   const notificationButtonRef = useRef<HTMLButtonElement | null>(null);
-  const { switchChain, isPending: isSwitchPending } = useSwitchChain();
+  const { switchChainAsync, isPending: isSwitchPending } = useSwitchChain();
   const { connectors, connect } = useConnect();
   const connector = getPreferredConnector(connectors);
 
-  const activeNetwork = supportedChains.find((item) => item.id === chainId) ?? supportedChains[0];
+  const activeNetwork = supportedChains.find((item) => item.id === chainId);
+  const displayNetwork = activeNetwork ?? supportedChains[0];
+
+  useEffect(() => {
+    if (requestedChainId !== null && chainId === requestedChainId) {
+      setRequestedChainId(null);
+      setSwitchError(null);
+      setNetworkMenuOpen(false);
+    }
+  }, [chainId, requestedChainId]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -933,8 +928,12 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
 
   const handleNetworkSelect = async (nextChainId: number) => {
     if (!isConnected) {
-      if (connector) connect({ connector });
-      setNetworkMenuOpen(false);
+      if (connector) {
+        connect({ connector });
+        setNetworkMenuOpen(false);
+      } else {
+        setSwitchError("No wallet connector is available.");
+      }
       return;
     }
 
@@ -944,10 +943,11 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
     }
 
     setSwitchError(null);
+    setRequestedChainId(nextChainId);
     try {
-      await switchChain({ chainId: nextChainId });
-      setNetworkMenuOpen(false);
+      await switchChainAsync({ chainId: nextChainId });
     } catch (error) {
+      setRequestedChainId(null);
       setSwitchError(error instanceof Error ? error.message : "Failed to switch network.");
     }
   };
@@ -979,8 +979,8 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
             }}
             className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 shadow-sm transition hover:border-sky-400/40 hover:bg-slate-800"
           >
-            <ChainLogo chainId={activeNetwork.id} className="h-4 w-4 text-sky-300" />
-            <span>{isConnected ? (activeNetwork.name ?? "Supported network") : "Network"}</span>
+            <ChainLogo chainId={displayNetwork.id} className="h-4 w-4 text-sky-300" />
+            <span>{isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : "Network"}</span>
             <ChevronRight size={12} className="text-slate-400" />
           </button>
 
@@ -1019,7 +1019,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
                 key={item.id}
                 type="button"
                 onClick={() => void handleNetworkSelect(item.id)}
-                disabled={isSwitchPending || (!isConnected && item.id !== activeNetwork.id)}
+                disabled={isSwitchPending || (!isConnected && item.id !== displayNetwork.id)}
                 className={`flex w-full items-center justify-between gap-2 rounded-xl border px-2.5 py-2 text-left transition ${selected ? "border-sky-400/30 bg-sky-500/10 text-white" : "border-slate-700 bg-slate-900/70 text-slate-200 hover:border-sky-400/30 hover:bg-slate-800"}`}
               >
                 <div className="flex items-center gap-2.5">
@@ -1028,7 +1028,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
                   </div>
                   <div>
                     <div className="text-xs font-semibold">{item.name}</div>
-                    <div className="text-[9px] uppercase tracking-[0.12em] text-slate-500">{item.id === base.id ? "Primary" : "Network"}</div>
+                    <div className="text-[9px] uppercase tracking-[0.12em] text-slate-500">Network</div>
                   </div>
                 </div>
                 {selected && <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />}
@@ -1054,7 +1054,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
   );
 }
 
-function NetworkIcon({ chainId, className = "" }: { chainId: number; className?: string }) {
+export function NetworkIcon({ chainId, className = "" }: { chainId: number; className?: string }) {
   return <ChainLogo chainId={chainId} className={`h-4 w-4 ${className}`} />;
 }
 
@@ -1245,8 +1245,9 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
 function StatCards() {
   const { address, isConnected, chainId } = useAccount();
   const portfolio = usePortfolio();
+  const isArcTestnet = chainId === arcTestnet.id;
   const approvalsQuery = useApprovals();
-  const transactionsQuery = useTransactions(address, isConnected && Boolean(address));
+  const transactionsQuery = useTransactions(address, isConnected && chainId === arcTestnet.id && Boolean(address), chainId);
   const approvals = approvalsQuery.data?.approvals ?? [];
   const report = buildWalletSecurityReport({
     approvals,
@@ -1256,16 +1257,16 @@ function StatCards() {
     chainId,
     walletAddress: address,
   });
-  const ethAsset = portfolio.assets.find((asset) => asset.symbol === "ETH") ?? portfolio.assets[0];
+  const displayAsset = portfolio.assets.find((asset) => asset.symbol === (isArcTestnet ? "USDC" : "ETH")) ?? portfolio.assets[0];
   const heldAssets = portfolio.assets.filter((asset) => asset.valueUsd !== null && asset.valueUsd > 0 && asset.raw > 0n);
   const scoreColor = report.score >= 85 ? "green" : report.score >= 60 ? "amber" : "red";
-  const nativeEthError = !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && ethAsset.isError && ethAsset.raw === 0n;
+  const displayAssetError = !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && displayAsset?.isError && displayAsset.raw === 0n;
 
   return (
     <div className="grid gap-4 md:grid-cols-3">
       <Card className="p-5" glow>
         <div className="flex items-center justify-between">
-          <Label>Native ETH Balance</Label>
+          <Label>Arc USDC Balance</Label>
           <span className="rounded-xl bg-sky-100 p-2 text-sky-700 ring-1 ring-sky-200">
             <Wallet size={16} />
           </span>
@@ -1276,10 +1277,10 @@ function StatCards() {
               Connect wallet
             </p>
             <p className="mt-2 text-xs text-slate-500">
-              Live Base balance appears here
+              Live Arc ERC-20 balance appears here
             </p>
           </>
-        ) : ethAsset.isLoading ? (
+        ) : displayAsset?.isLoading ? (
           <>
             <p className="mt-5 h-7 w-32 animate-pulse rounded bg-white/10" />
             <p className="mt-2 h-3 w-24 animate-pulse rounded bg-white/10" />
@@ -1287,23 +1288,27 @@ function StatCards() {
         ) : (
           <>
             <p className="mt-5 text-3xl font-extrabold tracking-[-0.06em]">
-              {Number(ethAsset.formatted).toFixed(4)}{" "}
-              <span className="text-xl text-slate-500">ETH</span>
+              {displayAsset?.isError ? "Unavailable" : displayAsset?.formatted ?? "0"}{" "}
+              <span className="text-xl text-slate-500">{isArcTestnet ? "USDC" : "ETH"}</span>
             </p>
             <p className="mt-2 text-xs font-semibold text-cyan-300">
               Live balance{" "}
-              <span className="font-normal text-slate-500">on Base</span>
+              <span className="font-normal text-slate-500">on Arc Testnet</span>
             </p>
           </>
         )}
-        {portfolio.isWrongNetwork && (
-          <p className="mt-2 text-xs text-amber-300">
-            Wrong network — switch to Base
+        {isArcTestnet ? (
+          <p className="mt-2 text-xs text-cyan-300">
+            Arc Testnet connected. USDC is read through its ERC-20 interface.
           </p>
-        )}
-        {nativeEthError && (
+        ) : portfolio.isWrongNetwork ? (
+          <p className="mt-2 text-xs text-amber-300">
+            Wrong network — switch to Arc Testnet
+          </p>
+        ) : null}
+        {displayAssetError && (
           <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-rose-400/20 bg-rose-500/5 p-2.5">
-            <p className="text-[11px] text-rose-200">Base RPC temporarily unavailable.</p>
+            <p className="text-[11px] text-rose-200">Arc USDC balance could not be read.</p>
             <button
               type="button"
               onClick={() => window.location.reload()}
@@ -1362,7 +1367,7 @@ function StatCards() {
         </div>
         <div className="mt-4 space-y-2">
           {heldAssets.length === 0 ? (
-            <p className="text-xs text-slate-500">No asset balances are currently detected on Base.</p>
+            <p className="text-xs text-slate-500">No Arc asset balances are currently detected.</p>
           ) : (
             heldAssets.map((asset) => (
               <div key={asset.symbol} className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/40 px-2.5 py-2">
@@ -1414,12 +1419,9 @@ function StatCards() {
 }
 function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
   const items = [
-    ["Swap", "Trade assets instantly", ArrowLeftRight, "swap"],
     ["Bridge", "Move across networks", Network, "bridge"],
     ["Send", "Transfer to any wallet", Send, "send"],
     ["Receive", "Fund your wallet", ArrowDownLeft, "receive"],
-    ["Borrow", "Unlock your liquidity", Landmark, "borrow"],
-    ["Earn", "Grow idle capital", TrendingUp, "earn"],
   ];
   return (
     <motion.div
@@ -1481,14 +1483,14 @@ function txIcon(cat: string) {
   }
 }
 
-function formatTxValue(value: string | number | undefined, fallback = '—') {
+function formatTxValue(value: string | number | undefined, symbol = 'ETH', fallback = '—') {
   if (value === undefined || value === null || value === '') return fallback;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return fallback;
-  if (numeric === 0) return '0 ETH';
+  if (numeric === 0) return `0 ${symbol}`;
   const precision = numeric >= 1 ? 4 : 6;
   const trimmed = numeric.toFixed(precision).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
-  return `${trimmed} ETH`;
+  return `${trimmed} ${symbol}`;
 }
 
 function getStatusLabel(status: TxStatus): string {
@@ -1518,10 +1520,11 @@ function getStatusClasses(status: TxStatus): string {
 }
 
 function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { transactions, isLoading, isError } = useTransactions(
     address,
-    isConnected,
+    isConnected && chainId === arcTestnet.id,
+    chainId,
   );
   return (
     <Card className="p-5">
@@ -1540,6 +1543,10 @@ function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
       {!isConnected ? (
         <p className="mt-5 py-6 text-center text-xs text-slate-500">
           Connect wallet to view onchain activity
+        </p>
+      ) : chainId === arcTestnet.id ? (
+        <p className="mt-5 py-6 text-center text-xs text-slate-500">
+          Arc transaction history is not part of this portfolio step.
         </p>
       ) : isLoading ? (
         <div className="mt-5 space-y-3">
@@ -1576,7 +1583,7 @@ function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
                 <div className="min-w-0 flex-1">
                   <p className="text-xs font-bold">{tx.category}</p>
                   <a
-                    href={explorerTxUrl(tx.hash)}
+                    href={explorerTxUrl(tx.hash, chainId)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="mt-0.5 block truncate text-[10px] text-cyan-400 hover:text-cyan-300"
@@ -1586,7 +1593,7 @@ function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
                 </div>
                 <div className="text-right">
                   <p className="font-mono text-xs text-slate-300">
-                    {tx.value !== "0.000000" ? `${tx.value} ETH` : "—"}
+                    {tx.value !== "0.000000" ? `${tx.value} ${tx.nativeSymbol ?? "ETH"}` : "—"}
                   </p>
                   <p className="mt-1 text-[9px] text-slate-600">
                     {getTimeAgo(tx.timestamp)}
@@ -1604,7 +1611,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const portfolio = usePortfolio();
   const { address, isConnected, chainId } = useAccount();
   const approvalsQuery = useApprovals();
-  const transactionsQuery = useTransactions(address, isConnected && Boolean(address));
+  const transactionsQuery = useTransactions(address, isConnected && chainId === arcTestnet.id && Boolean(address), chainId);
   const discover = useDiscover();
   const watchlist = useWatchlist();
   const approvalCount = approvalsQuery.data?.approvals.filter((approval) => approval.isUnlimited || approval.risk === "High" || approval.risk === "Medium").length ?? 0;
@@ -1624,9 +1631,11 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const value = portfolio.isDisconnected
     ? "Connect wallet"
     : portfolio.isWrongNetwork
-      ? "Switch to Base"
+      ? "Switch to Arc Testnet"
       : portfolio.isLoading
         ? "Loading..."
+          : portfolio.isError
+            ? "Balance unavailable"
         : hasRealPortfolioValue
           ? `$${portfolio.totalValueUsd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
           : portfolio.hasUnavailablePrices
@@ -1635,11 +1644,13 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const valueDetail = portfolio.isDisconnected
     ? 'Awaiting wallet connection'
     : portfolio.isWrongNetwork
-      ? `Your wallet is on ${networkLabel}. Switch to Base to view your ORBIT portfolio.`
+      ? `Your wallet is on ${networkLabel}. Switch to Arc Testnet to view your ORBIT portfolio.`
       : portfolio.isLoading
         ? 'Loading portfolio balance'
+          : portfolio.isError
+            ? 'Live balance read failed'
         : hasRealPortfolioValue
-          ? 'Current net worth on Base'
+          ? 'Current Arc USDC value'
           : portfolio.hasUnavailablePrices
             ? 'Partial pricing data is unavailable for some holdings'
             : 'No wallet balances are currently detected';
@@ -1782,7 +1793,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                   <Label>{tile.label}</Label>
                   <div className="mt-3">
                     <p className="text-2xl font-extrabold tracking-[-0.06em]">{tile.value}</p>
-                    <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{tile.label === 'Opportunity feed' ? 'live Base pools' : tile.label === 'Watchlist' ? 'tracked items' : 'wallet score'}</p>
+                    <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{tile.label === 'Opportunity feed' ? 'live Arc opportunities' : tile.label === 'Watchlist' ? 'tracked items' : 'wallet score'}</p>
                   </div>
                 </div>
                 <Pill color={tile.tone as 'green' | 'amber' | 'red' | 'cyan' | 'purple'}>{tile.badge}</Pill>
@@ -1797,11 +1808,14 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
 }
 
 function Portfolio() {
-  const { address, isConnected } = useAccount();
+  const { address, chainId } = useAccount();
   const portfolio = usePortfolio();
-  const { refetch: refetchPrices } = usePrices(PORTFOLIO_PRICES);
-  const transactionsQuery = useTransactions(address, isConnected && Boolean(address));
-  const analytics = getPortfolioAnalytics(portfolio.assets, transactionsQuery.transactions);
+  const isArcTestnet = chainId === arcTestnet.id;
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const portfolioNetwork = isArcTestnet ? 'Arc Testnet' : 'unsupported network';
+  const transactionsQuery = useTransactions(address, false, chainId);
+  const analytics = getPortfolioAnalytics(portfolio.assets, isArcTestnet ? [] : transactionsQuery.transactions, portfolioNetwork);
 
   const formatUsd = (value: number | null, fallback = 'N/A') =>
     value === null || !Number.isFinite(value) ? fallback : `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -1812,41 +1826,56 @@ function Portfolio() {
     : portfolio.isLoading
       ? 'Loading...'
       : portfolio.isWrongNetwork
-        ? 'Switch to Base'
+        ? 'Switch to Arc Testnet'
+        : portfolio.isError
+          ? 'Balance unavailable'
         : hasLivePortfolioValue
           ? formatUsd(portfolio.totalValueUsd, '$0.00')
           : portfolio.hasUnavailablePrices
             ? 'Price data unavailable'
-            : portfolio.isError
-              ? 'Price data unavailable'
-              : 'No balances';
+            : 'No balances';
 
   const allocationSegments = analytics.allocation
     .filter((asset: { valueUsd: number; allocationPercent: number }) => asset.valueUsd > 0 && asset.allocationPercent > 0)
     .map((asset: { color: string; allocationPercent: number; valueUsd: number }) => `${asset.color} ${asset.allocationPercent}%`)
     .join(', ');
 
-  const portfolioHealthy = !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && !portfolio.isError && !analytics.zeroBalance;
-
   return (
     <div className="space-y-6">
       <PageTitle
-        label="Manage / Portfolio"
+        label={`Manage / Portfolio / ${portfolioNetwork}`}
         title="Your assets, in focus."
         action={
           <Button
             variant="secondary"
             onClick={() => {
-              void refetchPrices();
-              void transactionsQuery.refetch();
+              if (isRefreshing) return;
+              const startedAt = Date.now();
+              setIsRefreshing(true);
+              setRefreshError(null);
+              void portfolio.refetch()
+                .catch((error: unknown) => {
+                  setRefreshError(error instanceof Error ? error.message : 'Portfolio refresh failed.');
+                })
+                .finally(() => {
+                  const remainingFeedbackMs = Math.max(0, 350 - (Date.now() - startedAt));
+                  window.setTimeout(() => setIsRefreshing(false), remainingFeedbackMs);
+                });
             }}
+            disabled={isRefreshing}
             className="gap-2"
           >
-            <RefreshCw size={14} />
-            Refresh
+            <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
+            {isRefreshing ? 'Refreshing...' : 'Refresh'}
           </Button>
         }
       />
+      {refreshError && (
+        <Card className="flex items-center gap-3 p-4 text-sm text-rose-200">
+          <ShieldCheck size={16} />
+          {refreshError}
+        </Card>
+      )}
       {portfolio.isDisconnected && (
         <Card className="flex items-center gap-3 p-4 text-sm text-slate-400">
           <Wallet size={16} className="text-cyan-300" />
@@ -1856,7 +1885,7 @@ function Portfolio() {
       {portfolio.isWrongNetwork && (
         <Card className="flex items-center gap-3 p-4 text-sm text-amber-300">
           <ShieldCheck size={16} />
-          Switch to Base network to view your portfolio.
+          Switch to Arc Testnet to view your portfolio.
         </Card>
       )}
       {portfolio.hasUnavailablePrices && !portfolio.isLoading && (
@@ -1865,10 +1894,16 @@ function Portfolio() {
           Some asset prices are unavailable. Values shown below may be incomplete.
         </Card>
       )}
+      {portfolio.isError && !portfolio.isLoading && !portfolio.isDisconnected && !portfolio.isWrongNetwork && (
+        <Card className="flex items-center gap-3 p-4 text-sm text-rose-200">
+          <ShieldCheck size={16} />
+          The live {portfolioNetwork} balance could not be read. Try refreshing.
+        </Card>
+      )}
       {analytics.zeroBalance && !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && !portfolio.isError && (
         <Card className="flex items-center gap-3 p-4 text-sm text-slate-300">
           <Wallet size={16} className="text-cyan-300" />
-          No ETH, USDC or cbBTC balance is currently detected on Base for this wallet.
+          No supported asset balance is currently detected on {portfolioNetwork} for this wallet.
         </Card>
       )}
       <div className="grid gap-4 lg:grid-cols-[1.35fr_1fr]">
@@ -1897,7 +1932,7 @@ function Portfolio() {
           <div className="mt-5 flex flex-wrap gap-3 text-xs">
             {[
               ['Largest position', analytics.topAsset ? `${analytics.topAsset.symbol} • ${analytics.topAsset.allocationPercent.toFixed(1)}%` : 'N/A'],
-              ['ETH + cbBTC', `${analytics.volatileExposurePercent.toFixed(1)}%`],
+              ['Volatile exposure', `${analytics.volatileExposurePercent.toFixed(1)}%`],
               ['Stablecoin', `${analytics.stablecoinExposurePercent.toFixed(1)}%`],
             ].map(([label, valueText]) => (
               <div key={label} className="data-card rounded-xl px-3 py-2">
@@ -1907,7 +1942,7 @@ function Portfolio() {
             ))}
           </div>
           <div className="mt-5 rounded-2xl border border-dashed border-slate-700/80 bg-slate-950/40 p-4">
-            <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-500">Current snapshot</p>
+                <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-500">{portfolioNetwork} snapshot</p>
             <p className="mt-2 text-sm text-slate-300">
               {analytics.history.available
                 ? 'Historical portfolio snapshots are available for this wallet.'
@@ -1949,8 +1984,8 @@ function Portfolio() {
             {[
               ['Current value', formatUsd(portfolio.totalValueUsd, 'N/A')],
               ['Top allocation', analytics.topAsset ? `${analytics.topAsset.allocationPercent.toFixed(1)}%` : '0.0%'],
-              ['ETH exposure', `${analytics.ethExposurePercent.toFixed(1)}%`],
-              ['cbBTC exposure', `${analytics.btcExposurePercent.toFixed(1)}%`],
+              ['USDC exposure', `${analytics.stablecoinExposurePercent.toFixed(1)}%`],
+              ['Volatile exposure', `${analytics.volatileExposurePercent.toFixed(1)}%`],
             ].map(([label, metric]) => (
               <div key={label} className="data-card rounded-xl p-3">
                 <p className="font-mono text-[9px] uppercase tracking-[0.15em] text-slate-500">{label}</p>
@@ -2021,7 +2056,7 @@ function Portfolio() {
             </div>
           ) : (
             <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/30 p-4 text-sm text-slate-400">
-              No recent wallet signals were found for this account on Base.
+              {isArcTestnet ? 'Arc transaction history is not part of this portfolio step.' : `No recent wallet signals were found for this account on ${portfolioNetwork}.`}
             </div>
           )}
         </div>
@@ -2062,8 +2097,10 @@ function Portfolio() {
                   <td className="px-5 py-4 font-mono text-slate-300">
                     {a.isLoading ? (
                       <span className="inline-block h-4 w-16 animate-pulse rounded bg-white/10" />
+                    ) : a.isError ? (
+                      'Unavailable'
                     ) : a.raw > 0n ? (
-                      Number(a.formatted).toLocaleString(undefined, { maximumFractionDigits: 6 })
+                      a.formatted
                     ) : (
                       '0.000000'
                     )}
@@ -2109,7 +2146,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
   const { address, isConnected, chainId } = useAccount();
   const portfolio = usePortfolio();
   const approvalsQuery = useApprovals();
-  const transactionsQuery = useTransactions(address, isConnected && Boolean(address));
+  const transactionsQuery = useTransactions(address, isConnected && chainId === arcTestnet.id && Boolean(address), chainId);
   const approvals = approvalsQuery.data?.approvals ?? [];
   const transactions = transactionsQuery.transactions ?? [];
   const report = buildWalletSecurityReport({
@@ -2122,7 +2159,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
   });
   const isLoading = approvalsQuery.isLoading || transactionsQuery.isLoading || portfolio.isLoading;
   const isError = approvalsQuery.isError || transactionsQuery.isError || portfolio.isError;
-  const walletStatus = !isConnected ? 'No wallet connected' : chainId !== base.id ? 'Wrong network' : 'Monitoring';
+  const walletStatus = !isConnected ? 'No wallet connected' : chainId !== arcTestnet.id ? 'Unsupported network' : 'Monitoring Arc';
   const scoreColor = report.score >= 85 ? 'green' : report.score >= 60 ? 'amber' : 'red';
 
   return (
@@ -2144,21 +2181,21 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
             <div className="rounded-lg bg-amber-400/10 p-2 text-amber-300"><Wallet size={18} /></div>
             <div>
               <p className="font-bold text-slate-200">Connect a wallet</p>
-              <p className="mt-1">ORBIT security analysis runs on connected wallet data from Base.</p>
+              <p className="mt-1">ORBIT security analysis runs on connected Arc Testnet wallet data.</p>
             </div>
           </div>
         </Card>
       )}
 
-      {isConnected && chainId !== base.id && (
+      {isConnected && chainId !== arcTestnet.id && (
         <Card className="border border-amber-300/20 bg-amber-300/[.06] p-4 text-sm text-amber-200" glow>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <ShieldCheck size={18} />
-              <span>Wallet is connected, but the active chain is not Base Mainnet.</span>
+              <span>Wallet is connected on an unsupported chain. Arc security monitoring requires Arc Testnet.</span>
             </div>
             <Button variant="secondary" onClick={() => setPage('home')}>
-              Switch to Base
+              Switch to Arc Testnet
             </Button>
           </div>
         </Card>
@@ -2175,7 +2212,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
       ) : isError ? (
         <Card className="p-6 text-sm text-rose-200" glow>
           <p className="font-bold">Wallet security data could not be loaded.</p>
-          <p className="mt-2 text-rose-100/80">One or more Base read sources failed. Try refreshing shortly.</p>
+          <p className="mt-2 text-rose-100/80">One or more Arc read sources failed. Try refreshing shortly.</p>
         </Card>
       ) : (
         <>
@@ -2213,7 +2250,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
               </div>
               <div className="mt-5 space-y-3 text-xs">
                 {report.factors.length === 0 ? (
-                  <p className="text-slate-300">No active wallet security factors were detected in the current Base data.</p>
+                  <p className="text-slate-300">No active wallet security factors were detected in the current Arc data.</p>
                 ) : report.factors.map((factor: { label: string; severity: 'neutral' | 'warning' | 'critical'; detail: string }) => (
                   <div key={factor.label} className="rounded-xl border border-white/10 bg-white/[.02] p-3">
                     <div className="flex items-center justify-between gap-2">
@@ -2255,7 +2292,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
                 <Pill color={report.approvalAlerts.length > 0 ? 'amber' : 'green'}>{report.approvalAlerts.length} alert{report.approvalAlerts.length === 1 ? '' : 's'}</Pill>
               </div>
               {report.approvalAlerts.length === 0 ? (
-                <p className="text-sm text-slate-400">No risky approvals were detected for the configured Base token set.</p>
+                <p className="text-sm text-slate-400">No risky approvals were detected for the configured Arc token set.</p>
               ) : (
                 <div className="space-y-3">
                   {report.approvalAlerts.map((approval: { id: string; token: { symbol: string }; spenderAddress: string; isUnlimited: boolean; risk: 'High' | 'Medium' | 'Low' | 'Unknown'; allowanceFormatted: string }) => (
@@ -2297,7 +2334,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
                 </div>
               </div>
               <p className="mt-4 text-xs leading-5 text-slate-500">
-                These are risk signals based on observable Base activity, not definitive fraud claims.
+                These are risk signals based on observable Arc activity, not definitive fraud claims.
               </p>
             </Card>
           </div>
@@ -2346,27 +2383,27 @@ function Approvals() {
           <div>
             <Label>Approval scanner</Label>
             <p className="mt-2 text-sm text-slate-400">
-              {approvals.length} detected approvals for configured Base tokens.
+              {approvals.length} detected approvals for configured Arc tokens.
             </p>
           </div>
           <Pill color="amber">{approvals.filter((approval) => approval.risk === "High" || approval.risk === "Medium").length} ACTIONS NEEDED</Pill>
         </div>
         {status === "success" && transactionHash && (
           <p className="border-b border-white/[.06] px-5 py-3 text-xs text-emerald-300">
-            Approval revoked. <a href={explorerTxUrl(transactionHash)} target="_blank" rel="noopener noreferrer" className="underline">View on BaseScan</a>
+            Approval revoked. <a href={explorerTxUrl(transactionHash)} target="_blank" rel="noopener noreferrer" className="underline">View on ArcScan</a>
           </p>
         )}
         {status === "error" && error && <p className="border-b border-white/[.06] px-5 py-3 text-xs text-rose-300">{error.message}</p>}
         {!isConnected ? (
           <p className="p-12 text-center text-xs text-slate-500">Connect your wallet to scan token approvals.</p>
-        ) : chainId !== base.id ? (
-          <p className="p-12 text-center text-xs text-amber-300">Switch to Base to scan token approvals.</p>
+        ) : chainId !== arcTestnet.id ? (
+          <p className="p-12 text-center text-xs text-amber-300">Switch to Arc Testnet to view Arc approvals.</p>
         ) : approvalsQuery.isLoading ? (
-          <p className="p-12 text-center text-xs text-slate-500">Scanning configured Base tokens...</p>
+          <p className="p-12 text-center text-xs text-slate-500">Loading Arc approval availability...</p>
         ) : approvalsQuery.isError ? (
           <p className="p-12 text-center text-xs text-rose-300">Unable to scan approvals. Try refreshing.</p>
         ) : approvals.length === 0 ? (
-          <p className="p-12 text-center text-xs text-slate-500">No active approvals detected for the configured Base tokens.</p>
+          <p className="p-12 text-center text-xs text-slate-400">Arc approval scanning is not available yet.</p>
         ) : <div className="overflow-x-auto">
           <table className="w-full min-w-[700px] text-left">
             <thead className="border-b border-white/[.06] font-mono text-[9px] uppercase tracking-widest text-slate-600">
@@ -2436,7 +2473,7 @@ function formatPercent(label: number | null | undefined): string {
   return `${label.toFixed(2)}%`;
 }
 
-function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
+export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const isSwap = type === "swap";
   const isBridge = type === "bridge";
   const { address, isConnected, chainId } = useAccount();
@@ -2461,53 +2498,37 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
   const quoteFresh = Boolean(quote && Date.now() - quote.quotedAt <= 15_000);
   const minimumReceived = quoteFresh ? calculateMinimumReceived(quote?.amountOut ?? null, slippageBps) : null;
   const swapReady = Boolean(isConnected && chainId === base.id && quote && quoteFresh && quote.amountIn === rawSwapAmount && swapAmountValid && !swapAmountError && !swapApproval.isApprovalRequired && !swapApproval.isLoading);
-  const bridgeChains: BridgeChain[] = [{ id: 8453, name: "Base" }, { id: 1, name: "Ethereum" }, { id: 42161, name: "Arbitrum" }, { id: 10, name: "Optimism" }];
-  const [bridgeFromChainId, setBridgeFromChainId] = useState(8453);
-  const [bridgeToChainId, setBridgeToChainId] = useState(1);
-  const [bridgeSymbol, setBridgeSymbol] = useState("ETH");
+  const allBridgeNetworks: BridgeChain[] = ORBIT_NETWORKS.map((network) => ({ id: network.id, name: network.name }));
+  const [bridgeFromChainId, setBridgeFromChainId] = useState(ARC_PRIMARY_NETWORK.id); // Bidirectional: any supported network can be source
+  const [bridgeToChainId, setBridgeToChainId] = useState(CCTP_BRIDGE_NETWORKS.find((network) => network.id !== ARC_PRIMARY_NETWORK.id)?.id ?? ARC_PRIMARY_NETWORK.id);
+  const bridgeSymbol = "USDC";
   const [bridgeAmount, setBridgeAmount] = useState("");
   const [bridgeSlippage, setBridgeSlippage] = useState(0.005);
   const [showBridgeConfirmation, setShowBridgeConfirmation] = useState(false);
-  const bridgeFromChain = bridgeChains.find((chain) => chain.id === bridgeFromChainId) ?? bridgeChains[0];
-  const bridgeToChain = bridgeChains.find((chain) => chain.id === bridgeToChainId) ?? bridgeChains[1];
+  const bridgeFromChain: BridgeChain = { id: bridgeFromChainId, name: getOrbitNetwork(bridgeFromChainId)?.name ?? "Unknown" };
+  const bridgeToChain: BridgeChain = { id: bridgeToChainId, name: getOrbitNetwork(bridgeToChainId)?.name ?? "Unknown" };
+  const bridgeSameNetwork = bridgeFromChainId === bridgeToChainId; // Prevent same-network bridging
   const bridgeTokensQuery = useBridgeTokens();
   const bridgeFromToken = bridgeTokensQuery.tokens.find((token) => token.chainId === bridgeFromChainId && token.symbol === bridgeSymbol);
   const bridgeToToken = bridgeTokensQuery.tokens.find((token) => token.chainId === bridgeToChainId && token.symbol === bridgeSymbol);
   let rawBridgeAmount: bigint | null = null;
   try { rawBridgeAmount = bridgeAmount && bridgeFromToken ? parseUnits(bridgeAmount, bridgeFromToken.decimals) : null; } catch { rawBridgeAmount = null; }
   const bridgeBalance = useBridgeBalance(bridgeFromToken, address, isConnected);
-  const bridgeAmountError = bridgeAmount && rawBridgeAmount === null ? "Invalid amount" : rawBridgeAmount !== null && rawBridgeAmount <= 0n ? "Amount must be greater than zero" : rawBridgeAmount !== null && rawBridgeAmount > bridgeBalance.raw ? "Insufficient balance" : null;
-  const bridgeQuoteState = useBridgeQuote(bridgeFromChain, bridgeToChain, bridgeFromToken, bridgeToToken, isBridge && rawBridgeAmount && rawBridgeAmount > 0n && !bridgeAmountError ? rawBridgeAmount : null, address, bridgeSlippage);
+  const bridgeAmountError = bridgeAmount && rawBridgeAmount === null ? "Invalid amount" : rawBridgeAmount !== null && rawBridgeAmount <= 0n ? "Amount must be greater than zero" : rawBridgeAmount !== null && !bridgeBalance.isWrongNetwork && rawBridgeAmount > bridgeBalance.raw ? "Insufficient balance" : null;
+  const bridgeQuoteState = useBridgeQuote(bridgeFromChain, bridgeToChain, bridgeFromToken, bridgeToToken, isBridge && rawBridgeAmount && rawBridgeAmount > 0n && !bridgeAmountError && !bridgeSameNetwork ? rawBridgeAmount : null, address, bridgeSlippage);
   const bridgeApproval = useBridgeApproval(bridgeFromToken, address, bridgeQuoteState.quote?.transactionTarget ?? null, rawBridgeAmount);
   const bridgeExecution = useBridgeExecution(bridgeQuoteState.quote);
   const bridgeStatus = useBridgeStatus(bridgeQuoteState.quote, bridgeExecution.sourceHash?.toString(), bridgeExecution.status === "source-confirmed" || bridgeExecution.status === "bridging" || Boolean(bridgeExecution.sourceHash));
   const bridgeWrongNetwork = isConnected && chainId !== bridgeFromChainId;
-  const bridgeReady = Boolean(isConnected && !bridgeWrongNetwork && bridgeFromToken && bridgeToToken && bridgeQuoteState.quote && rawBridgeAmount && !bridgeAmountError && !bridgeApproval.required && Date.now() - (bridgeQuoteState.quote?.quotedAt ?? 0) <= 30_000);
-  const lending = useLendingPositions(!isSwap && !isBridge);
-  const [lendingSymbol, setLendingSymbol] = useState<'USDC' | 'WETH'>('USDC');
-  const [lendingAmount, setLendingAmount] = useState('');
-  const [lendingOperation, setLendingOperation] = useState<'supply' | 'withdraw' | 'borrow' | 'repay'>('supply');
-  const [showLendingConfirmation, setShowLendingConfirmation] = useState(false);
-  const lendingAsset = AAVE_BASE_ASSETS.find((asset) => asset.symbol === lendingSymbol) ?? AAVE_BASE_ASSETS[0];
-  const lendingPosition = lending.position;
-  const lendingAssetPosition = lendingPosition?.assets.find((asset) => asset.symbol === lendingSymbol);
-  const lendingBalance = useLendingBalance(lendingAsset, address, !isSwap && !isBridge);
-  let rawLendingAmount: bigint | null = null;
-  try { rawLendingAmount = lendingAmount ? parseUnits(lendingAmount, lendingAsset.decimals) : null; } catch { rawLendingAmount = null; }
-  const lendingApproval = useLendingApproval(lendingAsset, rawLendingAmount, !isSwap && !isBridge && lendingOperation === 'supply');
-  const lendingAction = useLendingOperation(lendingOperation, lendingAsset, rawLendingAmount, lendingPosition);
-  const lendingAmountError = lendingAmount && rawLendingAmount === null ? 'Invalid amount' : rawLendingAmount !== null && rawLendingAmount <= 0n ? 'Amount must be greater than zero' : rawLendingAmount !== null && lendingOperation === 'supply' && rawLendingAmount > lendingBalance.raw ? 'Insufficient wallet balance' : rawLendingAmount !== null && lendingAssetPosition && (lendingOperation === 'withdraw' && rawLendingAmount > lendingAssetPosition.supplied || lendingOperation === 'repay' && rawLendingAmount > lendingAssetPosition.borrowed) ? `Amount exceeds current ${lendingOperation} position` : null;
-  const lendingReady = Boolean(isConnected && chainId === base.id && lendingPosition && rawLendingAmount && !lendingAmountError && !lendingApproval.required && !lending.isLoading && (lendingOperation !== 'borrow' || Boolean(lendingAssetPosition?.priceBase)));
+  const bridgeReady = isBridgeReviewable({ isConnected, wrongNetwork: bridgeWrongNetwork, sameNetwork: bridgeSameNetwork, hasSourceToken: Boolean(bridgeFromToken), hasDestinationToken: Boolean(bridgeToToken), hasQuote: Boolean(bridgeQuoteState.quote), hasAmount: Boolean(rawBridgeAmount), hasAmountError: Boolean(bridgeAmountError), approvalRequired: bridgeApproval.required, simulationSucceeded: bridgeQuoteState.simulationSucceeded, isSimulating: bridgeQuoteState.isSimulating, quoteFresh: Date.now() - (bridgeQuoteState.quote?.quotedAt ?? 0) <= 30_000 });
   return (
     <div className="mx-auto max-w-5xl space-y-8">
       <PageTitle
-        label={`${isSwap ? "Move / Swap" : isBridge ? "Move / Bridge" : "DeFi / Borrow"}`}
+        label={`${isSwap ? "Move / Swap" : "Move / Bridge"}`}
         title={
           isSwap
             ? "Move with confidence."
-            : isBridge
-              ? "Cross-chain, simplified."
-              : "Unlock your liquidity."
+            : "Cross-chain, simplified."
         }
       />
       <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
@@ -2568,51 +2589,37 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
                   <Label>From</Label>
-                  <select value={bridgeFromChainId} onChange={(event) => { const next = Number(event.target.value); if (next !== bridgeToChainId) { setBridgeFromChainId(next); setBridgeAmount(""); } }} disabled={bridgeExecution.status === "source-pending"} className="mt-3 w-full bg-transparent font-bold text-white outline-none">{bridgeChains.map((chain) => <option key={chain.id} value={chain.id} className="bg-[#101725]">{chain.name}</option>)}</select>
+                  <div className="mt-3 flex items-center gap-2 text-xs text-slate-400"><ChainLogo chainId={bridgeFromChainId} className="h-5 w-5" />{bridgeFromChain.name}</div>
+                  <BridgeNetworkPicker label="Bridge source network" value={bridgeFromChainId} options={allBridgeNetworks.filter((chain) => chain.id !== bridgeToChainId)} onChange={setBridgeFromChainId} disabled={bridgeExecution.status === "source-pending"} />
                 </div>
                 <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
                   <Label>To</Label>
-                  <select value={bridgeToChainId} onChange={(event) => { const next = Number(event.target.value); if (next !== bridgeFromChainId) setBridgeToChainId(next); }} disabled={bridgeExecution.status === "source-pending"} className="mt-3 w-full bg-transparent font-bold text-white outline-none">{bridgeChains.filter((chain) => chain.id !== bridgeFromChainId).map((chain) => <option key={chain.id} value={chain.id} className="bg-[#101725]">{chain.name}</option>)}</select>
+                  <div className="mt-3 flex items-center gap-2 text-xs text-slate-400"><ChainLogo chainId={bridgeToChainId} className="h-5 w-5" />{bridgeToChain.name}</div>
+                  <BridgeNetworkPicker label="Bridge destination network" value={bridgeToChainId} options={allBridgeNetworks.filter((chain) => chain.id !== bridgeFromChainId)} onChange={setBridgeToChainId} disabled={bridgeExecution.status === "source-pending"} />
                 </div>
               </div>
+              {bridgeSameNetwork && <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Source and destination networks must be different.</span></div>}
               {bridgeWrongNetwork && <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Wrong network. Switch to {bridgeFromChain.name} before bridging.</span><Button variant="secondary" onClick={() => switchChain({ chainId: bridgeFromChainId })}>Switch to {bridgeFromChain.name}</Button></div>}
               <div className="mt-4 rounded-xl border border-white/10 bg-white/[.03] p-4">
                 <Label>Asset</Label>
                 <div className="mt-3 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <select value={bridgeSymbol} onChange={(event) => { setBridgeSymbol(event.target.value); setBridgeAmount(""); }} className="rounded-lg border border-white/10 bg-[#101725] p-2 font-bold text-white outline-none"><option value="ETH" className="bg-[#101725]">ETH</option><option value="USDC" className="bg-[#101725]">USDC</option></select>
+                    <div className="rounded-lg border border-white/10 bg-[#101725] p-2 font-bold text-white">USDC</div>
                   </div>
                   <span className="font-mono text-xs text-slate-500">
-                    Balance {bridgeBalance.isLoading ? "..." : bridgeFromToken ? formatUnits(bridgeBalance.raw, bridgeFromToken.decimals) : "Unavailable"}
+                    Balance {bridgeBalance.isWrongNetwork ? `Switch to ${bridgeFromChain.name}` : bridgeBalance.isLoading ? "..." : bridgeFromToken ? formatUnits(bridgeBalance.raw, bridgeFromToken.decimals) : "Unavailable"}
                   </span>
                 </div>
                 <div className="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button type="button" onClick={() => bridgeFromToken && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
               </div>
-              <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeQuoteState.isLoading ? "Loading..." : bridgeQuoteState.quote?.provider ?? "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "—"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.executionDurationSeconds ? `~${Math.ceil(bridgeQuoteState.quote.executionDurationSeconds / 60)} min` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Unavailable"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
-              <p className={`mt-4 text-xs ${bridgeAmountError || bridgeQuoteState.isError || bridgeExecution.status === "failed" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "Bridge token catalog unavailable." : bridgeQuoteState.isError ? `LI.FI quote error: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approval required for the bridge contract." : bridgeStatus.status?.status === "DONE" ? "Bridge completed." : bridgeQuoteState.quote ? "Ready to review route." : "Enter an amount to request a quote.")}</p>
-              {bridgeApproval.required ? <Button className="mt-4 w-full" onClick={() => void bridgeApproval.approve()} disabled={bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending"} icon>{bridgeApproval.status === "pending" ? "Approval pending..." : bridgeApproval.status === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : <Button className="mt-4 w-full" onClick={() => setShowBridgeConfirmation(true)} disabled={!bridgeReady || bridgeExecution.status === "source-pending"} icon>{bridgeExecution.status === "source-pending" ? "Bridge pending..." : bridgeExecution.status === "source-confirmed" ? "Tracking bridge..." : "Review bridge"}</Button>}
+              <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeSameNetwork ? "Same network" : bridgeQuoteState.isError ? "Available" : "CCTP V2"}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmount !== null && bridgeQuoteState.quote?.toAmount !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin !== null && bridgeQuoteState.quote?.toAmountMin !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">Depends on Circle attestation</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount !== null && bridgeQuoteState.quote?.feeAmount !== undefined && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Unavailable"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
+              <p className={`mt-4 text-xs ${bridgeSameNetwork ? "text-amber-300" : bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeExecution.status === "failed" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeSameNetwork ? "Select different source and destination networks." : bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "CCTP token catalog unavailable." : bridgeQuoteState.isError ? `CCTP route unavailable: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approve canonical USDC for Circle CCTP." : bridgeQuoteState.isSimulating ? "Checking the CCTP burn on the source chain..." : bridgeQuoteState.simulationError ? `CCTP burn simulation failed: ${bridgeQuoteState.simulationError.message}` : bridgeStatus.status?.status === "DONE" ? "Source message attested. Destination mint requires confirmation." : bridgeQuoteState.quote ? "Ready to review Circle CCTP transfer." : "Enter a USDC amount to request a CCTP quote.")}</p>
+              {bridgeApproval.required ? <Button className="mt-4 w-full" onClick={() => void bridgeApproval.approve()} disabled={bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending"} icon>{bridgeApproval.status === "pending" ? "Approval pending..." : bridgeApproval.status === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation ? <Button className="mt-4 w-full" onClick={() => void bridgeExecution.complete(bridgeStatus.status?.message, bridgeStatus.status?.attestation)} disabled={bridgeExecution.status === "bridging" || bridgeExecution.status === "completed"} icon>{bridgeExecution.status === "bridging" ? "Mint pending..." : bridgeExecution.status === "completed" ? "Bridge completed" : "Mint on destination"}</Button> : <Button className="mt-4 w-full" onClick={() => setShowBridgeConfirmation(true)} disabled={!bridgeReady || bridgeExecution.status === "source-pending"} icon>{bridgeExecution.status === "source-pending" ? "Bridge pending..." : bridgeExecution.status === "source-confirmed" ? "Waiting for attestation..." : "Review bridge"}</Button>}
               {bridgeExecution.sourceHash && bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) && <p className="mt-2 text-xs text-cyan-300">Source transaction: <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeExecution.sourceHash)}</a></p>}
               {bridgeStatus.status?.receiving?.txHash && bridgeExplorerUrl(bridgeStatus.status.receiving.chainId ?? bridgeToChainId, bridgeStatus.status.receiving.txHash) && <p className="mt-2 text-xs text-emerald-300">Destination transaction: <a href={bridgeExplorerUrl(bridgeStatus.status.receiving.chainId ?? bridgeToChainId, bridgeStatus.status.receiving.txHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeStatus.status.receiving.txHash)}</a></p>}
-              {showBridgeConfirmation && bridgeQuoteState.quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{bridgeFromChain.name} → {bridgeToChain.name}</span></div><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{bridgeAmount} {bridgeSymbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{bridgeQuoteState.quote.toAmountMin && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Slippage</span><span>{(bridgeSlippage * 100).toFixed(1)}%</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the route and transaction in your wallet before signing. Cross-chain completion depends on the bridge provider.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowBridgeConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowBridgeConfirmation(false); void bridgeExecution.execute(); }} disabled={!bridgeReady} icon>Confirm bridge</Button></div></div>}
+              {showBridgeConfirmation && bridgeQuoteState.quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{bridgeFromChain.name} → {bridgeToChain.name}</span></div><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{bridgeAmount} {bridgeSymbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{bridgeQuoteState.quote.toAmountMin !== null && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Protocol</span><span>Circle CCTP V2</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the canonical USDC burn transaction in your wallet before signing. The destination mint requires a Circle attestation.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowBridgeConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowBridgeConfirmation(false); void bridgeExecution.execute(); }} disabled={!bridgeReady} icon>Confirm bridge</Button></div></div>}
             </>
-          ) : (
-            <>
-              <div className="mb-5">
-                <Label>DeFi borrowing</Label>
-                <h2 className="mt-2 text-xl font-bold">Aave V3 on Base</h2>
-              </div>
-              {chainId !== base.id && <p className="mb-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200">Wrong network. Switch to Base before using lending.</p>}
-              {lending.isError && <p className="mb-4 rounded-xl border border-rose-300/20 bg-rose-300/[.06] p-4 text-xs text-rose-200">Aave position data unavailable. Try refreshing.</p>}
-              <div className="grid grid-cols-2 gap-2"><button onClick={() => setLendingOperation("supply")} className={`rounded-lg px-3 py-2 text-xs font-bold ${lendingOperation === "supply" ? "bg-cyan-300 text-slate-950" : "bg-white/[.04] text-slate-400"}`}>Supply</button><button onClick={() => setLendingOperation("withdraw")} className={`rounded-lg px-3 py-2 text-xs font-bold ${lendingOperation === "withdraw" ? "bg-cyan-300 text-slate-950" : "bg-white/[.04] text-slate-400"}`}>Withdraw</button><button onClick={() => setLendingOperation("borrow")} className={`rounded-lg px-3 py-2 text-xs font-bold ${lendingOperation === "borrow" ? "bg-cyan-300 text-slate-950" : "bg-white/[.04] text-slate-400"}`}>Borrow</button><button onClick={() => setLendingOperation("repay")} className={`rounded-lg px-3 py-2 text-xs font-bold ${lendingOperation === "repay" ? "bg-cyan-300 text-slate-950" : "bg-white/[.04] text-slate-400"}`}>Repay</button></div>
-              <div className="mt-4 flex items-center justify-between rounded-xl border border-white/10 bg-white/[.03] p-4"><select value={lendingSymbol} onChange={(event) => { setLendingSymbol(event.target.value as 'USDC' | 'WETH'); setLendingAmount(''); }} className="rounded-lg border border-white/10 bg-[#101725] p-2 font-bold text-white outline-none"><option value="USDC">USDC</option><option value="WETH">WETH</option></select><span className="font-mono text-[10px] text-slate-500">Wallet {lendingBalance.isLoading ? "..." : formatUnits(lendingBalance.raw, lendingAsset.decimals)}</span></div>
-              <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={lendingAmount} onChange={(event) => setLendingAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button onClick={() => { const amount = lendingOperation === "supply" ? lendingBalance.raw : lendingOperation === "withdraw" ? lendingAssetPosition?.supplied ?? 0n : lendingOperation === "repay" ? lendingAssetPosition?.borrowed ?? 0n : 0n; setLendingAmount(formatUnits(amount, lendingAsset.decimals)); }} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{lendingSymbol}</span></div>
-              <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Supplied</span><span>{lendingAssetPosition ? formatUnits(lendingAssetPosition.supplied, lendingAsset.decimals) : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Borrowed</span><span>{lendingAssetPosition ? formatUnits(lendingAssetPosition.borrowed, lendingAsset.decimals) : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Supply APY</span><span>{lendingAssetPosition?.supplyApy !== null && lendingAssetPosition?.supplyApy !== undefined ? `${lendingAssetPosition.supplyApy.toFixed(2)}%` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Borrow APR</span><span>{lendingAssetPosition?.borrowApr !== null && lendingAssetPosition?.borrowApr !== undefined ? `${lendingAssetPosition.borrowApr.toFixed(2)}%` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Health factor</span><span>{lendingPosition && lendingPosition.healthFactor < 10n ** 27n ? formatUnits(lendingPosition.healthFactor, 18) : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Available borrow</span><span>{lendingPosition ? formatUnits(lendingPosition.availableBorrowsBase, 8) : "Unavailable"}</span></div></div>
-              <p className={`mt-4 text-xs ${lendingAmountError || lendingAction.status === "failed" ? "text-rose-300" : lendingAction.status === "confirmed" ? "text-emerald-300" : "text-slate-500"}`}>{lendingAmountError ?? lendingAction.error?.message ?? (lending.isLoading ? "Loading live Aave position..." : lendingApproval.required ? "Approval required for exact supply amount." : lendingAction.status === "confirmed" ? "Transaction confirmed." : lendingPosition ? "Ready to review transaction." : "Lending data unavailable.")}</p>
-              {lendingApproval.required ? <Button className="mt-4 w-full" onClick={() => void lendingApproval.approve()} disabled={lendingApproval.status === "confirmation" || lendingApproval.status === "pending"} icon>{lendingApproval.status === "pending" ? "Approval pending..." : lendingApproval.status === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : <Button className="mt-4 w-full" onClick={() => setShowLendingConfirmation(true)} disabled={!lendingReady || lendingAction.status === "pending"} icon>Review {lendingOperation}</Button>}
-              {lendingAction.hash && <p className="mt-2 text-xs text-emerald-300">Transaction: <a className="underline" href={explorerTxUrl(lendingAction.hash)} target="_blank" rel="noopener noreferrer">{shortAddr(lendingAction.hash)}</a></p>}
-              {showLendingConfirmation && lendingReady && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Protocol</span><span>Aave V3</span></div><div className="flex justify-between"><span className="text-slate-500">Operation</span><span>{lendingOperation}</span></div><div className="flex justify-between"><span className="text-slate-500">Asset / amount</span><span>{lendingAmount} {lendingSymbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Base Mainnet</span></div><div className="flex justify-between"><span className="text-slate-500">Transaction target</span><span>{shortAddr(AAVE_BASE_POOL)}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the transaction in your wallet before signing. Lending carries market and liquidation risk.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowLendingConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowLendingConfirmation(false); void lendingAction.execute(); }} icon>Confirm</Button></div></div>}
-            </>
-          )}
+          ) : null}
         </Card>
         <Card className="h-fit p-5">
           <div className="flex items-center gap-3">
@@ -2662,18 +2669,11 @@ function ActionPage({ type }: { type: "swap" | "bridge" | "borrow" }) {
                   ],
                   ["Recommended", !quote ? "Quote unavailable" : !quoteFresh ? "Quote expired" : swapApproval.isApprovalRequired ? "Approval required" : "Ready to review"],
                 ]
-              : isBridge
-                ? [
-                    ["Route security", "Verified"],
-                    ["Bridge risk", "Low"],
-                    ["Estimated arrival", "~4 minutes"],
-                    ["Recommended", "Safe to proceed"],
-                  ]
                 : [
-                    ["Liquidation threshold", lendingPosition ? `${Number(lendingPosition.currentLiquidationThreshold) / 100}%` : "Unavailable"],
-                    ["Health factor", lendingPosition && lendingPosition.healthFactor < 10n ** 27n ? formatUnits(lendingPosition.healthFactor, 18) : "Unavailable"],
-                    ["Protocol", lendingPosition?.protocol ?? "Unavailable"],
-                    ["Recommended", lendingReady ? "Ready to review" : "Unavailable"],
+                    ["Protocol", "Circle CCTP V2"],
+                    ["Source network", bridgeFromChain.name],
+                    ["Destination", bridgeToChain.name],
+                    ["Route status", bridgeReady ? "Ready to review" : "Unavailable"],
                   ]
             ).map(([a, b], i) => (
               <div
@@ -2789,7 +2789,9 @@ function Discover() {
             <Card key={ecosystem.name} className="p-5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <span className="h-9 w-9 rounded-full" style={{ background: ecosystem.color }} />
+                  <div className="flex h-9 w-9 items-center justify-center rounded-full" style={{ background: ecosystem.color }}>
+                    {ecosystem.name === "Arc" && <ChainLogo chainId={arcTestnet.id} className="h-6 w-6" />}
+                  </div>
                   <div>
                     <p className="font-bold">{ecosystem.name}</p>
                     <p className="text-[10px] text-slate-500">{ecosystem.protocolCount.toLocaleString()} tracked protocols</p>
@@ -2807,11 +2809,11 @@ function Discover() {
       </div>
       <div>
         <div className="mb-4">
-          <Label>Base yield opportunities</Label>
+          <Label>Arc ecosystem opportunities</Label>
           <h2 className="mt-2 text-xl font-bold">Live pools worth investigating</h2>
         </div>
         {filteredOpportunities.length === 0 ? (
-          <Card className="p-6 text-sm text-slate-400">{search ? "No live Base pools match your search." : "No eligible Base pools are currently available."}</Card>
+          <Card className="p-6 text-sm text-slate-400">{search ? "No live Arc opportunities match your search." : "No eligible Arc opportunities are currently available."}</Card>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             {filteredOpportunities.map((opportunity) => (
@@ -2861,16 +2863,19 @@ function Discover() {
     </div>
   );
 }
-function SendPage() {
+function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | null }) {
   const { address, isConnected, chainId } = useAccount();
+  const { switchChain } = useSwitchChain();
   const portfolio = usePortfolio();
-  const { send, status, transactionHash, error, reset } = useSendTransaction();
-  const [assetSymbol, setAssetSymbol] = useState("ETH");
+  const { send, status, transactionHash, error, reset, gasCost } = useSendTransaction();
+  const isArcTestnet = chainId === arcTestnet.id;
+  const [assetSymbol, setAssetSymbol] = useState("USDC");
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
-  const asset = BASE_ASSETS.find((item) => item.symbol === assetSymbol) ?? BASE_ASSETS[0];
+  const asset = ARC_USDC;
   const balanceAsset = portfolio.assets.find((item) => item.symbol === asset.symbol);
+  const isPaymentRequestSend = Boolean(paymentRequest);
   const balanceRaw = balanceAsset?.raw ?? 0n;
   const isBusy = status === "preparing" || status === "confirmation" || status === "pending";
   const setInput = (setter: (value: string) => void, value: string) => {
@@ -2878,6 +2883,13 @@ function SendPage() {
     setFormError(null);
     if (status !== "idle") reset();
   };
+  useEffect(() => {
+    if (!paymentRequest) return;
+    setRecipient(paymentRequest.recipient);
+    setAmount(paymentRequest.amount);
+    setAssetSymbol('USDC');
+    setFormError(null);
+  }, [paymentRequest]);
   const handleMax = () => {
     setAmount(formatUnits(balanceRaw, asset.decimals));
     setFormError(null);
@@ -2888,8 +2900,8 @@ function SendPage() {
       setFormError("Connect your wallet before sending assets.");
       return;
     }
-    if (chainId !== base.id) {
-      setFormError("Switch to Base before sending assets.");
+    if (chainId !== arcTestnet.id) {
+      setFormError("Switch to Arc Testnet before sending Arc USDC.");
       return;
     }
     if (!isAddress(recipient) || recipient.toLowerCase() === "0x0000000000000000000000000000000000000000" || recipient.toLowerCase() === address.toLowerCase()) {
@@ -2913,16 +2925,119 @@ function SendPage() {
     }
     await send({ asset, recipient: recipient as Address, amount: rawAmount });
   };
-  const stateMessage = status === "preparing" ? "Preparing transaction..." : status === "confirmation" ? "Confirm this transaction in your wallet." : status === "pending" ? "Transaction pending on Base..." : status === "confirmed" ? "Transaction confirmed." : status === "failed" ? error?.message ?? "Transaction failed." : null;
+  const stateMessage = status === "preparing" ? "Preparing transaction and estimating Arc gas..." : status === "confirmation" ? "Confirm this transaction in your wallet." : status === "pending" ? "Transaction pending on Arc Testnet..." : status === "confirmed" ? "Transaction confirmed." : status === "rejected" ? "Transaction rejected in wallet." : status === "failed" ? error?.message ?? "Transaction failed." : null;
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <PageTitle label="Move / Send" title="Send assets securely." />
-      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a Base-compatible wallet to send assets.</p><WalletButton className="mt-7" /></Card> : chainId !== base.id ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Base</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Sending is available on Base Mainnet only.</p></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send asset</Label><h2 className="mt-2 text-xl font-bold">Transfer from your wallet</h2></div><div className="space-y-4"><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><select value={assetSymbol} onChange={(event) => { setAssetSymbol(event.target.value); setAmount(""); setFormError(null); }} disabled={isBusy} className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white outline-none focus:border-cyan-300/40"><option value="ETH" className="bg-[#101725]">ETH</option><option value="USDC" className="bg-[#101725]">USDC</option><option value="cbBTC" className="bg-[#101725]">cbBTC</option></select></label><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">{asset.symbol}</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balanceAsset?.isLoading ? "..." : `${Number(formatUnits(balanceRaw, asset.decimals)).toLocaleString(undefined, { maximumFractionDigits: asset.decimals > 8 ? 8 : asset.decimals })} ${asset.symbol}`}</span></label></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || Boolean(balanceAsset?.isLoading)} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Send"}</Button></Card>}
+      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send supported assets.</p><WalletButton className="mt-7" /></Card> : chainId !== base.id && chainId !== arcTestnet.id ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to a supported network</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Sending is available on Base Mainnet and Arc Testnet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>{isArcTestnet ? "Send / Arc Testnet" : "Send asset"}</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span>{isArcTestnet ? <div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Arc ERC-20</span></div> : <select value={assetSymbol} onChange={(event) => { setAssetSymbol(event.target.value); setAmount(""); setFormError(null); }} disabled={isBusy} className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white outline-none focus:border-cyan-300/40"><option value="ETH" className="bg-[#101725]">ETH</option><option value="USDC" className="bg-[#101725]">USDC</option><option value="cbBTC" className="bg-[#101725]">cbBTC</option></select>}</label><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">{asset.symbol}</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balanceAsset?.isLoading ? "..." : balanceAsset?.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} ${asset.symbol}`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>{isArcTestnet ? "Arc Testnet" : "Base Mainnet"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} {asset.symbol}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} ${isArcTestnet ? "native USDC" : "ETH"}` : "Estimated during preparation"}</span></div></div>{isArcTestnet && <p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p>}</div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, chainId)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || Boolean(balanceAsset?.isLoading) || Boolean(balanceAsset?.isError)} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
     </div>
   );
 }
+
+function BridgeNetworkPicker({
+  label,
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: {
+  label: string;
+  value: number;
+  options: BridgeChain[];
+  onChange: (chainId: number) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.id === value));
+  const selected = options[selectedIndex] ?? options[0];
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  const choose = (index: number) => {
+    const next = options[index];
+    if (!next) return;
+    onChange(next.id);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={pickerRef} className="relative mt-3">
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled || options.length === 0}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+            event.preventDefault();
+            choose((selectedIndex + 1) % options.length);
+          } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+            event.preventDefault();
+            choose((selectedIndex - 1 + options.length) % options.length);
+          } else if (event.key === 'Home') {
+            event.preventDefault();
+            choose(0);
+          } else if (event.key === 'End') {
+            event.preventDefault();
+            choose(options.length - 1);
+          } else if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            setOpen((current) => !current);
+          }
+        }}
+        className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#101725] px-3 py-2.5 text-left text-sm font-bold text-white outline-none transition hover:border-cyan-300/30 focus-visible:border-cyan-300/50 focus-visible:ring-2 focus-visible:ring-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <ChainLogo chainId={selected?.id ?? value} className="h-5 w-5 shrink-0" />
+          <span className="truncate">{selected?.name ?? 'Unavailable'}</span>
+        </span>
+        <span aria-hidden="true" className="text-slate-500">{open ? '−' : '+'}</span>
+      </button>
+      {open && (
+        <div role="listbox" aria-label={label} className="absolute left-0 right-0 top-full z-30 mt-2 max-h-64 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 p-1.5 shadow-[0_20px_50px_rgba(2,6,23,0.65)]">
+          {options.map((option, index) => {
+            const isSelected = option.id === value;
+            return (
+              <button
+                type="button"
+                role="option"
+                aria-selected={isSelected}
+                key={option.id}
+                onClick={() => choose(index)}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs transition ${isSelected ? 'bg-cyan-300/10 text-white' : 'text-slate-300 hover:bg-white/[.06] hover:text-white'}`}
+              >
+                <ChainLogo chainId={option.id} className="h-5 w-5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{option.name}</span>
+                {isSelected && <span className="text-[10px] text-cyan-300">Selected</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReceivePage() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
+  const { switchChain } = useSwitchChain();
+  const isArcTestnet = chainId === arcTestnet.id;
   const [copied, setCopied] = useState(false);
   const copyAddress = async () => {
     if (!address) return;
@@ -2930,7 +3045,7 @@ function ReceivePage() {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
   };
-  return <div className="mx-auto max-w-3xl space-y-6"><PageTitle label="Move / Receive" title="Fund your wallet." />{!isConnected || !address ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to display your Base-compatible receiving address.</p><WalletButton className="mt-7" /></Card> : <Card className="flex flex-col items-center p-8 text-center" glow><Label>Your Base-compatible wallet address</Label><div className="mt-6 rounded-2xl bg-white p-4"><QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#070a11" includeMargin /></div><p className="mt-6 max-w-lg break-all font-mono text-xs leading-6 text-slate-300">{address}</p><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Use this address to receive ETH and supported Base tokens in your connected EVM wallet.</p><Button variant="secondary" onClick={() => void copyAddress()} className="mt-6"><Copy size={15} />{copied ? "Copied" : "Copy address"}</Button></Card>}</div>;
+  return <div className="mx-auto max-w-3xl space-y-6"><PageTitle label="Move / Receive" title="Fund your wallet." /><div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />Arc Testnet / USDC</div>{!isConnected || !address ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to display your Arc Testnet receiving address.</p><WalletButton className="mt-7" /></Card> : <Card className="flex flex-col items-center p-8 text-center" glow><div className="flex items-center gap-2 text-sm font-bold text-slate-200"><ChainLogo chainId={arcTestnet.id} className="h-6 w-6" />Arc Testnet</div><Label>Your Arc Testnet wallet address</Label><div className="mt-6 rounded-2xl bg-white p-4"><QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#070a11" includeMargin /></div><p className="mt-6 max-w-lg break-all font-mono text-xs leading-6 text-slate-300">{address}</p><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send Arc USDC to this address on Arc Testnet. Displaying this address does not confirm that funds were received.</p>{!isArcTestnet && <Button variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })} className="mt-6">Switch to Arc Testnet</Button>}<Button variant="secondary" onClick={() => void copyAddress()} className="mt-6"><Copy size={15} />{copied ? "Copied" : "Copy address"}</Button></Card>}</div>;
 }
 function WatchlistPage() {
   const { items, has, toggle, remove } = useWatchlist();
@@ -2940,7 +3055,7 @@ function WatchlistPage() {
   const { prices, isLoading: isPricesLoading, isError: isPricesError, error: pricesError, refetch: refetchPrices } = usePrices(PORTFOLIO_PRICES);
   const { data: discoverData, isLoading: isDiscoverLoading, isError: isDiscoverError, error: discoverError, refetch: refetchDiscover } = useDiscover();
 
-  const assetOptions = BASE_ASSETS.filter((asset) => asset.symbol === "ETH" || asset.symbol === "USDC" || asset.symbol === "cbBTC");
+  const assetOptions = [ARC_USDC];
   const protocolOptions = discoverData?.opportunities ?? [];
   const availableAssetOptions = assetOptions.filter((asset) => !has(asset.symbol, "asset"));
   const availableProtocolOptions = protocolOptions.filter((opportunity) => !has(opportunity.id, "protocol"));
@@ -3158,7 +3273,7 @@ function WatchlistPage() {
             </div>
 
             <div>
-              <p className="mb-2 text-xs font-semibold text-slate-400">Base protocols</p>
+              <p className="mb-2 text-xs font-semibold text-slate-400">Arc protocols</p>
               <select
                 value={protocolToAdd}
                 onChange={(event) => setProtocolToAdd(event.target.value)}
@@ -3166,7 +3281,7 @@ function WatchlistPage() {
                 disabled={availableProtocolOptions.length === 0}
               >
                 {availableProtocolOptions.length === 0 ? (
-                  <option value="">No live Base protocols available</option>
+                  <option value="">No live Arc protocols available</option>
                 ) : (
                   <option value="">Select protocol</option>
                 )}
@@ -3191,13 +3306,12 @@ declare const __APP_VERSION__: string;
 function SettingsPage() {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
-  const { settings, setDensity, setRefreshMode, setExplorer, hasStorage } = useOrbitSettings();
+  const { settings, setDensity, setRefreshMode, hasStorage } = useOrbitSettings();
   const watchlist = useWatchlist();
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearMessage, setClearMessage] = useState<string | null>(null);
 
   const activeChain = supportedChains.find((item) => item.id === chainId);
-  const isSupportedNetwork = Boolean(activeChain);
   const walletStateLabel = !isConnected ? 'Wallet disconnected' : !activeChain ? 'Unsupported network' : activeChain.name;
   const networkStatusPill = !isConnected ? 'amber' : !activeChain ? 'amber' : 'green';
 
@@ -3222,11 +3336,11 @@ function SettingsPage() {
         action={
           <Button
             variant="secondary"
-            onClick={() => switchChain({ chainId: base.id })}
-            disabled={!isConnected || chainId === base.id}
+            onClick={() => switchChain({ chainId: arcTestnet.id })}
+            disabled={!isConnected || chainId === arcTestnet.id}
           >
             <RefreshCw size={15} />
-            {!isConnected ? 'Connect wallet' : chainId === base.id ? 'Base ready' : 'Switch to Base'}
+            {!isConnected ? 'Connect wallet' : chainId === arcTestnet.id ? 'Arc Testnet ready' : 'Switch to Arc Testnet'}
           </Button>
         }
       />
@@ -3260,13 +3374,14 @@ function SettingsPage() {
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet chains</p>
               <div className="mt-2 flex flex-wrap gap-2">
                 {supportedChains.map((chain) => (
-                  <Pill key={chain.id} color={chain.id === base.id ? 'green' : 'cyan'}>{chain.name}</Pill>
+                  <Pill key={chain.id} color="green">{chain.name}</Pill>
                 ))}
               </div>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Base-specific features</p>
-              <p className="mt-2 text-slate-200">ETH, USDC, and cbBTC on Base are the active Base asset set for portfolio and Base-native actions.</p>
+              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Arc core network</p>
+              <p className="mt-2 text-slate-200">Arc Testnet · Chain ID 5042002 · Native gas USDC</p>
+              <p className="mt-1 break-all text-xs text-slate-500">RPC https://rpc.testnet.arc.network · Explorer https://testnet.arcscan.app</p>
             </div>
           </div>
         </Card>
@@ -3277,22 +3392,16 @@ function SettingsPage() {
           <Label>Explorer & refresh</Label>
           <div className="mt-4 space-y-4">
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-              <p className="mb-2 text-xs font-semibold text-slate-400">Preferred explorer</p>
+              <p className="mb-2 text-xs font-semibold text-slate-400">Explorer</p>
               <div className="flex gap-2">
                 <button
-                  onClick={() => setExplorer('basescan')}
-                  className={`flex-1 rounded-xl border px-3 py-2 text-sm font-bold ${settings.explorer === 'basescan' ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-200' : 'border-white/10 bg-[#101725] text-slate-300'}`}
+                  onClick={() => undefined}
+                  className="flex-1 rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-sm font-bold text-cyan-200"
                 >
-                  BaseScan
-                </button>
-                <button
-                  onClick={() => setExplorer('blockscout')}
-                  className={`flex-1 rounded-xl border px-3 py-2 text-sm font-bold ${settings.explorer === 'blockscout' ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-200' : 'border-white/10 bg-[#101725] text-slate-300'}`}
-                >
-                  Blockscout
+                  ArcScan
                 </button>
               </div>
-              <p className="mt-2 text-[11px] text-slate-500">This preference controls generated transaction links after page reload. ORBIT still reads onchain data from the supported Base public providers.</p>
+              <p className="mt-2 text-[11px] text-slate-500">Arc activity and transaction links use the official ArcScan explorer.</p>
             </div>
 
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
@@ -3385,8 +3494,8 @@ function SettingsPage() {
               <p className="mt-2 text-slate-200">{walletStateLabel}</p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Supported chains</p>
-              <p className="mt-2 text-slate-200">Base, Ethereum, Arbitrum, Optimism, Polygon</p>
+              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Supported chain</p>
+              <p className="mt-2 text-slate-200">Arc Testnet</p>
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">App version</p>
@@ -3394,7 +3503,7 @@ function SettingsPage() {
             </div>
             <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Data-provider architecture</p>
-              <p className="mt-2 text-slate-200">BaseScan primary, Blockscout fallback</p>
+              <p className="mt-2 text-slate-200">ArcScan activity provider and official Arc RPC</p>
             </div>
           </div>
         </Card>
@@ -3402,7 +3511,7 @@ function SettingsPage() {
     </div>
   );
 }
-function Generic({ page }: { page: Page }) {
+export function Generic({ page }: { page: Page }) {
   
   const title =
     page === "activity"
@@ -3413,9 +3522,7 @@ function Generic({ page }: { page: Page }) {
           ? "Fund your wallet."
           : page === "send"
             ? "Send assets securely."
-            : page === "earn"
-              ? "Grow your universe."
-              : "Coming into view.";
+            : "Coming into view.";
   return (
     <div className="mx-auto max-w-3xl">
       <PageTitle label={`ORBIT / ${page}`} title={title} />
@@ -3442,7 +3549,7 @@ function ActivityPage() {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
   const { transactions, isLoading, isError, refetch, isFetching } =
-    useTransactions(address, isConnected);
+    useTransactions(address, isConnected && chainId === arcTestnet.id, chainId);
   const [selectedCategory, setSelectedCategory] = useState<
     'all' | 'Send' | 'Receive' | 'Swap' | 'Approval' | 'Contract Interaction' | 'Other'
   >('all');
@@ -3452,7 +3559,7 @@ function ActivityPage() {
   const [page, setPage] = useState(1);
   const [showAllTransactions, setShowAllTransactions] = useState(false);
 
-  const wrongNetwork = isConnected && chainId !== base.id;
+  const wrongNetwork = isConnected && chainId !== arcTestnet.id;
 
   const filteredTransactions = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
@@ -3548,6 +3655,7 @@ function ActivityPage() {
           </Button>
         }
       />
+      <div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />Arc Testnet activity</div>
       {!isConnected ? (
         <Card className="flex flex-col items-center justify-center p-16 text-center">
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300">
@@ -3555,7 +3663,7 @@ function ActivityPage() {
           </div>
           <h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">
-            Connect a wallet to view your onchain transaction history on Base.
+            Connect a wallet to view your Arc Testnet transaction history.
           </p>
         </Card>
       ) : wrongNetwork ? (
@@ -3563,12 +3671,12 @@ function ActivityPage() {
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-300/10 text-amber-300">
             <ShieldCheck size={28} />
           </div>
-          <h2 className="mt-6 text-2xl font-bold">Switch to Base Mainnet</h2>
+          <h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">
-            ORBIT activity is currently scoped to Base Mainnet transactions.
+            ORBIT activity is currently scoped to Arc Testnet transactions.
           </p>
-          <Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: base.id })}>
-            Switch to Base
+          <Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>
+            Switch to Arc Testnet
           </Button>
         </Card>
       ) : isLoading && !isFetching ? (
@@ -3611,7 +3719,7 @@ function ActivityPage() {
           </div>
           <h2 className="mt-6 text-2xl font-bold">No transactions found</h2>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">
-            No recent onchain transactions were found for this wallet on Base Mainnet.
+            No recent onchain transactions were found for this wallet on Arc Testnet.
           </p>
         </Card>
       ) : (
@@ -3749,7 +3857,7 @@ function ActivityPage() {
                                 <span title={tx.to} className="block max-w-[110px] truncate">{shortAddr(tx.to)}</span>
                               </td>
                               <td className="overflow-hidden px-3 py-4 align-top font-mono text-slate-300">
-                                <span className="block max-w-[120px] truncate">{formatTxValue(tx.value)}</span>
+                                <span className="block max-w-[120px] truncate">{formatTxValue(tx.value, tx.nativeSymbol)}</span>
                               </td>
                               <td className="overflow-hidden px-3 py-4 align-top">
                                 <span className={`inline-flex rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[.14em] ${getStatusClasses(tx.status)}`}>
@@ -3791,10 +3899,10 @@ function ActivityPage() {
                             </button>
                           </div>
                           <div className="mt-2 flex items-center gap-2">
-                            <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" title={selectedTx.hash} className="min-w-0 flex-1 truncate text-sm text-cyan-300 hover:text-cyan-200">
+                            <a href={explorerTxUrl(selectedTx.hash, chainId)} target="_blank" rel="noopener noreferrer" title={selectedTx.hash} className="min-w-0 flex-1 truncate text-sm text-cyan-300 hover:text-cyan-200">
                               {`${selectedTx.hash.slice(0, 8)}...${selectedTx.hash.slice(-6)}`}
                             </a>
-                            <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-slate-200" aria-label="View transaction on BaseScan">
+                            <a href={explorerTxUrl(selectedTx.hash, chainId)} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-slate-200" aria-label="View transaction on block explorer">
                               <ExternalLink size={14} />
                             </a>
                           </div>
@@ -3832,7 +3940,7 @@ function ActivityPage() {
                           </div>
                           <div>
                             <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Value</p>
-                            <p className="mt-1 font-mono text-slate-300">{formatTxValue(selectedTx.value)}</p>
+                            <p className="mt-1 font-mono text-slate-300">{formatTxValue(selectedTx.value, selectedTx.nativeSymbol)}</p>
                           </div>
                         </div>
 
@@ -3841,8 +3949,25 @@ function ActivityPage() {
                           <p className="mt-2 text-sm text-slate-300">{selectedTx.category}</p>
                         </div>
 
-                        <a href={explorerTxUrl(selectedTx.hash)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-cyan-300 hover:text-cyan-200">
-                          View on BaseScan
+                        {selectedTx.tokenTransfers.length > 0 && (
+                          <div>
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Token transfers</p>
+                            <div className="mt-2 space-y-2">
+                              {selectedTx.tokenTransfers.map((transfer, index) => (
+                                <div key={`${transfer.hash}-${transfer.contractAddress}-${index}`} className="rounded-lg border border-white/10 bg-white/[.02] p-2 text-xs">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold text-slate-200">{transfer.direction === 'sent' ? 'Sent' : 'Received'} {transfer.symbol}</span>
+                                    <span className="font-mono text-slate-300">{transfer.amount} {transfer.symbol}</span>
+                                  </div>
+                                  <p className="mt-1 font-mono text-[10px] text-slate-500">{transfer.contractAddress}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        <a href={explorerTxUrl(selectedTx.hash, chainId)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-cyan-300 hover:text-cyan-200">
+                          View on block explorer
                           <ExternalLink size={13} />
                         </a>
                       </div>
@@ -3947,9 +4072,13 @@ function ActivityPage() {
 function Dashboard({
   page,
   setPage,
+  paymentRequest,
+  setPaymentRequest,
 }: {
   page: Page;
   setPage: (p: Page) => void;
+  paymentRequest: ArcPaymentRequest | null;
+  setPaymentRequest: (request: ArcPaymentRequest | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -3971,15 +4100,15 @@ function Dashboard({
                 {page === "settings" && <SettingsPage />}
                 {page === "security" && <Security setPage={setPage} />}
                 {page === "approvals" && <Approvals />}
-                {(page === "swap" ||
-                  page === "bridge" ||
-                  page === "borrow") && <ActionPage type={page} />}
                 {page === "discover" && <Discover />}
                 {page === "watchlist" && <WatchlistPage />}
                 {page === "activity" && <ActivityPage />}
-                {page === "send" && <SendPage />}
+                {page === "send" && <SendPage paymentRequest={paymentRequest} />}
                 {page === "receive" && <ReceivePage />}
-                {page === "earn" && <EarnPage />}
+                {page === "arc-pay" && <ArcPayPage onPay={(request) => { setPaymentRequest(request); setPage("send"); }} />}
+                {page === "bridge" && <ActionPage type="bridge" />}
+                {page === "swap" && <ArcSwapPage />}
+                {page === "unified-balance" && <UnifiedBalancePage />}
                 {page === "about" && <AboutPage />}
               </motion.div>
             </AnimatePresence>
@@ -3997,18 +4126,18 @@ function AboutPage() {
         <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-400">About ORBIT</p>
-            <h2 className="mt-3 text-3xl font-extrabold tracking-[-0.05em] text-white">A focused command center for your Base wallet.</h2>
+            <h2 className="mt-3 text-3xl font-extrabold tracking-[-0.05em] text-white">A focused command center for your Arc wallet.</h2>
             <p className="mt-4 text-base leading-7 text-slate-300">
               ORBIT brings together the essentials of a modern onchain portfolio: portfolio value, wallet activity, approvals, discovery, and security signals in one place. It is designed to help you understand what is happening across your wallet without adding unnecessary noise or fake data.
             </p>
             <p className="mt-4 text-base leading-7 text-slate-300">
-              The app reads live public data and wallet state where available and keeps the experience focused on real Base activity, real risk awareness, and practical controls without requiring a separate backend or paid data layer.
+              The app reads live public data and wallet state where available and keeps the experience focused on real Arc activity, real risk awareness, and practical controls without requiring a separate backend or paid data layer.
             </p>
           </div>
           <div className="rounded-3xl border border-slate-700 bg-slate-950/60 p-5 shadow-[0_18px_40px_rgba(2,6,23,0.28)]">
             <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-400">What it helps with</p>
             <ul className="mt-4 space-y-3 text-sm text-slate-300">
-              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Track portfolio and wallet state on Base</li>
+              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Track portfolio and wallet state on Arc Testnet</li>
               <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Review recent onchain activity and failed transactions</li>
               <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Audit approval risk and wallet security posture</li>
               <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Explore opportunities and keep key assets on a watchlist</li>
@@ -4022,11 +4151,12 @@ function AboutPage() {
 
 function App() {
   const [launched, setLaunched] = useState(false);
-  const [page, setPage] = useState<Page>("home");
+  const [page, setPage] = useState<Page>(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('arcPay') ? 'arc-pay' : 'home');
+  const [paymentRequest, setPaymentRequest] = useState<ArcPaymentRequest | null>(null);
   return launched ? (
-    <Dashboard page={page} setPage={setPage} />
+    <Dashboard page={page} setPage={setPage} paymentRequest={paymentRequest} setPaymentRequest={setPaymentRequest} />
   ) : (
-    <Landing onLaunch={() => { setPage("home"); setLaunched(true); }} onNavigate={setPage} />
+    <Landing onLaunch={() => { setPage(page === 'arc-pay' ? 'arc-pay' : "home"); setLaunched(true); }} onNavigate={setPage} />
   );
 }
 export default App;

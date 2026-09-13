@@ -7,10 +7,15 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "test": "vitest run",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
   },
   "dependencies": {
+    "@circle-fin/adapter-viem-v2": "^1.17.1",
+    "@circle-fin/app-kit": "^1.14.0",
+    "@circle-fin/swap-kit": "^1.6.1",
+    "@circle-fin/unified-balance-kit": "^1.6.0",
     "@supabase/supabase-js": "^2.57.4",
     "@tanstack/react-query": "^5.102.8",
     "framer-motion": "^13.2.0",

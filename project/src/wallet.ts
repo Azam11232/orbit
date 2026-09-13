@@ -1,8 +1,9 @@
 import { coinbaseWallet, injected } from 'wagmi/connectors';
 import { createConfig, http } from 'wagmi';
-import { arbitrum, base, mainnet, optimism, polygon } from 'wagmi/chains';
+import { ARC_TESTNET, BASE_SEPOLIA, ETHEREUM_SEPOLIA, ARBITRUM_SEPOLIA, OP_SEPOLIA, AVALANCHE_FUJI, POLYGON_AMOY } from './data/networks';
 
-export const supportedChains = [base, mainnet, arbitrum, optimism, polygon] as const;
+const walletChains = [ARC_TESTNET, ETHEREUM_SEPOLIA, BASE_SEPOLIA, ARBITRUM_SEPOLIA, OP_SEPOLIA, AVALANCHE_FUJI, POLYGON_AMOY] as const;
+export const supportedChains = walletChains;
 
 export function getPreferredConnector<T extends readonly { id: string }[]>(
   connectors: T,
@@ -17,17 +18,19 @@ export function getPreferredConnector<T extends readonly { id: string }[]>(
 }
 
 export const walletConfig = createConfig({
-  chains: supportedChains,
+  chains: walletChains,
   multiInjectedProviderDiscovery: true,
   connectors: [
     coinbaseWallet({ appName: 'ORBIT' }),
     injected({ shimDisconnect: true }),
   ],
   transports: {
-    [base.id]: http(),
-    [mainnet.id]: http(),
-    [arbitrum.id]: http(),
-    [optimism.id]: http(),
-    [polygon.id]: http(),
+    [ARC_TESTNET.id]: http(ARC_TESTNET.rpcUrls.default.http[0]),
+    [ETHEREUM_SEPOLIA.id]: http(ETHEREUM_SEPOLIA.rpcUrls.default.http[0]),
+    [BASE_SEPOLIA.id]: http(BASE_SEPOLIA.rpcUrls.default.http[0]),
+    [ARBITRUM_SEPOLIA.id]: http(ARBITRUM_SEPOLIA.rpcUrls.default.http[0]),
+    [OP_SEPOLIA.id]: http(OP_SEPOLIA.rpcUrls.default.http[0]),
+    [AVALANCHE_FUJI.id]: http(AVALANCHE_FUJI.rpcUrls.default.http[0]),
+    [POLYGON_AMOY.id]: http(POLYGON_AMOY.rpcUrls.default.http[0]),
   },
 });

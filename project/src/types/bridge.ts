@@ -34,7 +34,7 @@ export interface BridgeQuote {
   fromToken: BridgeToken;
   toToken: BridgeToken;
   fromAmount: bigint;
-  toAmount: bigint;
+  toAmount: bigint | null;
   toAmountMin: bigint | null;
   feeAmount: bigint | null;
   gasAmount: bigint | null;
@@ -51,6 +51,8 @@ export interface BridgeQuote {
 export interface BridgeStatus {
   status: 'NOT_FOUND' | 'PENDING' | 'DONE' | 'FAILED';
   substatus?: string;
+  message?: Hex;
+  attestation?: Hex;
   receiving?: { txHash?: string; chainId?: number };
   sending?: { txHash?: string; chainId?: number };
 }

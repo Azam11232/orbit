@@ -1,10 +1,9 @@
-import { useAccount, useBalance } from 'wagmi';
-import { formatEther } from 'viem';
-import { base } from 'wagmi/chains';
+import { useAccount } from 'wagmi';
+import { arcTestnet } from 'wagmi/chains';
 import { useTokenBalance, type TokenConfig } from './useTokenBalance';
 import { PORTFOLIO_PRICES } from '../services/prices';
 import { usePrices } from './usePrices';
-import { BASE_ERC20_ASSETS } from '../data/tokens';
+import { ARC_ERC20_ASSETS } from '../data/tokens';
 import type { ChainTransaction } from '../services/transactions';
 
 export interface PortfolioAsset {
@@ -31,6 +30,7 @@ export interface PortfolioData {
   hasUnavailablePrices: boolean;
   isDisconnected: boolean;
   isWrongNetwork: boolean;
+  refetch: () => Promise<unknown>;
 }
 
 export interface PortfolioAllocationSignal {
@@ -88,12 +88,24 @@ export interface PortfolioAnalytics {
 }
 
 export const PORTFOLIO_TOKENS: TokenConfig[] = [
-  ...BASE_ERC20_ASSETS.filter((asset) => asset.symbol === 'USDC' || asset.symbol === 'cbBTC'),
+  ...ARC_ERC20_ASSETS,
 ];
+
+export const ARC_PORTFOLIO_TOKENS: TokenConfig[] = [...ARC_ERC20_ASSETS];
+
+export function isPortfolioReadEnabled(
+  chainId: number | undefined,
+  tokenChainId: number,
+  isConnected: boolean,
+  hasAddress: boolean,
+): boolean {
+  return hasAddress && isConnected && chainId === tokenChainId;
+}
 
 export function getPortfolioAnalytics(
   assets: PortfolioAsset[],
   transactions: ChainTransaction[] = [],
+  networkLabel = 'Arc Testnet',
 ): PortfolioAnalytics {
   const totalValueUsd = assets.reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0);
   const allocation = assets
@@ -108,7 +120,7 @@ export function getPortfolioAnalytics(
     }))
     .sort((left, right) => right.valueUsd - left.valueUsd);
 
-  const zeroBalance = allocation.every((asset) => asset.raw === 0n || asset.valueUsd === 0);
+  const zeroBalance = allocation.every((asset) => asset.raw === 0n);
   const topAsset = allocation.find((asset) => asset.valueUsd > 0) ?? null;
   const stablecoinExposurePercent = totalValueUsd > 0
     ? allocation
@@ -134,7 +146,7 @@ export function getPortfolioAnalytics(
   if (zeroBalance) {
     riskSignals.push({
       label: 'Zero-balance portfolio',
-      detail: 'No ETH, USDC or cbBTC balance is currently detected on Base for this wallet.',
+      detail: `No supported asset balance is currently detected on ${networkLabel} for this wallet.`,
       value: 0,
       tone: 'neutral',
     });
@@ -164,7 +176,7 @@ export function getPortfolioAnalytics(
     available: true,
     label: 'Current portfolio value',
     valueUsd: totalValueUsd,
-    note: 'Live value from current Base balances and spot prices. Historical P&L is unavailable because ORBIT does not currently have a historical price or cost-basis record for this wallet.',
+    note: `Live value from current ${networkLabel} balances and spot prices. Historical P&L is unavailable because ORBIT does not currently have a historical price or cost-basis record for this wallet.`,
     approximate: false,
   };
 
@@ -179,9 +191,9 @@ export function getPortfolioAnalytics(
     const shortValue = tx.value !== '0.000000' && tx.value !== '0' ? `${tx.value} ETH` : (tx.tokenTransfers.length > 0 ? `${tx.tokenTransfers.length} token transfer${tx.tokenTransfers.length > 1 ? 's' : ''}` : 'Activity');
     const title = tx.tokenTransfers.length > 0 ? 'Token transfer detected' : tx.category;
     const detail = tx.category === 'Receive'
-      ? 'Inbound activity on Base'
+      ? `Inbound activity on ${networkLabel}`
       : tx.category === 'Send'
-        ? 'Outbound activity on Base'
+        ? `Outbound activity on ${networkLabel}`
         : tx.category === 'Approval'
           ? 'Approval authority change'
           : tx.category === 'Swap'
@@ -221,42 +233,16 @@ export function getPortfolioAnalytics(
 
 export function usePortfolio(): PortfolioData {
   const { address, chainId, isConnected } = useAccount();
-
-  const ethBalance = useBalance({
-    address,
-    chainId: base.id,
-    query: {
-      enabled: Boolean(address),
-      staleTime: 30_000,
-      gcTime: 60_000,
-      retry: 1,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-    },
-  });
-  const usdc = useTokenBalance(PORTFOLIO_TOKENS[0], address, isConnected);
-  const cbbtc = useTokenBalance(PORTFOLIO_TOKENS[1], address, isConnected);
-  const tokenResults = [usdc, cbbtc];
+  const isArc = chainId === arcTestnet.id;
+  const activeTokens = isArc ? ARC_PORTFOLIO_TOKENS : [];
+  const arcUsdc = useTokenBalance(ARC_PORTFOLIO_TOKENS[0], address, isPortfolioReadEnabled(chainId, ARC_PORTFOLIO_TOKENS[0].chainId, isConnected, Boolean(address)));
+  const tokenResults = isArc ? [arcUsdc] : [];
   const prices = usePrices(PORTFOLIO_PRICES);
 
   const isDisconnected = !isConnected || !address;
-  const isWrongNetwork = isConnected && chainId !== base.id;
+  const isWrongNetwork = isConnected && !isArc;
 
-  const ethAsset: PortfolioAsset = {
-    symbol: 'ETH',
-    name: 'Ethereum',
-    formatted: ethBalance.data ? formatEther(ethBalance.data.value) : '0',
-    raw: ethBalance.data?.value ?? 0n,
-    color: '#627EEA',
-    isLoading: ethBalance.isLoading,
-    isError: ethBalance.isError,
-    isNative: true,
-    priceUsd: prices.prices.ETH ?? null,
-    valueUsd: null,
-    allocationPercent: 0,
-  };
-
-  const tokenAssets: PortfolioAsset[] = PORTFOLIO_TOKENS.map((t, i) => ({
+  const tokenAssets: PortfolioAsset[] = activeTokens.map((t, i) => ({
     symbol: t.symbol,
     name: t.name,
     formatted: tokenResults[i].formatted.toString(),
@@ -270,7 +256,7 @@ export function usePortfolio(): PortfolioData {
     allocationPercent: 0,
   }));
 
-  const assets = [ethAsset, ...tokenAssets].map((asset) => {
+  const assets = (isArc ? tokenAssets : []).map((asset) => {
     const numericBalance = Number(asset.formatted);
     const valueUsd = Number.isFinite(numericBalance) && asset.priceUsd !== null && Number.isFinite(asset.priceUsd)
       ? numericBalance * asset.priceUsd
@@ -295,7 +281,7 @@ export function usePortfolio(): PortfolioData {
   const anyLoading = assets.some((asset) => asset.isLoading) || prices.isLoading;
   const hasAnyBalanceData = assets.some((asset) => asset.raw > 0n);
   const hasAnyPriceIssue = assets.some((asset) => asset.raw > 0n && asset.priceUsd === null);
-  const hasAnyOnchainError = ethBalance.isError || tokenResults.some((result) => result.isError);
+  const hasAnyOnchainError = tokenResults.some((result) => result.isError);
 
   return {
     assets: assetsWithAllocation,
@@ -307,5 +293,11 @@ export function usePortfolio(): PortfolioData {
     hasUnavailablePrices: !isDisconnected && !isWrongNetwork && !anyLoading && hasAnyPriceIssue,
     isDisconnected,
     isWrongNetwork,
+    refetch: async () => {
+      await Promise.all([
+        ...tokenResults.map((result) => result.refetch()),
+        prices.refetch(),
+      ]);
+    },
   };
 }

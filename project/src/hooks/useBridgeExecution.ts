@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useAccount, usePublicClient, useSendTransaction } from 'wagmi';
-import { erc20Abi, type Hash } from 'viem';
+import { useAccount, usePublicClient, useSendTransaction, useSwitchChain } from 'wagmi';
+import { encodeFunctionData, erc20Abi, type Hash, type Hex } from 'viem';
 import type { BridgeQuote } from '../types/bridge';
+import { cctpMessageTransmitterAbi } from '../services/bridge/cctp';
+import { getOrbitNetwork } from '../data/networks';
 
 export type BridgeExecutionStatus = 'idle' | 'wallet-confirmation' | 'source-pending' | 'source-confirmed' | 'bridging' | 'completed' | 'failed' | 'expired';
 const QUOTE_MAX_AGE_MS = 30_000;
@@ -11,7 +13,9 @@ const RECEIPT_TIMEOUT_MS = 180_000;
 export function useBridgeExecution(quote: BridgeQuote | undefined) {
   const { address, chainId } = useAccount();
   const publicClient = usePublicClient({ chainId: quote?.fromChain.id });
+  const destinationClient = usePublicClient({ chainId: quote?.toChain.id });
   const { sendTransactionAsync } = useSendTransaction();
+  const { switchChainAsync } = useSwitchChain();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<BridgeExecutionStatus>('idle');
   const [sourceHash, setSourceHash] = useState<Hash>();
@@ -34,6 +38,10 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
     if (!code || code === '0x') { const nextError = new Error('Bridge transaction target is not a contract on the source chain'); setStatus('failed'); setError(nextError); return; }
     if (quote.fromToken.isNative && quote.transactionValue !== quote.fromAmount) { const nextError = new Error('Bridge value does not match the quoted amount'); setStatus('failed'); setError(nextError); return; }
     try {
+      const gas = await publicClient.estimateGas({ account: address, to: quote.transactionTarget, data: quote.transactionData, value: quote.transactionValue });
+      const gasPrice = await publicClient.getGasPrice();
+      const nativeBalance = await publicClient.getBalance({ address });
+      if (nativeBalance < gas * gasPrice) throw new Error(`Insufficient ${getOrbitNetwork(quote.fromChain.id)?.nativeCurrency.symbol ?? 'native gas'} balance for bridge transaction`);
       setStatus('wallet-confirmation');
       const hash = await sendTransactionAsync({ to: quote.transactionTarget, data: quote.transactionData, value: quote.transactionValue, chainId: quote.fromChain.id });
       setSourceHash(hash); setStatus('source-pending');
@@ -43,5 +51,39 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
       return hash;
     } catch (caughtError) { setStatus('failed'); setError(caughtError instanceof Error ? caughtError : new Error('Bridge transaction failed')); return undefined; }
   };
-  return { execute, status, sourceHash, error };
+  const complete = async (message: Hex | undefined, attestation: Hex | undefined) => {
+    setError(null);
+    if (status !== 'source-confirmed' || !address || !quote || !message || !attestation || !destinationClient) {
+      const nextError = new Error('Circle attestation is not ready for destination mint');
+      setStatus('failed');
+      setError(nextError);
+      return undefined;
+    }
+    const destination = getOrbitNetwork(quote.toChain.id);
+    if (!destination) {
+      const nextError = new Error('Destination network is not configured for CCTP');
+      setStatus('failed');
+      setError(nextError);
+      return undefined;
+    }
+    try {
+      setStatus('bridging');
+      await switchChainAsync({ chainId: quote.toChain.id });
+      const data = encodeFunctionData({ abi: cctpMessageTransmitterAbi, functionName: 'receiveMessage', args: [message, attestation] });
+      const gas = await destinationClient.estimateGas({ account: address, to: destination.messageTransmitterV2, data, value: 0n });
+      const gasPrice = await destinationClient.getGasPrice();
+      const nativeBalance = await destinationClient.getBalance({ address });
+      if (nativeBalance < gas * gasPrice) throw new Error(`Insufficient ${destination.nativeCurrency.symbol} balance for destination mint`);
+      const hash = await sendTransactionAsync({ to: destination.messageTransmitterV2, data, value: 0n, chainId: quote.toChain.id });
+      await Promise.race([destinationClient.waitForTransactionReceipt({ hash }), new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Destination transaction confirmation timed out')), RECEIPT_TIMEOUT_MS))]);
+      setStatus('completed');
+      await queryClient.invalidateQueries();
+      return hash;
+    } catch (caughtError) {
+      setStatus('failed');
+      setError(caughtError instanceof Error ? caughtError : new Error('Destination mint failed'));
+      return undefined;
+    }
+  };
+  return { execute, complete, status, sourceHash, error };
 }

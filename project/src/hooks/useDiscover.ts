@@ -3,7 +3,7 @@ import { fetchDiscoverData } from '../services/discover';
 
 export function useDiscover() {
   const query = useQuery({
-    queryKey: ['discover', 'base'],
+    queryKey: ['discover', 'arc'],
     queryFn: fetchDiscoverData,
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,

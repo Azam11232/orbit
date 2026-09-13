@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
-import { createLifiProvider } from '../services/bridge/lifi';
+import { createCctpProvider } from '../services/bridge/cctp';
 import type { BridgeToken } from '../types/bridge';
+import { CCTP_BRIDGE_NETWORKS } from '../data/networks';
 
-const provider = createLifiProvider();
-const CHAIN_IDS = [8453, 1, 42161, 10];
+const provider = createCctpProvider();
+const CHAIN_IDS = CCTP_BRIDGE_NETWORKS.map((network) => network.id);
 
 export function useBridgeTokens() {
   const query = useQuery<BridgeToken[]>({

@@ -1,18 +1,19 @@
 import { useState } from 'react';
-import { useReadContract, useWriteContract, usePublicClient } from 'wagmi';
+import { useAccount, useReadContract, useWriteContract, usePublicClient } from 'wagmi';
 import { useQueryClient } from '@tanstack/react-query';
 import { erc20Abi, type Address, type Hash } from 'viem';
 import { base } from 'wagmi/chains';
 import type { BaseAssetConfig } from '../data/tokens';
 
 export function useSwapApproval(asset: BaseAssetConfig, owner: Address | undefined, spender: Address | null, amount: bigint | null) {
+  const { chainId } = useAccount();
   const query = useReadContract({
     address: asset.address,
     abi: erc20Abi,
     functionName: 'allowance',
     args: owner && spender && amount !== null ? [owner, spender] : undefined,
     chainId: base.id,
-    query: { enabled: Boolean(!asset.isNative && asset.address && owner && spender && amount !== null && amount > 0n) },
+    query: { enabled: Boolean(chainId === base.id && !asset.isNative && asset.address && owner && spender && amount !== null && amount > 0n) },
   });
   const publicClient = usePublicClient({ chainId: base.id });
   const { writeContractAsync } = useWriteContract();
@@ -27,7 +28,7 @@ export function useSwapApproval(asset: BaseAssetConfig, owner: Address | undefin
       setApprovalError(new Error('Approval already in progress'));
       return;
     }
-    if (!publicClient || !owner) {
+    if (chainId !== base.id || !publicClient || !owner) {
       setApprovalStatus('failed');
       setApprovalError(new Error('Wallet or Base RPC is unavailable'));
       return;

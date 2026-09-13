@@ -1,13 +1,7 @@
 import { motion } from 'framer-motion';
 import type { ReactNode } from 'react';
 import { ArrowUpRight, ChevronDown } from 'lucide-react';
-import { arbitrum, base, mainnet, optimism, polygon } from 'wagmi/chains';
-
-import baseLogo from '../assets/networks/base.svg';
-import ethereumLogo from '../assets/networks/ethereum.svg';
-import arbitrumLogo from '../assets/networks/arbitrum.svg';
-import optimismLogo from '../assets/networks/optimism.svg';
-import polygonLogo from '../assets/networks/polygon.svg';
+import { getOrbitNetwork } from '../data/networks';
 
 export function Card({ children, className = '', glow = false }: { children: ReactNode; className?: string; glow?: boolean }) {
   return (
@@ -117,18 +111,11 @@ export function TokenIcon({ symbol, color }: { symbol: string; color: string }) 
 export function ChainLogo({ chainId, className = '' }: { chainId: number; className?: string }) {
   const common = `block ${className}`;
 
-  const logoMap: Record<number, string> = {
-    [base.id]: baseLogo,
-    [mainnet.id]: ethereumLogo,
-    [arbitrum.id]: arbitrumLogo,
-    [optimism.id]: optimismLogo,
-    [polygon.id]: polygonLogo,
-  };
-
-  const src = logoMap[chainId];
+  const network = getOrbitNetwork(chainId);
+  const src = network?.logo;
   if (!src) {
-    return <span className={`inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-500 bg-slate-700 ${common}`} />;
+    return <span className={`inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-500 bg-slate-700 ${common}`} aria-hidden="true" />;
   }
 
-  return <img src={src} alt="network logo" className={`${common} select-none object-contain`} draggable={false} />;
+  return <img src={src} alt={`${network.name} logo`} className={`${common} select-none object-contain`} draggable={false} />;
 }

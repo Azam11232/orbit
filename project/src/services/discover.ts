@@ -41,8 +41,6 @@ interface YieldPoolRecord {
   ilRisk?: string;
 }
 
-interface ChainResponse extends Array<ChainRecord> {}
-interface ProtocolResponse extends Array<ProtocolRecord> {}
 interface YieldResponse {
   data?: YieldPoolRecord[];
 }
@@ -50,9 +48,7 @@ interface YieldResponse {
 const DEFILLAMA_API = 'https://api.llama.fi';
 const DEFILLAMA_YIELDS_API = 'https://yields.llama.fi';
 const ECOSYSTEMS = [
-  { name: 'Base', color: '#4B8BFF' },
-  { name: 'Ethereum', color: '#627EEA' },
-  { name: 'Arbitrum', color: '#28A0F0' },
+  { name: 'Arc', color: '#5FBFFF' },
 ] as const;
 
 async function readJson<T>(url: string): Promise<T> {
@@ -67,8 +63,8 @@ function validNumber(value: number | null | undefined): value is number {
 
 async function fetchEcosystems(): Promise<DiscoverEcosystem[]> {
   const [chains, protocols] = await Promise.all([
-    readJson<ChainResponse>(`${DEFILLAMA_API}/v2/chains`),
-    readJson<ProtocolResponse>(`${DEFILLAMA_API}/protocols`),
+    readJson<ChainRecord[]>(`${DEFILLAMA_API}/v2/chains`),
+    readJson<ProtocolRecord[]>(`${DEFILLAMA_API}/protocols`),
   ]);
 
   return ECOSYSTEMS.map((ecosystem) => ({
@@ -83,7 +79,7 @@ async function fetchEcosystems(): Promise<DiscoverEcosystem[]> {
 async function fetchOpportunities(): Promise<DiscoverOpportunity[]> {
   const response = await readJson<YieldResponse>(`${DEFILLAMA_YIELDS_API}/pools`);
   const pools = (response.data ?? [])
-    .filter((pool) => pool.chain === 'Base')
+    .filter((pool) => pool.chain === 'Arc')
     .filter((pool) => validNumber(pool.apy) && pool.apy >= 0 && pool.apy <= 1000)
     .filter((pool) => validNumber(pool.tvlUsd) && pool.tvlUsd >= 10_000)
     .sort((first, second) => (second.apy ?? 0) - (first.apy ?? 0))
@@ -95,7 +91,7 @@ async function fetchOpportunities(): Promise<DiscoverOpportunity[]> {
     return [{
       id: pool.pool,
       name: pool.project,
-      type: 'Base yield pool',
+      type: 'Arc stablecoin opportunity',
       apy: pool.apy,
       tvlUsd: pool.tvlUsd,
       symbol: pool.symbol ?? 'Unknown assets',

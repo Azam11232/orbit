@@ -8,6 +8,8 @@ export interface SwapQuoteRequest {
   walletAddress?: Address;
 }
 
+export type ArcSwapSymbol = 'USDC' | 'EURC';
+
 export interface SwapQuote {
   tokenIn: BaseAssetConfig;
   tokenOut: BaseAssetConfig;

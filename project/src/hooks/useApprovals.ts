@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useAccount, usePublicClient } from 'wagmi';
-import { base } from 'wagmi/chains';
+import { arcTestnet } from 'wagmi/chains';
 import { createApprovalProvider, type ApprovalScanResult } from '../services/security';
 
 const providerCache = new WeakMap<object, ReturnType<typeof createApprovalProvider>>();
@@ -23,15 +23,15 @@ export interface UseApprovalsResult {
 }
 
 export function useApprovals(): UseApprovalsResult {
-  const { address, chainId, isConnected } = useAccount();
-  const publicClient = usePublicClient({ chainId: base.id });
+  const { address } = useAccount();
+  const publicClient = usePublicClient({ chainId: arcTestnet.id });
   const query = useQuery({
-    queryKey: ['approvals', address, base.id],
+    queryKey: ['approvals', address, arcTestnet.id],
     queryFn: () => {
-      if (!address || !publicClient) throw new Error('Base RPC is unavailable');
+      if (!address || !publicClient) throw new Error('Arc Testnet RPC is unavailable');
       return getProvider(publicClient).scan(address);
     },
-    enabled: Boolean(address && isConnected && chainId === base.id && publicClient),
+    enabled: false,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
