@@ -55,7 +55,8 @@ export function useRevokeApproval(): UseRevokeApprovalResult {
         chainId: arcTestnet.id,
       });
       setTransactionHash(hash);
-      await publicClient.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== 'success') throw new Error('Approval revoke transaction reverted');
       setStatus('success');
       await queryClient.invalidateQueries({ queryKey: ['approvals', address, arcTestnet.id] });
     } catch (caughtError) {

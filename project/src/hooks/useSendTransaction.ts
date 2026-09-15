@@ -197,10 +197,13 @@ export function useSendTransaction(): UseSendTransactionResult {
           });
       setTransactionHash(hash);
       setStatus('pending');
-      await Promise.race([
+      const receipt = await Promise.race([
         publicClient.waitForTransactionReceipt({ hash }),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Transaction confirmation timed out')), RECEIPT_TIMEOUT_MS)),
       ]);
+      if (receipt.status !== 'success') {
+        throw new Error('Transaction reverted on Arc Testnet');
+      }
       setStatus('confirmed');
       await queryClient.invalidateQueries({ queryKey: ['prices'] });
       await queryClient.invalidateQueries({ queryKey: ['transactions', address, activeChainId] });

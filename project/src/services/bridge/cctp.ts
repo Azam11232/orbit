@@ -24,11 +24,16 @@ interface AttestationResponse {
 
 async function getAttestation(sourceDomain: number, transactionHash: string): Promise<BridgeStatus> {
   const response = await fetch(`https://iris-api-sandbox.circle.com/v2/messages/${sourceDomain}?transactionHash=${transactionHash}`);
-  if (!response.ok) throw new Error(`Circle attestation request failed (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 400) {
+      return { status: 'PENDING', substatus: 'Message not found for provided parameters' };
+    }
+    throw new Error(`Circle attestation request failed (${response.status})`);
+  }
   const json = await response.json() as AttestationResponse;
   const message = json.messages?.[0];
-  if (!message) return { status: 'PENDING' };
-  if (message.attestation === 'PENDING' || !message.attestation) return { status: 'PENDING', substatus: message.status };
+  if (!message) return { status: 'PENDING', substatus: 'Message not found for provided parameters' };
+  if (message.attestation === 'PENDING' || !message.attestation) return { status: 'PENDING', substatus: message.status ?? 'PENDING' };
   return {
     status: 'DONE',
     substatus: 'Attested',

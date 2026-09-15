@@ -1,8 +1,8 @@
 import { decodeFunctionData } from 'viem';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCctpProvider } from './cctp';
 import { CCTP_BRIDGE_NETWORKS, ARC_PRIMARY_NETWORK, isCctpRouteSupported } from '../../data/networks';
-import type { BridgeToken } from '../../types/bridge';
+import type { BridgeQuote, BridgeToken } from '../../types/bridge';
 
 const provider = createCctpProvider();
 // Arc is the source network for CCTP bridges
@@ -87,6 +87,70 @@ describe('Circle CCTP provider', () => {
         expect(quote.toToken.address).toBe(to.usdc);
       }
     }
+  });
+
+  it('resolves the CCTP V2 route registry bidirectionally and stays source-chain aware', async () => {
+    for (const from of CCTP_BRIDGE_NETWORKS) {
+      for (const to of CCTP_BRIDGE_NETWORKS) {
+        if (from.id === to.id) continue;
+        expect(isCctpRouteSupported(from.id, to.id)).toBe(true);
+        expect(isCctpRouteSupported(to.id, from.id)).toBe(true);
+        const quote = await provider.getQuote({
+          fromChain: { id: from.id, name: from.name },
+          toChain: { id: to.id, name: to.name },
+          fromToken: token(from),
+          toToken: token(to),
+          fromAmount: 1n,
+          fromAddress: '0x0000000000000000000000000000000000000001',
+          toAddress: '0x0000000000000000000000000000000000000002',
+          slippage: 0,
+        });
+        expect(quote.transactionTarget).toBe(from.tokenMessengerV2);
+        expect(quote.toToken.address).toBe(to.usdc);
+        expect(quote.raw).toEqual({
+          sourceDomain: from.cctpDomain,
+          destinationDomain: to.cctpDomain,
+          destinationCaller: '0x0000000000000000000000000000000000000000000000000000000000000000',
+          maxFee: 0n,
+          minFinalityThreshold: 2000,
+        });
+      }
+    }
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns pending instead of throwing when Circle reports a missing message for a burning transaction', async () => {
+    const fakeQuote: BridgeQuote = {
+      id: 'cctp-test-quote',
+      provider: 'Circle CCTP V2',
+      fromChain: { id: source.id, name: source.name },
+      toChain: { id: destination.id, name: destination.name },
+      fromToken: token(source),
+      toToken: token(destination),
+      fromAmount: 1n,
+      toAmount: 1n,
+      toAmountMin: 1n,
+      feeAmount: 0n,
+      gasAmount: null,
+      gasCosts: [],
+      executionDurationSeconds: null,
+      transactionTarget: null,
+      transactionData: null,
+      transactionValue: 0n,
+      bridge: 'CCTP V2',
+      quotedAt: Date.now(),
+      raw: {},
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({ messages: [] }),
+    } as Response);
+
+    await expect(provider.getStatus(fakeQuote, '0x27a500415a7a6265978b1a070281088343c0736fac2e1f7e5c6da004ce964f8d')).resolves.toMatchObject({ status: 'PENDING' });
   });
 
   it('rejects non-USDC routes', async () => {

@@ -21,10 +21,12 @@ const RECEIPT_TIMEOUT_MS = 180_000;
 
 async function waitForReceipt(client: ReturnType<typeof usePublicClient>, hash: Hex) {
   if (!client) throw new Error('Selected network RPC is unavailable');
-  return Promise.race([
+  const receipt = await Promise.race([
     client.waitForTransactionReceipt({ hash }),
     new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Gateway transaction confirmation timed out')), RECEIPT_TIMEOUT_MS)),
   ]);
+  if (receipt.status !== 'success') throw new Error('Gateway transaction reverted');
+  return receipt;
 }
 
 export function useGateway(sourceId: number, destinationId: number) {

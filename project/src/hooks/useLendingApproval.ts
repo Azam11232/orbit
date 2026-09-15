@@ -24,7 +24,7 @@ export function useLendingApproval(asset: LendingAssetConfig | undefined, amount
       return;
     }
     setStatus('confirmation'); setHash(undefined); setError(null);
-    try { const txHash = await writeContractAsync({ address: asset.underlying, abi: erc20Abi, functionName: 'approve', args: [AAVE_BASE_POOL, amount], chainId: base.id }); setHash(txHash); setStatus('pending'); await client.waitForTransactionReceipt({ hash: txHash }); setStatus('confirmed'); await queryClient.invalidateQueries({ queryKey: query.queryKey }); }
+    try { const txHash = await writeContractAsync({ address: asset.underlying, abi: erc20Abi, functionName: 'approve', args: [AAVE_BASE_POOL, amount], chainId: base.id }); setHash(txHash); setStatus('pending'); const receipt = await client.waitForTransactionReceipt({ hash: txHash }); if (receipt.status !== 'success') throw new Error('Lending approval transaction reverted'); setStatus('confirmed'); await queryClient.invalidateQueries({ queryKey: query.queryKey }); }
     catch (caught) { setStatus('failed'); setError(caught instanceof Error ? caught : new Error('Approval failed')); }
   };
   return { allowance, required, isLoading: query.isLoading, isError: query.isError, status, hash, error, approve };

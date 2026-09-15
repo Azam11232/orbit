@@ -45,11 +45,11 @@ describe('Arc activity provider', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   it('supports only Arc transaction sources', () => {
-    expect(isTransactionChainSupported(base.id)).toBe(false);
+    expect(isTransactionChainSupported(base.id)).toBe(true);
     expect(isTransactionChainSupported(arcTestnet.id)).toBe(true);
     expect(isTransactionChainSupported(1)).toBe(false);
     expect(getTransactionProviderForChain(arcTestnet.id)).toBeDefined();
-    expect(getTransactionProviderForChain(base.id)).toBeUndefined();
+    expect(getTransactionProviderForChain(base.id)).toBeDefined();
   });
 
   it('parses real-shaped Arc transactions and only the official USDC transfers', async () => {

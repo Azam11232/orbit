@@ -20,8 +20,15 @@ export function useSwapExecution() {
   const [transactionHash, setTransactionHash] = useState<Hash>();
   const [error, setError] = useState<Error | null>(null);
 
+  const reset = () => {
+    setStatus('idle');
+    setTransactionHash(undefined);
+    setError(null);
+  };
+
   const execute = async (quote: SwapQuote, recipient: Address, slippageBps: number) => {
     setError(null);
+    setStatus('idle');
     setTransactionHash(undefined);
     if (status === 'preparing' || status === 'confirmation' || status === 'pending') {
       throw new Error('A swap is already in progress');
@@ -47,10 +54,11 @@ export function useSwapExecution() {
       const hash = await sendTransactionAsync({ to: transaction.to, data: transaction.data, value: transaction.value, chainId: base.id });
       setTransactionHash(hash);
       setStatus('pending');
-      await Promise.race([
+      const receipt = await Promise.race([
         publicClient.waitForTransactionReceipt({ hash }),
         new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Transaction confirmation timed out')), RECEIPT_TIMEOUT_MS)),
       ]);
+      if (receipt.status !== 'success') throw new Error('Swap transaction reverted on Base');
       setStatus('confirmed');
       await queryClient.invalidateQueries();
     } catch (caughtError) {
@@ -59,5 +67,5 @@ export function useSwapExecution() {
     }
   };
 
-  return { execute, status, transactionHash, error };
+  return { execute, reset, status, transactionHash, error };
 }

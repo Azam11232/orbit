@@ -55,7 +55,7 @@ export function ArcSwapPage() {
   const outputAsset = assetFor(tokenOut);
   const inputBalance = useTokenBalance(inputAsset, address, Boolean(isConnected && chainId === ARC_CHAIN_ID));
   const outputBalance = useTokenBalance(outputAsset, address, Boolean(isConnected && chainId === ARC_CHAIN_ID));
-  const balance = tokenIn === 'USDC' ? inputBalance : outputBalance;
+  const balance = inputBalance;
 
   let rawAmount: bigint | null = null;
   try {

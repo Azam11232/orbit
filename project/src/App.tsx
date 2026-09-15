@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   useAccount,
@@ -15,6 +16,7 @@ import { getPortfolioAnalytics, usePortfolio } from "./hooks/usePortfolio";
 import { useApprovals } from "./hooks/useApprovals";
 import { useRevokeApproval } from "./hooks/useRevokeApproval";
 import { useSendTransaction } from "./hooks/useSendTransaction";
+import { useTokenBalance } from "./hooks/useTokenBalance";
 import { useSwapQuote } from "./hooks/useSwapQuote";
 import { useSwapApproval } from "./hooks/useSwapApproval";
 import { useSwapExecution } from "./hooks/useSwapExecution";
@@ -27,10 +29,10 @@ import { useBridgeStatus } from "./hooks/useBridgeStatus";
 import { useTransactions } from "./hooks/useTransactions";
 import { useOrbitSettings } from "./hooks/useOrbitSettings";
 import { useWatchlist, type WatchlistItem } from "./hooks/useWatchlist";
-import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type TxStatus } from "./services/transactions";
+import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type ChainTransaction, type TxStatus } from "./services/transactions";
 import { buildWalletSecurityReport } from "./services/security";
 import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
-import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, getOrbitNetwork } from "./data/networks";
+import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
 import { usePrices } from "./hooks/usePrices";
 import { fetchPortfolioHistoricalCandles, PORTFOLIO_PRICES } from "./services/prices";
 import type { BridgeChain } from "./types/bridge";
@@ -1318,9 +1320,6 @@ function StatCards() {
             </button>
           </div>
         )}
-        <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-          <div className="h-full w-[72%] rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-violet-400" />
-        </div>
       </Card>
       <Card className="p-5">
         <div className="flex items-center justify-between">
@@ -1491,6 +1490,16 @@ function formatTxValue(value: string | number | undefined, symbol = 'ETH', fallb
   const precision = numeric >= 1 ? 4 : 6;
   const trimmed = numeric.toFixed(precision).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
   return `${trimmed} ${symbol}`;
+}
+
+function formatTransactionAmount(transaction: ChainTransaction): string {
+  if (transaction.tokenTransfers.length > 0) {
+    return transaction.tokenTransfers
+      .slice(0, 2)
+      .map((transfer) => `${transfer.amount} ${transfer.symbol}`)
+      .join(' + ');
+  }
+  return formatTxValue(transaction.value, transaction.nativeSymbol);
 }
 
 function getStatusLabel(status: TxStatus): string {
@@ -1813,9 +1822,9 @@ function Portfolio() {
   const isArcTestnet = chainId === arcTestnet.id;
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
-  const portfolioNetwork = isArcTestnet ? 'Arc Testnet' : 'unsupported network';
-  const transactionsQuery = useTransactions(address, false, chainId);
-  const analytics = getPortfolioAnalytics(portfolio.assets, isArcTestnet ? [] : transactionsQuery.transactions, portfolioNetwork);
+  const portfolioNetwork = !address ? 'wallet disconnected' : isArcTestnet ? 'Arc Testnet' : 'unsupported network';
+  const transactionsQuery = useTransactions(address, isArcTestnet && Boolean(address), chainId);
+  const analytics = getPortfolioAnalytics(portfolio.assets, transactionsQuery.transactions, portfolioNetwork);
 
   const formatUsd = (value: number | null, fallback = 'N/A') =>
     value === null || !Number.isFinite(value) ? fallback : `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -1853,7 +1862,7 @@ function Portfolio() {
               const startedAt = Date.now();
               setIsRefreshing(true);
               setRefreshError(null);
-              void portfolio.refetch()
+              void Promise.all([portfolio.refetch(), transactionsQuery.refetch()])
                 .catch((error: unknown) => {
                   setRefreshError(error instanceof Error ? error.message : 'Portfolio refresh failed.');
                 })
@@ -1898,6 +1907,12 @@ function Portfolio() {
         <Card className="flex items-center gap-3 p-4 text-sm text-rose-200">
           <ShieldCheck size={16} />
           The live {portfolioNetwork} balance could not be read. Try refreshing.
+        </Card>
+      )}
+      {transactionsQuery.isError && !transactionsQuery.isLoading && isArcTestnet && (
+        <Card className="flex items-center gap-3 p-4 text-sm text-amber-200">
+          <Activity size={16} />
+          Arc activity is temporarily unavailable. Your live balance remains available; try refreshing to load activity again.
         </Card>
       )}
       {analytics.zeroBalance && !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && !portfolio.isError && (
@@ -2038,25 +2053,32 @@ function Portfolio() {
             <p className="font-semibold text-slate-200">{analytics.history.title}</p>
             <p className="mt-1 text-slate-400">{analytics.history.note}</p>
           </div>
-          {analytics.recentInsights.length > 0 ? (
+          {transactionsQuery.isLoading ? (
             <div className="space-y-3">
-              {analytics.recentInsights.map((insight: { title: string; value: string; tone: string; detail: string }) => (
-                <div key={`${insight.title}-${insight.value}`} className="data-card flex items-center justify-between rounded-xl p-3">
+              {[...Array(3)].map((_, index) => <div key={index} className="h-14 animate-pulse rounded-xl bg-white/[.04]" />)}
+            </div>
+          ) : transactionsQuery.isError ? (
+            <div className="rounded-xl border border-dashed border-amber-300/20 bg-amber-300/[.04] p-4 text-sm text-amber-100">
+              Arc activity could not be loaded.
+            </div>
+          ) : transactionsQuery.transactions.length > 0 ? (
+            <div className="space-y-3">
+              {transactionsQuery.transactions.slice(0, 5).map((transaction) => (
+                <div key={transaction.hash} className="data-card flex items-center justify-between gap-3 rounded-xl p-3">
                   <div>
-                    <p className="font-semibold text-slate-200">{insight.title}</p>
-                    <p className="mt-1 text-xs text-slate-400">{insight.detail}</p>
+                    <p className="font-semibold text-slate-200">{transaction.category}</p>
+                    <p className="mt-1 text-xs text-slate-400">{formatTransactionDate(transaction.timestamp)} on Arc Testnet</p>
                   </div>
                   <div className="text-right">
-                    <p className={`font-mono text-xs ${insight.tone === 'in' ? 'text-emerald-300' : insight.tone === 'out' ? 'text-rose-300' : 'text-slate-300'}`}>
-                      {insight.value}
-                    </p>
+                    <a href={explorerTxUrl(transaction.hash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="font-mono text-xs text-cyan-300 hover:text-cyan-200">{shortAddr(transaction.hash)}</a>
+                    <p className="mt-1 text-[10px] text-slate-500">{transaction.status}</p>
                   </div>
                 </div>
               ))}
             </div>
           ) : (
             <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/30 p-4 text-sm text-slate-400">
-              {isArcTestnet ? 'Arc transaction history is not part of this portfolio step.' : `No recent wallet signals were found for this account on ${portfolioNetwork}.`}
+              {isArcTestnet ? 'No recent Arc Testnet activity was found for this wallet.' : `No recent wallet signals were found for this account on ${portfolioNetwork}.`}
             </div>
           )}
         </div>
@@ -2473,6 +2495,10 @@ function formatPercent(label: number | null | undefined): string {
   return `${label.toFixed(2)}%`;
 }
 
+function BridgeBalanceHasEnough(raw: bigint | null, requested: bigint | null): boolean {
+  return Boolean(raw !== null && requested !== null && raw >= requested);
+}
+
 export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const isSwap = type === "swap";
   const isBridge = type === "bridge";
@@ -2493,6 +2519,9 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const swapApproval = useSwapApproval(fromAsset, address, quote?.routerAddress ?? null, rawSwapAmount);
   const swapExecution = useSwapExecution();
   const [slippageBps, setSlippageBps] = useState(50);
+  useEffect(() => {
+    swapExecution.reset();
+  }, [fromSymbol, toSymbol, swapAmount, swapExecution]);
   const [showSwapConfirmation, setShowSwapConfirmation] = useState(false);
   const swapDirection = () => { setFromSymbol(toSymbol); setToSymbol(fromSymbol); setSwapAmount(""); };
   const quoteFresh = Boolean(quote && Date.now() - quote.quotedAt <= 15_000);
@@ -2514,12 +2543,23 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   let rawBridgeAmount: bigint | null = null;
   try { rawBridgeAmount = bridgeAmount && bridgeFromToken ? parseUnits(bridgeAmount, bridgeFromToken.decimals) : null; } catch { rawBridgeAmount = null; }
   const bridgeBalance = useBridgeBalance(bridgeFromToken, address, isConnected);
-  const bridgeAmountError = bridgeAmount && rawBridgeAmount === null ? "Invalid amount" : rawBridgeAmount !== null && rawBridgeAmount <= 0n ? "Amount must be greater than zero" : rawBridgeAmount !== null && !bridgeBalance.isWrongNetwork && rawBridgeAmount > bridgeBalance.raw ? "Insufficient balance" : null;
+  const bridgeAmountError = bridgeAmount && rawBridgeAmount === null ? "Invalid amount" : rawBridgeAmount !== null && rawBridgeAmount <= 0n ? "Amount must be greater than zero" : rawBridgeAmount !== null && !bridgeBalance.isWrongNetwork && BridgeBalanceHasEnough(bridgeBalance.raw, rawBridgeAmount) === false ? "Insufficient balance" : null;
   const bridgeQuoteState = useBridgeQuote(bridgeFromChain, bridgeToChain, bridgeFromToken, bridgeToToken, isBridge && rawBridgeAmount && rawBridgeAmount > 0n && !bridgeAmountError && !bridgeSameNetwork ? rawBridgeAmount : null, address, bridgeSlippage);
   const bridgeApproval = useBridgeApproval(bridgeFromToken, address, bridgeQuoteState.quote?.transactionTarget ?? null, rawBridgeAmount);
   const bridgeExecution = useBridgeExecution(bridgeQuoteState.quote);
+  const resetBridgeExecution = bridgeExecution.reset;
   const bridgeStatus = useBridgeStatus(bridgeQuoteState.quote, bridgeExecution.sourceHash?.toString(), bridgeExecution.status === "source-confirmed" || bridgeExecution.status === "bridging" || Boolean(bridgeExecution.sourceHash));
   const bridgeWrongNetwork = isConnected && chainId !== bridgeFromChainId;
+  const queryClient = useQueryClient();
+  const resetBridgeRouteState = useCallback(() => {
+    resetBridgeExecution();
+    queryClient.removeQueries({ queryKey: ['bridge-status'] });
+    queryClient.removeQueries({ queryKey: ['bridge-quote'] });
+    setShowBridgeConfirmation(false);
+  }, [queryClient, resetBridgeExecution]);
+  useEffect(() => {
+    resetBridgeRouteState();
+  }, [bridgeFromChainId, bridgeToChainId, resetBridgeRouteState]);
   const bridgeReady = isBridgeReviewable({ isConnected, wrongNetwork: bridgeWrongNetwork, sameNetwork: bridgeSameNetwork, hasSourceToken: Boolean(bridgeFromToken), hasDestinationToken: Boolean(bridgeToToken), hasQuote: Boolean(bridgeQuoteState.quote), hasAmount: Boolean(rawBridgeAmount), hasAmountError: Boolean(bridgeAmountError), approvalRequired: bridgeApproval.required, simulationSucceeded: bridgeQuoteState.simulationSucceeded, isSimulating: bridgeQuoteState.isSimulating, quoteFresh: Date.now() - (bridgeQuoteState.quote?.quotedAt ?? 0) <= 30_000 });
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -2607,12 +2647,12 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                     <div className="rounded-lg border border-white/10 bg-[#101725] p-2 font-bold text-white">USDC</div>
                   </div>
                   <span className="font-mono text-xs text-slate-500">
-                    Balance {bridgeBalance.isWrongNetwork ? `Switch to ${bridgeFromChain.name}` : bridgeBalance.isLoading ? "..." : bridgeFromToken ? formatUnits(bridgeBalance.raw, bridgeFromToken.decimals) : "Unavailable"}
+                    Balance {bridgeBalance.isDisconnected ? 'Connect wallet' : bridgeBalance.isLoading ? "..." : bridgeFromToken && bridgeBalance.raw !== null ? formatUnits(bridgeBalance.raw, bridgeFromToken.decimals) : "Unavailable"}
                   </span>
                 </div>
-                <div className="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button type="button" onClick={() => bridgeFromToken && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
+                <div className="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button type="button" onClick={() => bridgeFromToken && bridgeBalance.raw !== null && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
               </div>
-              <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeSameNetwork ? "Same network" : bridgeQuoteState.isError ? "Available" : "CCTP V2"}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmount !== null && bridgeQuoteState.quote?.toAmount !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin !== null && bridgeQuoteState.quote?.toAmountMin !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">Depends on Circle attestation</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount !== null && bridgeQuoteState.quote?.feeAmount !== undefined && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Unavailable"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
+              <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeSameNetwork ? "Same network" : !isCctpRouteSupported(bridgeFromChainId, bridgeToChainId) ? "Unavailable" : "CCTP V2"}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmount !== null && bridgeQuoteState.quote?.toAmount !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin !== null && bridgeQuoteState.quote?.toAmountMin !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">Depends on Circle attestation</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount !== null && bridgeQuoteState.quote?.feeAmount !== undefined && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Fee determined by Circle/CCTP"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
               <p className={`mt-4 text-xs ${bridgeSameNetwork ? "text-amber-300" : bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeExecution.status === "failed" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeSameNetwork ? "Select different source and destination networks." : bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "CCTP token catalog unavailable." : bridgeQuoteState.isError ? `CCTP route unavailable: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approve canonical USDC for Circle CCTP." : bridgeQuoteState.isSimulating ? "Checking the CCTP burn on the source chain..." : bridgeQuoteState.simulationError ? `CCTP burn simulation failed: ${bridgeQuoteState.simulationError.message}` : bridgeStatus.status?.status === "DONE" ? "Source message attested. Destination mint requires confirmation." : bridgeQuoteState.quote ? "Ready to review Circle CCTP transfer." : "Enter a USDC amount to request a CCTP quote.")}</p>
               {bridgeApproval.required ? <Button className="mt-4 w-full" onClick={() => void bridgeApproval.approve()} disabled={bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending"} icon>{bridgeApproval.status === "pending" ? "Approval pending..." : bridgeApproval.status === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation ? <Button className="mt-4 w-full" onClick={() => void bridgeExecution.complete(bridgeStatus.status?.message, bridgeStatus.status?.attestation)} disabled={bridgeExecution.status === "bridging" || bridgeExecution.status === "completed"} icon>{bridgeExecution.status === "bridging" ? "Mint pending..." : bridgeExecution.status === "completed" ? "Bridge completed" : "Mint on destination"}</Button> : <Button className="mt-4 w-full" onClick={() => setShowBridgeConfirmation(true)} disabled={!bridgeReady || bridgeExecution.status === "source-pending"} icon>{bridgeExecution.status === "source-pending" ? "Bridge pending..." : bridgeExecution.status === "source-confirmed" ? "Waiting for attestation..." : "Review bridge"}</Button>}
               {bridgeExecution.sourceHash && bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) && <p className="mt-2 text-xs text-cyan-300">Source transaction: <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeExecution.sourceHash)}</a></p>}
@@ -2866,17 +2906,15 @@ function Discover() {
 function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | null }) {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
-  const portfolio = usePortfolio();
   const { send, status, transactionHash, error, reset, gasCost } = useSendTransaction();
   const isArcTestnet = chainId === arcTestnet.id;
-  const [assetSymbol, setAssetSymbol] = useState("USDC");
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const asset = ARC_USDC;
-  const balanceAsset = portfolio.assets.find((item) => item.symbol === asset.symbol);
+  const balance = useTokenBalance(asset, address, Boolean(isConnected && isArcTestnet));
   const isPaymentRequestSend = Boolean(paymentRequest);
-  const balanceRaw = balanceAsset?.raw ?? 0n;
+  const balanceRaw = balance.raw;
   const isBusy = status === "preparing" || status === "confirmation" || status === "pending";
   const setInput = (setter: (value: string) => void, value: string) => {
     setter(value);
@@ -2887,7 +2925,6 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
     if (!paymentRequest) return;
     setRecipient(paymentRequest.recipient);
     setAmount(paymentRequest.amount);
-    setAssetSymbol('USDC');
     setFormError(null);
   }, [paymentRequest]);
   const handleMax = () => {
@@ -2919,6 +2956,10 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
       setFormError("Amount must be greater than zero.");
       return;
     }
+    if (balance.isError || balance.isLoading) {
+      setFormError("Arc USDC balance is unavailable. Refresh and try again.");
+      return;
+    }
     if (rawAmount > balanceRaw) {
       setFormError(`Insufficient ${asset.symbol} balance.`);
       return;
@@ -2929,7 +2970,7 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <PageTitle label="Move / Send" title="Send assets securely." />
-      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send supported assets.</p><WalletButton className="mt-7" /></Card> : chainId !== base.id && chainId !== arcTestnet.id ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to a supported network</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Sending is available on Base Mainnet and Arc Testnet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>{isArcTestnet ? "Send / Arc Testnet" : "Send asset"}</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span>{isArcTestnet ? <div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Arc ERC-20</span></div> : <select value={assetSymbol} onChange={(event) => { setAssetSymbol(event.target.value); setAmount(""); setFormError(null); }} disabled={isBusy} className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white outline-none focus:border-cyan-300/40"><option value="ETH" className="bg-[#101725]">ETH</option><option value="USDC" className="bg-[#101725]">USDC</option><option value="cbBTC" className="bg-[#101725]">cbBTC</option></select>}</label><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">{asset.symbol}</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balanceAsset?.isLoading ? "..." : balanceAsset?.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} ${asset.symbol}`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>{isArcTestnet ? "Arc Testnet" : "Base Mainnet"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} {asset.symbol}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} ${isArcTestnet ? "native USDC" : "ETH"}` : "Estimated during preparation"}</span></div></div>{isArcTestnet && <p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p>}</div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, chainId)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || Boolean(balanceAsset?.isLoading) || Boolean(balanceAsset?.isError)} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
+      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send Arc Testnet USDC.</p><WalletButton className="mt-7" /></Card> : !isArcTestnet ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send uses the official Arc Testnet USDC contract and your connected wallet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send / Arc Testnet</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><div><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Official Arc ERC-20</span></div></div><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend || balance.isLoading || balance.isError} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balance.isLoading ? "..." : balance.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} USDC`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} USDC</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} native USDC` : "Estimated during preparation"}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p></div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || balance.isLoading || balance.isError} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
     </div>
   );
 }
@@ -3039,13 +3080,19 @@ function ReceivePage() {
   const { switchChain } = useSwitchChain();
   const isArcTestnet = chainId === arcTestnet.id;
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const copyAddress = async () => {
     if (!address) return;
-    await navigator.clipboard.writeText(address);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
+    try {
+      await navigator.clipboard.writeText(address);
+      setCopyError(null);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopyError("Unable to copy the wallet address. Select and copy it manually.");
+    }
   };
-  return <div className="mx-auto max-w-3xl space-y-6"><PageTitle label="Move / Receive" title="Fund your wallet." /><div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />Arc Testnet / USDC</div>{!isConnected || !address ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to display your Arc Testnet receiving address.</p><WalletButton className="mt-7" /></Card> : <Card className="flex flex-col items-center p-8 text-center" glow><div className="flex items-center gap-2 text-sm font-bold text-slate-200"><ChainLogo chainId={arcTestnet.id} className="h-6 w-6" />Arc Testnet</div><Label>Your Arc Testnet wallet address</Label><div className="mt-6 rounded-2xl bg-white p-4"><QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#070a11" includeMargin /></div><p className="mt-6 max-w-lg break-all font-mono text-xs leading-6 text-slate-300">{address}</p><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send Arc USDC to this address on Arc Testnet. Displaying this address does not confirm that funds were received.</p>{!isArcTestnet && <Button variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })} className="mt-6">Switch to Arc Testnet</Button>}<Button variant="secondary" onClick={() => void copyAddress()} className="mt-6"><Copy size={15} />{copied ? "Copied" : "Copy address"}</Button></Card>}</div>;
+  return <div className="mx-auto max-w-3xl space-y-6"><PageTitle label="Move / Receive" title="Fund your wallet." /><div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />Arc Testnet / USDC</div>{!isConnected || !address ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to display your Arc Testnet receiving address.</p><WalletButton className="mt-7" /></Card> : <Card className="flex flex-col items-center p-8 text-center" glow><div className="flex items-center gap-2 text-sm font-bold text-slate-200"><ChainLogo chainId={arcTestnet.id} className="h-6 w-6" />Arc Testnet</div><Label>Your Arc Testnet wallet address</Label><div className="mt-6 rounded-2xl bg-white p-4"><QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#070a11" includeMargin /></div><p className="mt-6 max-w-lg break-all font-mono text-xs leading-6 text-slate-300">{address}</p><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send real USDC to this connected wallet address on Arc Testnet. The QR and copied value are the wallet address itself.</p>{!isArcTestnet && <Button variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })} className="mt-6">Switch to Arc Testnet</Button>}<Button variant="secondary" onClick={() => void copyAddress()} className="mt-6"><Copy size={15} />{copied ? "Copied" : "Copy address"}</Button>{copyError && <p className="mt-3 text-xs text-rose-300">{copyError}</p>}</Card>}</div>;
 }
 function WatchlistPage() {
   const { items, has, toggle, remove } = useWatchlist();
@@ -3548,8 +3595,12 @@ export function Generic({ page }: { page: Page }) {
 function ActivityPage() {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
+  const isArcTestnet = chainId === arcTestnet.id;
+  const isBase = chainId === base.id;
+  const isSupportedNetwork = isArcTestnet || isBase;
+  const activityNetwork = isArcTestnet ? 'Arc Testnet' : isBase ? 'Base' : 'supported network';
   const { transactions, isLoading, isError, refetch, isFetching } =
-    useTransactions(address, isConnected && chainId === arcTestnet.id, chainId);
+    useTransactions(address, isConnected && isSupportedNetwork, chainId);
   const [selectedCategory, setSelectedCategory] = useState<
     'all' | 'Send' | 'Receive' | 'Swap' | 'Approval' | 'Contract Interaction' | 'Other'
   >('all');
@@ -3559,7 +3610,7 @@ function ActivityPage() {
   const [page, setPage] = useState(1);
   const [showAllTransactions, setShowAllTransactions] = useState(false);
 
-  const wrongNetwork = isConnected && chainId !== arcTestnet.id;
+  const wrongNetwork = isConnected && !isSupportedNetwork;
 
   const filteredTransactions = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
@@ -3655,7 +3706,7 @@ function ActivityPage() {
           </Button>
         }
       />
-      <div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />Arc Testnet activity</div>
+      <div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={isSupportedNetwork ? chainId : arcTestnet.id} className="h-5 w-5" />{activityNetwork} activity</div>
       {!isConnected ? (
         <Card className="flex flex-col items-center justify-center p-16 text-center">
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300">
@@ -3673,13 +3724,13 @@ function ActivityPage() {
           </div>
           <h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">
-            ORBIT activity is currently scoped to Arc Testnet transactions.
+            ORBIT activity is currently available on Arc Testnet and Base.
           </p>
           <Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>
             Switch to Arc Testnet
           </Button>
         </Card>
-      ) : isLoading && !isFetching ? (
+      ) : isLoading ? (
         <Card className="p-5">
           <div className="space-y-3">
             {[...Array(8)].map((_, i) => (
@@ -3719,7 +3770,7 @@ function ActivityPage() {
           </div>
           <h2 className="mt-6 text-2xl font-bold">No transactions found</h2>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">
-            No recent onchain transactions were found for this wallet on Arc Testnet.
+            No recent onchain transactions were found for this wallet on {activityNetwork}.
           </p>
         </Card>
       ) : (
@@ -3761,7 +3812,7 @@ function ActivityPage() {
                 <div>
                   <Label>Transaction History</Label>
                   <p className="mt-2 text-sm text-slate-400">
-                    Showing {filteredTransactions.length} loaded Base transaction{filteredTransactions.length === 1 ? '' : 's'}
+                    Showing {filteredTransactions.length} loaded {activityNetwork} transaction{filteredTransactions.length === 1 ? '' : 's'}
                   </p>
                 </div>
                 <Pill color="cyan">LIVE DATA</Pill>
@@ -3835,7 +3886,17 @@ function ActivityPage() {
                                 </div>
                               </td>
                               <td className="overflow-hidden px-3 py-4 align-top">
-                                <div className="flex max-w-[150px] items-center gap-2 font-mono text-cyan-300 hover:text-cyan-200">
+                                  <div className="flex max-w-[150px] items-center gap-2 font-mono text-cyan-300 hover:text-cyan-200">
+                                    <a
+                                      href={explorerTxUrl(tx.hash, chainId)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title="Open transaction in block explorer"
+                                      className="min-w-0 truncate"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      {shortAddr(tx.hash)}
+                                    </a>
                                   <button
                                     type="button"
                                     onClick={(event) => {
@@ -3845,7 +3906,6 @@ function ActivityPage() {
                                     title={tx.hash}
                                     className="flex min-w-0 items-center gap-1 text-left"
                                   >
-                                    <span className="truncate">{shortAddr(tx.hash)}</span>
                                     <Copy size={11} className="shrink-0" />
                                   </button>
                                 </div>
@@ -3857,7 +3917,7 @@ function ActivityPage() {
                                 <span title={tx.to} className="block max-w-[110px] truncate">{shortAddr(tx.to)}</span>
                               </td>
                               <td className="overflow-hidden px-3 py-4 align-top font-mono text-slate-300">
-                                <span className="block max-w-[120px] truncate">{formatTxValue(tx.value, tx.nativeSymbol)}</span>
+                                <span className="block max-w-[120px] truncate">{formatTransactionAmount(tx)}</span>
                               </td>
                               <td className="overflow-hidden px-3 py-4 align-top">
                                 <span className={`inline-flex rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[.14em] ${getStatusClasses(tx.status)}`}>

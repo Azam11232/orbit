@@ -47,7 +47,7 @@ export function useLendingOperation(operation: LendingOperation, asset: LendingA
       const request = provider.encode(operation, asset, amount, address);
       if (request.address !== AAVE_BASE_POOL) throw new Error('Aave Pool target verification failed');
       const txHash = await writeContractAsync({ ...request, chainId: base.id } as never);
-      setHash(txHash); setStatus('pending'); await client.waitForTransactionReceipt({ hash: txHash }); setStatus('confirmed'); await queryClient.invalidateQueries();
+      setHash(txHash); setStatus('pending'); const receipt = await client.waitForTransactionReceipt({ hash: txHash }); if (receipt.status !== 'success') throw new Error('Lending transaction reverted'); setStatus('confirmed'); await queryClient.invalidateQueries();
     } catch (caught) { setStatus('failed'); setError(caught instanceof Error ? caught : new Error(`${operation} transaction failed`)); }
   };
   return { execute, status, hash, error };

@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAccount, usePublicClient, useSendTransaction, useSwitchChain } from 'wagmi';
 import { encodeFunctionData, erc20Abi, type Hash, type Hex } from 'viem';
-import type { BridgeQuote } from '../types/bridge';
+import type { BridgeQuote, BridgeStatus } from '../types/bridge';
 import { cctpMessageTransmitterAbi } from '../services/bridge/cctp';
 import { getOrbitNetwork } from '../data/networks';
 
@@ -20,6 +20,12 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
   const [status, setStatus] = useState<BridgeExecutionStatus>('idle');
   const [sourceHash, setSourceHash] = useState<Hash>();
   const [error, setError] = useState<Error | null>(null);
+  const reset = useCallback(() => {
+    setStatus('idle');
+    setSourceHash(undefined);
+    setError(null);
+    queryClient.removeQueries({ queryKey: ['bridge-status'] });
+  }, [queryClient]);
   const execute = async () => {
     setError(null);
     if (status === 'wallet-confirmation' || status === 'source-pending' || status === 'source-confirmed' || status === 'bridging') {
@@ -45,7 +51,8 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
       setStatus('wallet-confirmation');
       const hash = await sendTransactionAsync({ to: quote.transactionTarget, data: quote.transactionData, value: quote.transactionValue, chainId: quote.fromChain.id });
       setSourceHash(hash); setStatus('source-pending');
-      await Promise.race([publicClient.waitForTransactionReceipt({ hash }), new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Source transaction confirmation timed out')), RECEIPT_TIMEOUT_MS))]);
+      const sourceReceipt = await Promise.race([publicClient.waitForTransactionReceipt({ hash }), new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Source transaction confirmation timed out')), RECEIPT_TIMEOUT_MS))]);
+      if (sourceReceipt.status !== 'success') throw new Error('Bridge source transaction reverted');
       setStatus('source-confirmed');
       await queryClient.invalidateQueries();
       return hash;
@@ -74,8 +81,43 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
       const gasPrice = await destinationClient.getGasPrice();
       const nativeBalance = await destinationClient.getBalance({ address });
       if (nativeBalance < gas * gasPrice) throw new Error(`Insufficient ${destination.nativeCurrency.symbol} balance for destination mint`);
+
+      const balanceBefore = await destinationClient.readContract({
+        address: destination.usdc,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [address],
+      }) as bigint;
+
       const hash = await sendTransactionAsync({ to: destination.messageTransmitterV2, data, value: 0n, chainId: quote.toChain.id });
-      await Promise.race([destinationClient.waitForTransactionReceipt({ hash }), new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Destination transaction confirmation timed out')), RECEIPT_TIMEOUT_MS))]);
+      const destinationReceipt = await Promise.race([destinationClient.waitForTransactionReceipt({ hash }), new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Destination transaction confirmation timed out')), RECEIPT_TIMEOUT_MS))]);
+      if (destinationReceipt.status !== 'success') throw new Error('Bridge destination transaction reverted');
+
+      const balanceAfter = await destinationClient.readContract({
+        address: destination.usdc,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [address],
+      }) as bigint;
+
+      if (balanceAfter <= balanceBefore) {
+        const nextError = new Error('Destination mint not observed: canonical USDC balance did not increase');
+        setStatus('failed');
+        setError(nextError);
+        return undefined;
+      }
+
+      if (sourceHash) {
+        queryClient.setQueryData<BridgeStatus>(['bridge-status', quote.id, sourceHash.toString()], (current) => current ? ({
+          ...current,
+          receiving: { txHash: hash, chainId: quote.toChain.id },
+        }) : ({
+          status: 'PENDING',
+          substatus: 'Destination receiveMessage submitted',
+          receiving: { txHash: hash, chainId: quote.toChain.id },
+        }));
+      }
+
       setStatus('completed');
       await queryClient.invalidateQueries();
       return hash;
@@ -85,5 +127,5 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
       return undefined;
     }
   };
-  return { execute, complete, status, sourceHash, error };
+  return { execute, complete, reset, status, sourceHash, error };
 }

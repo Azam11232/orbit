@@ -1,16 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 import type { Address } from 'viem';
-import { arcTestnet } from 'wagmi/chains';
-import { createArcProvider, type ChainTransaction } from '../services/transactions';
+import { arcTestnet, base } from 'wagmi/chains';
+import { createArcProvider, createBasescanProvider, type ChainTransaction } from '../services/transactions';
 
 const arcProvider = createArcProvider();
+const baseProvider = createBasescanProvider();
 
 export function isTransactionChainSupported(chainId: number): boolean {
-  return chainId === arcTestnet.id;
+  return chainId === arcTestnet.id || chainId === base.id;
 }
 
 export function getTransactionProviderForChain(chainId: number) {
-  return chainId === arcTestnet.id ? arcProvider : undefined;
+  if (chainId === arcTestnet.id) return arcProvider;
+  if (chainId === base.id) return baseProvider;
+  return undefined;
 }
 
 export interface UseTransactionsResult {
@@ -28,7 +31,7 @@ export function useTransactions(address?: Address, enabled = true, chainId: numb
     queryFn: async () => {
       if (!address) return [];
       const provider = getTransactionProviderForChain(chainId);
-      if (!provider) throw new Error('Arc activity is only available on Arc Testnet');
+      if (!provider) throw new Error('Activity is not available on this network');
       return provider.fetchTransactions({ address, chainId, limit: 20 });
     },
     enabled: Boolean(address) && enabled && isTransactionChainSupported(chainId),

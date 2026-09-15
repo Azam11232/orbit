@@ -40,7 +40,8 @@ export function useSwapApproval(asset: BaseAssetConfig, owner: Address | undefin
       const hash = await writeContractAsync({ address: asset.address, abi: erc20Abi, functionName: 'approve', args: [spender, amount], chainId: base.id });
       setApprovalHash(hash);
       setApprovalStatus('pending');
-      await publicClient.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== 'success') throw new Error('Swap approval transaction reverted');
       setApprovalStatus('confirmed');
       await queryClient.invalidateQueries({ queryKey: query.queryKey });
     } catch (caughtError) {
