@@ -80,7 +80,7 @@ const AAVE_LENDING_SELECTOR = new Set([
 ]);
 export const ARC_USDC_ADDRESS = ARC_USDC.address;
 export const ARC_USDC_DECIMALS = ARC_USDC.decimals;
-const ARCSCAN_API_BASE_URL = 'https://testnet.arcscan.app/api/v2';
+const ARCSCAN_PROXY_BASE_URL = '/api/arcscan';
 
 const txRequestCache = new Map<string, Promise<ChainTransaction[]>>();
 const arcTxRequestCache = new Map<string, Promise<ChainTransaction[]>>();
@@ -432,8 +432,8 @@ function normalizeArcTransaction(
 
 async function fetchArcTransactions(address: string, limit: number): Promise<ChainTransaction[]> {
   const itemsCount = Math.max(limit, 20);
-  const transactionsUrl = `${ARCSCAN_API_BASE_URL}/addresses/${address}/transactions?items_count=${itemsCount}`;
-  const transfersUrl = `${ARCSCAN_API_BASE_URL}/addresses/${address}/token-transfers?items_count=${itemsCount}`;
+  const transactionsUrl = `${ARCSCAN_PROXY_BASE_URL}/addresses/${address}/transactions?items_count=${itemsCount}`;
+  const transfersUrl = `${ARCSCAN_PROXY_BASE_URL}/addresses/${address}/token-transfers?items_count=${itemsCount}`;
   const [{ items: transactionItems }, { items: transferItems }] = await Promise.all([
     fetchJson<{ items?: BlockscoutTxItem[] }>(transactionsUrl),
     fetchJson<{ items?: BlockscoutTokenTransferRaw[] }>(transfersUrl),

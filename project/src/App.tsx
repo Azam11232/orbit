@@ -627,9 +627,8 @@ function Sidebar({
       className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-700/80 bg-slate-950/95 px-4 py-6 shadow-[0_32px_80px_rgba(2,6,23,0.65)] backdrop-blur-xl transition-all duration-300 lg:relative lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
     >
       <div className="flex items-center justify-between px-3">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <Logo />
-          <ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />
         </div>
         <button
           className="rounded-xl border border-slate-700 bg-slate-900 p-1.5 text-slate-300 lg:hidden"
@@ -981,7 +980,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
             }}
             className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 shadow-sm transition hover:border-sky-400/40 hover:bg-slate-800"
           >
-            <ChainLogo chainId={displayNetwork.id} className="h-4 w-4 text-sky-300" />
+            <ChainLogo chainId={displayNetwork.id} className="h-5 w-5 text-sky-300" />
             <span>{isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : "Network"}</span>
             <ChevronRight size={12} className="text-slate-400" />
           </button>
@@ -1026,7 +1025,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
               >
                 <div className="flex items-center gap-2.5">
                   <div className={`flex h-7 w-7 items-center justify-center rounded-xl ${selected ? "bg-sky-500/15 text-sky-200" : "bg-slate-800 text-slate-300"}`}>
-                    <ChainLogo chainId={item.id} className="h-4 w-4" />
+                    <ChainLogo chainId={item.id} className="h-5 w-5" />
                   </div>
                   <div>
                     <div className="text-xs font-semibold">{item.name}</div>
@@ -1142,7 +1141,19 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
     );
   }
 
-  const chartCandles = candles.slice(-28);
+  const currentPortfolioValue = portfolio.totalValueUsd;
+  const chartCandles = candles.slice(-28).map((candle, index, visibleCandles) => {
+    if (index !== visibleCandles.length - 1 || !Number.isFinite(currentPortfolioValue) || currentPortfolioValue <= 0) {
+      return candle;
+    }
+
+    return {
+      ...candle,
+      high: Math.max(candle.open, currentPortfolioValue),
+      low: Math.min(candle.open, currentPortfolioValue),
+      close: currentPortfolioValue,
+    };
+  });
   const values = chartCandles.flatMap((candle) => [candle.high, candle.low]);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
@@ -1202,7 +1213,7 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
               const bodyBottom = topPad + ((maxValue - Math.min(candle.open, candle.close)) / range) * usableHeight;
               const wickTop = topPad + ((maxValue - candle.high) / range) * usableHeight;
               const wickBottom = topPad + ((maxValue - candle.low) / range) * usableHeight;
-              const bodyHeight = Math.max(8, bodyBottom - bodyTop);
+              const bodyHeight = Math.max(1, bodyBottom - bodyTop);
               const color = isUp ? '#34d399' : '#f87171';
               const opacity = shouldReduceMotion ? 1 : 0.75;
 
@@ -1421,6 +1432,9 @@ function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
     ["Bridge", "Move across networks", Network, "bridge"],
     ["Send", "Transfer to any wallet", Send, "send"],
     ["Receive", "Fund your wallet", ArrowDownLeft, "receive"],
+    ["Swap", "Exchange stablecoins", ArrowLeftRight, "swap"],
+    ["Arc Pay", "Create a payment request", CreditCard, "arc-pay"],
+    ["Unified Balance", "Manage cross-network USDC", CircleDollarSign, "unified-balance"],
   ];
   return (
     <motion.div
@@ -1433,9 +1447,6 @@ function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
           <Label>Quick Actions</Label>
           <h2 className="mt-2 text-2xl font-extrabold tracking-[-0.05em] text-white sm:text-3xl">Make a move</h2>
         </div>
-        <button onClick={() => setPage("activity")} className="inline-flex items-center gap-1 text-xs font-semibold text-sky-300 transition hover:text-sky-200">
-          View all <ArrowUpRight size={13} className="inline" />
-        </button>
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
         {items.map(([name, desc, Icon, id], index) => (
@@ -1741,7 +1752,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
       <StatCards />
       <QuickActions setPage={setPage} />
 
-      <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+      <div className="grid gap-4 lg:grid-cols-1">
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
@@ -1790,7 +1801,6 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
             </div>
           </Card>
         </motion.div>
-        <RecentActivity setPage={setPage} />
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">

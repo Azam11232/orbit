@@ -2,6 +2,8 @@ import { motion } from 'framer-motion';
 import type { ReactNode } from 'react';
 import { ArrowUpRight, ChevronDown } from 'lucide-react';
 import { getOrbitNetwork } from '../data/networks';
+import usdcLogo from '../assets/tokens/usdc.svg';
+import eurcLogo from '../assets/tokens/eurc.svg';
 
 export function Card({ children, className = '', glow = false }: { children: ReactNode; className?: string; glow?: boolean }) {
   return (
@@ -71,13 +73,11 @@ export function AssetLogo({ symbol, color, className = '' }: { symbol: string; c
   }
 
   if (symbol === 'USDC') {
-    return (
-      <svg viewBox="0 0 32 32" className={common} aria-hidden="true">
-        <circle cx="16" cy="16" r="14" fill="#2775CA" />
-        <circle cx="16" cy="16" r="10.5" fill="white" opacity="0.12" />
-        <path d="M16 8.4a7.6 7.6 0 0 1 5.9 2.7c1.1 1.2 1.9 2.8 2.1 4.6-1.5 1.1-3.2 1.8-5.1 2.1l-.5.1v2.7h-3.1v-2.7l-.5-.1c-1.9-.3-3.6-.9-5.1-2.1.2-1.8 1-3.4 2.1-4.6A7.6 7.6 0 0 1 16 8.4Zm-2.2 7.1c.6.3 1.3.5 2.2.5s1.6-.2 2.2-.5c.5-.3.9-.7 1.2-1.2-.3-.4-.7-.8-1.2-1.2-.6-.3-1.3-.5-2.2-.5s-1.6.2-2.2.5c-.5.4-.9.8-1.2 1.2.3.5.7.9 1.2 1.2Z" fill="white" />
-      </svg>
-    );
+    return <img src={usdcLogo} className={`${common} object-contain`} alt="" aria-hidden="true" />;
+  }
+
+  if (symbol === 'EURC') {
+    return <img src={eurcLogo} className={`${common} object-contain`} alt="" aria-hidden="true" />;
   }
 
   if (symbol === 'cbBTC') {
@@ -98,12 +98,14 @@ export function AssetLogo({ symbol, color, className = '' }: { symbol: string; c
 }
 
 export function TokenIcon({ symbol, color }: { symbol: string; color: string }) {
+  const isOfficialTokenLogo = symbol === 'USDC' || symbol === 'EURC';
+
   return (
     <span
-      className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full text-white shadow-[0_12px_22px_rgba(15,23,42,0.14)] ring-2 ring-white/70"
-      style={{ background: `linear-gradient(135deg, ${color}, rgba(15, 23, 42, 0.88))` }}
+      className={`flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full text-white shadow-[0_12px_22px_rgba(15,23,42,0.14)] ${isOfficialTokenLogo ? '' : 'ring-2 ring-white/70'}`}
+      style={{ background: isOfficialTokenLogo ? 'transparent' : `linear-gradient(135deg, ${color}, rgba(15, 23, 42, 0.88))` }}
     >
-      <AssetLogo symbol={symbol} color={color} className="h-5 w-5" />
+      <AssetLogo symbol={symbol} color={color} className={isOfficialTokenLogo ? 'h-9 w-9' : 'h-5 w-5'} />
     </span>
   );
 }

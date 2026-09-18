@@ -1,15 +1,10 @@
-<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="eth-grad" x1="68" y1="30" x2="182" y2="220" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#C7D6FF"/>
-      <stop offset="1" stop-color="#7C88FF"/>
-    </linearGradient>
-  </defs>
-  <circle cx="128" cy="128" r="104" fill="#0B0F1A"/>
-  <path d="M128 28 76 134l52 30 52-30L128 28Z" fill="url(#eth-grad)"/>
-  <path d="M128 28v102l52-30L128 28Z" fill="#DDE5FF" opacity="0.92"/>
-  <path d="M76 134l52 30v64L76 134Z" fill="#7190FF"/>
-  <path d="M128 164v64l52-94-52 30Z" fill="#4B66EE"/>
-  <path d="M128 128l-52 30 52 30 52-30-52-30Z" fill="#EEF3FF" opacity="0.8"/>
-  <path d="M128 70l19 31-19 11-19-11 19-31Z" fill="#F3F7FF" opacity="0.8"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 417" role="img" aria-label="Ethereum">
+  <g fill="none">
+    <path fill="#343434" d="M127.99 0 0 208.17l127.99-58.18 128 58.18L127.99 0Z"/>
+    <path fill="#8C8C8C" d="m127.99 0 128 208.17-128-58.18V0Z"/>
+    <path fill="#3C3C3B" d="m0 208.17 127.99 71.76v-129.94L0 208.17Z"/>
+    <path fill="#8C8C8C" d="m127.99 149.99v129.94L256 208.17l-128.01-58.18Z"/>
+    <path fill="#141414" d="m0 232.47 127.99 184.35V304.2L0 232.47Z"/>
+    <path fill="#393939" d="m127.99 304.2v112.62L256 232.47 127.99 304.2Z"/>
+  </g>
 </svg>

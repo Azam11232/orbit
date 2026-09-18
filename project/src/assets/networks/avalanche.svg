@@ -1,7 +1,4 @@
-<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Avalanche</title>
-  <desc id="desc">Avalanche network mark</desc>
-  <circle cx="128" cy="128" r="120" fill="#E84142"/>
-  <path d="M151.6 71.2c4.5-7.8 15.8-7.8 20.3 0l38.7 67c4.5 7.8-1.1 17.6-10.1 17.6h-77.4c-9 0-14.6-9.8-10.1-17.6l38.6-67Z" fill="#fff"/>
-  <path d="M72.8 184.2c-9 0-14.6-9.8-10.1-17.6l29.4-50.9c4.5-7.8 15.8-7.8 20.3 0l29.4 50.9c4.5 7.8-1.1 17.6-10.1 17.6H72.8Z" fill="#fff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Avalanche">
+  <circle cx="128" cy="128" r="128" fill="#E84142"/>
+  <path fill="#fff" d="M78 166c-5 0-9-3-9-8 0-2 1-5 2-7l45-84c3-6 8-9 14-9s11 3 14 9l45 84c1 2 2 5 2 7 0 5-4 8-9 8h-28c-5 0-8-2-10-7l-14-31-14 31c-2 5-5 7-10 7H78Zm50-66-15 33h30l-15-33Z"/>
 </svg>
