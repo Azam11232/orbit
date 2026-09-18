@@ -3,7 +3,9 @@ import { arcTestnet } from 'wagmi/chains';
 import { ARC_USDC } from '../data/tokens';
 import {
   arcPaymentRequestUrl,
+  arcPaymentRequestQrUri,
   createArcPaymentRequest,
+  decodeArcPaymentLink,
   decodeArcPaymentRequest,
   encodeArcPaymentRequest,
   verifyArcPayment,
@@ -52,6 +54,22 @@ describe('Arc payment requests', () => {
     const request = createArcPaymentRequest({ recipient, amount: '1' });
     const url = new URL(arcPaymentRequestUrl(request, 'https://orbit.example/app'));
     expect(decodeArcPaymentRequest(url.searchParams.get('arcPay') ?? '')).toEqual(request);
+    expect(url.toString().length).toBeLessThan(180);
+  });
+
+  it('creates an ERC-681 token transfer QR payload', () => {
+    const request = createArcPaymentRequest({ recipient, amount: '1.25' });
+    expect(arcPaymentRequestQrUri(request)).toBe(
+      `ethereum:${ARC_USDC.address}@${arcTestnet.id}/transfer?address=${recipient}&uint256=1250000`,
+    );
+  });
+
+  it('round-trips a cancelled request link state', () => {
+    const request = createArcPaymentRequest({ recipient, amount: '1' });
+    const params = new URL(arcPaymentRequestUrl(request, 'https://orbit.example/app', 'cancelled')).searchParams;
+    expect(decodeArcPaymentLink(params)).toEqual({ request, state: 'cancelled' });
+    params.set('state', 'unknown');
+    expect(() => decodeArcPaymentLink(params)).toThrow('state');
   });
 
   it('rejects invalid recipient, zero, negative, and over-precision amounts', () => {

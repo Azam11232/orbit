@@ -9,6 +9,7 @@ import { useArcSwapExecution, useArcSwapQuote } from '../hooks/useArcSwap';
 import { explorerTxUrl } from '../services/transactions';
 import type { ArcSwapSymbol } from '../types/swap';
 import { Button, Card, Label, TokenIcon } from './ui';
+import { TransactionSuccessScreen } from './TransactionSuccessScreen';
 
 const ARC_CHAIN_ID = 5042002;
 const QUOTE_MAX_AGE_MS = 30_000;
@@ -31,6 +32,7 @@ export function ArcSwapPage() {
   const [showReview, setShowReview] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [mode, setMode] = useState<'token' | 'fx'>('token');
+  const [completedAt, setCompletedAt] = useState<number | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -81,6 +83,13 @@ export function ArcSwapPage() {
   const execution = useArcSwapExecution();
   const resetExecution = execution.reset;
   useEffect(() => {
+    if (execution.state === 'confirmed' && execution.transactionHash) {
+      setCompletedAt((current) => current ?? Date.now());
+    } else if (execution.state !== 'confirmed') {
+      setCompletedAt(null);
+    }
+  }, [execution.state, execution.transactionHash]);
+  useEffect(() => {
     resetExecution();
     setShowReview(false);
     setValidationError(null);
@@ -116,6 +125,12 @@ export function ArcSwapPage() {
     });
   };
 
+  const resetSwap = () => {
+    resetExecution();
+    setShowReview(false);
+    setValidationError(null);
+  };
+
   const statusText = validationError
     ?? execution.error?.message
     ?? amountError
@@ -123,6 +138,28 @@ export function ArcSwapPage() {
     ?? (quoteQuery.isError ? `No route available on Arc Testnet for this pair right now.` : null)
     ?? (!quoteQuery.quote && amountForQuote ? 'Requesting a live Arc Testnet quote...' : null)
     ?? (quoteQuery.quote && !quoteFresh ? 'Swap quote expired. Request a fresh quote.' : null);
+
+  if (execution.state === 'confirmed' && execution.transactionHash && quoteQuery.quote) {
+    return (
+      <TransactionSuccessScreen
+        title="Swap Successful!"
+        description="Your token swap was successfully confirmed on Arc Testnet."
+        amountLabel="Amount sold"
+        amount={quoteQuery.quote.amountIn}
+        token={inputAsset}
+        secondaryAmount={{ label: 'Amount received', amount: quoteQuery.quote.estimatedOutput.amount, token: outputAsset }}
+        networks={[{ label: 'Network', network: { id: ARC_CHAIN_ID, name: 'Arc Testnet' } }]}
+        transactionHash={execution.transactionHash}
+        explorerUrl={explorerTxUrl(execution.transactionHash, ARC_CHAIN_ID)}
+        gasFee="Unavailable"
+        completedAt={completedAt ?? Date.now()}
+        primaryLabel="Back to Swap"
+        secondaryLabel="Swap Again"
+        onBack={resetSwap}
+        onPrimary={resetSwap}
+      />
+    );
+  }
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">

@@ -2,18 +2,28 @@ import { useEffect, useMemo, useState } from 'react';
 import { arcTestnet } from 'wagmi/chains';
 import { useAccount, useConnect, useSwitchChain } from 'wagmi';
 import type { Address } from 'viem';
-import { Copy, QrCode, RefreshCw, ShieldCheck, Wallet } from 'lucide-react';
+import { Ban, Copy, Plus, QrCode, RefreshCw, ShieldCheck, Wallet } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { useTransactions } from '../hooks/useTransactions';
 import {
   arcPaymentRequestUrl,
+  arcPaymentRequestQrUri,
   createArcPaymentRequest,
-  decodeArcPaymentRequest,
+  decodeArcPaymentLink,
+  encodeArcPaymentRequest,
   verifyArcPayment,
   type ArcPaymentRequest,
 } from '../services/arcPayment';
 import { Button, Card, Label, Pill } from './ui';
 import { getPreferredConnector } from '../wallet';
+
+function isCancelledRequestStored(key: string): boolean {
+  try {
+    return window.localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
 
 export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => void }) {
   const { address, chainId, isConnected } = useAccount();
@@ -23,6 +33,7 @@ export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => v
   const [label, setLabel] = useState('');
   const [recipient, setRecipient] = useState(address ?? '');
   const [createdRequest, setCreatedRequest] = useState<ArcPaymentRequest | null>(null);
+  const [cancelled, setCancelled] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -31,22 +42,26 @@ export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => v
     const encoded = new URLSearchParams(window.location.search).get('arcPay');
     if (!encoded) return { request: null, error: null };
     try {
-      return { request: decodeArcPaymentRequest(encoded), error: null };
+      return { link: decodeArcPaymentLink(new URLSearchParams(window.location.search)), error: null };
     } catch (error) {
-      return { request: null, error: error instanceof Error ? error.message : 'Invalid Arc payment request' };
+      return { link: null, error: error instanceof Error ? error.message : 'Invalid Arc payment request' };
     }
   }, []);
-  const importedRequest = importedRequestResult.request;
+  const importedLink = importedRequestResult.link;
+  const importedRequest = importedLink?.request ?? null;
   const decodedRequestError = importedRequestResult.error;
   const displayedRequestError = decodedRequestError;
   const request = importedRequest ?? createdRequest;
-  const requestUrl = request ? arcPaymentRequestUrl(request) : '';
+  const cancellationKey = request ? `orbit:arc-pay:cancelled:${encodeArcPaymentRequest(request)}` : '';
+  const requestIsCancelled = Boolean(request && (cancelled || importedLink?.state === 'cancelled' || (typeof window !== 'undefined' && isCancelledRequestStored(cancellationKey))));
+  const requestUrl = request ? arcPaymentRequestUrl(request, undefined, requestIsCancelled ? 'cancelled' : undefined) : '';
+  const qrUri = request ? arcPaymentRequestQrUri(request) : '';
   const verificationQuery = useTransactions(
     request?.recipient as Address | undefined,
-    Boolean(request) && chainId === arcTestnet.id,
+    Boolean(request) && !requestIsCancelled && chainId === arcTestnet.id,
     arcTestnet.id,
   );
-  const verification = request
+  const verification = request && !requestIsCancelled
     ? verificationQuery.isError
       ? { status: 'unavailable' as const, matches: [], reason: 'Unable to verify payment' }
       : verificationQuery.isLoading
@@ -58,16 +73,43 @@ export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => v
     if (address && !createdRequest && !importedRequest) setRecipient(address);
   }, [address, createdRequest, importedRequest]);
 
+  useEffect(() => {
+    setCancelled(importedLink?.state === 'cancelled');
+  }, [importedLink?.state]);
+
   const createRequest = () => {
     setCreateError(null);
     try {
       const next = createArcPaymentRequest({ recipient, amount, label });
       setCreatedRequest(next);
+      setCancelled(false);
       const url = arcPaymentRequestUrl(next);
       window.history.replaceState({}, '', url);
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : 'Unable to create payment request');
     }
+  };
+
+  const cancelRequest = () => {
+    if (!request || requestIsCancelled || verification?.status === 'confirmed') return;
+    try {
+      window.localStorage.setItem(`orbit:arc-pay:cancelled:${encodeArcPaymentRequest(request)}`, '1');
+    } catch {
+      setCancelled(true);
+    }
+    setCancelled(true);
+    const url = new URL(arcPaymentRequestUrl(request));
+    url.searchParams.set('state', 'cancelled');
+    window.history.replaceState({}, '', url);
+  };
+
+  const createNewRequest = () => {
+    setCreatedRequest(null);
+    setCancelled(false);
+    setCreateError(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.replaceState({}, '', url);
   };
 
   const copyRequest = async () => {
@@ -82,7 +124,9 @@ export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => v
     if (connector) connect({ connector });
   };
 
-  const statusLabel = verification?.status === 'confirmed'
+  const statusLabel = requestIsCancelled
+    ? 'Request Cancelled'
+    : verification?.status === 'confirmed'
     ? 'Payment Confirmed'
     : verification?.status === 'detected'
       ? 'Payment Detected'
@@ -91,7 +135,7 @@ export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => v
     : verification?.status === 'unavailable'
       ? 'Unable to verify payment'
       : 'Awaiting Payment';
-  const statusColor = verification?.status === 'confirmed' ? 'green' : verification?.status === 'unavailable' ? 'red' : verification?.status === 'detected' ? 'cyan' : 'amber';
+  const statusColor = requestIsCancelled ? 'red' : verification?.status === 'confirmed' ? 'green' : verification?.status === 'unavailable' ? 'red' : verification?.status === 'detected' ? 'cyan' : 'amber';
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -126,6 +170,7 @@ export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => v
               <div className="flex justify-between gap-4"><span className="text-slate-500">Token</span><span className="font-semibold text-slate-200">USDC</span></div>
               <div><span className="text-slate-500">Recipient</span><p className="mt-1 break-all font-mono text-xs text-slate-300">{request.recipient}</p></div>
             </div>
+            {requestIsCancelled && <div className="mt-4 rounded-xl border border-rose-300/20 bg-rose-300/[.06] p-4 text-sm text-rose-100"><p className="font-semibold">This payment request was cancelled.</p><p className="mt-1 text-xs text-rose-100/75">This link is no longer an active request.</p></div>}
             {verification?.status === 'confirmed' && (
               <div className="mt-4 rounded-xl border border-emerald-300/20 bg-emerald-300/[.06] p-4 text-sm text-emerald-100">
                 <p className="font-semibold">Payment detected and confirmed on Arc.</p>
@@ -139,16 +184,18 @@ export function ArcPayPage({ onPay }: { onPay: (request: ArcPaymentRequest) => v
             {verification?.status === 'unavailable' && <p className="mt-4 text-sm text-rose-200">Unable to verify payment. The Arc activity provider did not return reliable evidence.</p>}
             {isConnected && chainId !== arcTestnet.id && <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-sm text-amber-100"><p className="font-semibold">Arc Testnet required</p><p className="mt-1 text-xs text-amber-100/80">Switch networks before paying or verifying this request.</p><Button variant="secondary" className="mt-3" onClick={() => switchChain({ chainId: arcTestnet.id })} disabled={isSwitching}>{isSwitching ? 'Switching...' : 'Switch to Arc Testnet'}</Button></div>}
             <div className="mt-5 flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={() => void verificationQuery.refetch()} disabled={verificationQuery.isFetching}><RefreshCw size={15} className={verificationQuery.isFetching ? 'animate-spin' : ''} />Refresh verification</Button>
-              <Button variant="secondary" onClick={() => void copyRequest()}><Copy size={15} />{copied ? 'Copied' : 'Copy request'}</Button>
+              {!requestIsCancelled && verification?.status !== 'confirmed' && <Button variant="secondary" onClick={() => void verificationQuery.refetch()} disabled={verificationQuery.isFetching}><RefreshCw size={15} className={verificationQuery.isFetching ? 'animate-spin' : ''} />Refresh verification</Button>}
+              {!requestIsCancelled && verification?.status !== 'confirmed' && <Button variant="secondary" onClick={() => void copyRequest()}><Copy size={15} />{copied ? 'Copied' : 'Copy request'}</Button>}
+              {!requestIsCancelled && verification?.status !== 'confirmed' && <Button variant="secondary" onClick={cancelRequest}><Ban size={15} />Cancel request</Button>}
               {(verification?.status === 'awaiting' || verification?.status === 'not-found') && <Button onClick={() => { if (!isConnected) connectWallet(); else if (chainId !== arcTestnet.id) switchChain({ chainId: arcTestnet.id }); else onPay(request); }} disabled={isConnecting || isSwitching}>{!isConnected ? 'Connect wallet to pay' : chainId !== arcTestnet.id ? 'Switch to Arc Testnet' : 'Pay request'}</Button>}
+              {(requestIsCancelled || verification?.status === 'confirmed') && <Button onClick={createNewRequest}><Plus size={15} />Create new request</Button>}
             </div>
           </Card>
           <Card className="flex flex-col items-center p-6" glow>
             <Label>Shareable request</Label>
-            <div className="mt-5 rounded-2xl bg-white p-4"><QRCodeSVG value={requestUrl} size={220} bgColor="#ffffff" fgColor="#070a11" includeMargin /></div>
-            <p className="mt-4 break-all text-center font-mono text-[10px] text-slate-500">{requestUrl}</p>
-            <p className="mt-4 text-center text-xs leading-5 text-slate-400">The QR contains the exact Arc Testnet, USDC, amount, recipient, and optional label shown here.</p>
+            <div className="mt-5 rounded-2xl bg-white p-4"><QRCodeSVG value={qrUri} size={220} bgColor="#ffffff" fgColor="#070a11" includeMargin level="M" /></div>
+            <p className="mt-4 break-all text-center font-mono text-[10px] text-slate-500">{qrUri}</p>
+            <p className="mt-4 text-center text-xs leading-5 text-slate-400">Scan with a wallet that supports ERC-681 token transfer requests for Arc Testnet.</p>
           </Card>
         </div>
       ) : (

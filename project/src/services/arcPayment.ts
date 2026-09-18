@@ -15,19 +15,19 @@ export interface ArcPaymentRequest {
   label?: string;
 }
 
+export type ArcPaymentRequestState = 'active' | 'cancelled';
+
+export interface ArcPaymentLink {
+  request: ArcPaymentRequest;
+  state: ArcPaymentRequestState;
+}
+
 export type ArcPaymentVerification =
   | { status: 'confirmed'; matches: ChainTransaction[] }
   | { status: 'detected'; matches: ChainTransaction[] }
   | { status: 'not-found'; matches: [] }
   | { status: 'awaiting'; matches: [] }
   | { status: 'unavailable'; matches: []; reason: string };
-
-function toBase64Url(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
 
 function fromBase64Url(value: string): string {
   const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
@@ -79,21 +79,59 @@ export function createArcPaymentRequest({ recipient, amount, label }: { recipien
 }
 
 export function encodeArcPaymentRequest(request: ArcPaymentRequest): string {
-  return toBase64Url(JSON.stringify(assertArcRequestShape(request)));
+  const validated = assertArcRequestShape(request);
+  return [
+    '1',
+    validated.chainId,
+    validated.token,
+    validated.recipient,
+    validated.amountRaw,
+    validated.label ? encodeURIComponent(validated.label).replace(/\./g, '%2E') : '',
+  ].join('.');
 }
 
 export function decodeArcPaymentRequest(encoded: string): ArcPaymentRequest {
   try {
+    if (encoded.startsWith('1.')) {
+      const [version, chainId, token, recipient, amountRaw, encodedLabel = ''] = encoded.split('.');
+      const label = encodedLabel ? decodeURIComponent(encodedLabel) : undefined;
+      return assertArcRequestShape({
+        version: Number(version),
+        chainId: Number(chainId),
+        token,
+        recipient,
+        amountRaw,
+        amount: formatUnits(BigInt(amountRaw), ARC_USDC.decimals),
+        label,
+      });
+    }
     return assertArcRequestShape(JSON.parse(fromBase64Url(encoded)));
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : 'Invalid Arc payment request');
   }
 }
 
-export function arcPaymentRequestUrl(request: ArcPaymentRequest, origin = typeof window === 'undefined' ? '' : window.location.origin): string {
+export function decodeArcPaymentLink(params: URLSearchParams): ArcPaymentLink {
+  const encoded = params.get('arcPay');
+  if (!encoded) throw new Error('Invalid Arc payment request');
+  const state = params.get('state');
+  if (state !== null && state !== 'active' && state !== 'cancelled') throw new Error('Invalid Arc payment request state');
+  return {
+    request: decodeArcPaymentRequest(encoded),
+    state: state === 'cancelled' ? 'cancelled' : 'active',
+  };
+}
+
+export function arcPaymentRequestUrl(request: ArcPaymentRequest, origin = typeof window === 'undefined' ? '' : window.location.origin, state?: ArcPaymentRequestState): string {
   const url = new URL(origin || 'https://orbit.local');
   url.searchParams.set('arcPay', encodeArcPaymentRequest(request));
+  if (state) url.searchParams.set('state', state);
   return url.toString();
+}
+
+export function arcPaymentRequestQrUri(request: ArcPaymentRequest): string {
+  const validated = assertArcRequestShape(request);
+  return `ethereum:${validated.token}@${validated.chainId}/transfer?address=${validated.recipient}&uint256=${validated.amountRaw}`;
 }
 
 export function findMatchingArcPayments(

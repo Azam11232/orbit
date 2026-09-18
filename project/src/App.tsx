@@ -31,26 +31,31 @@ import { useOrbitSettings } from "./hooks/useOrbitSettings";
 import { useWatchlist, type WatchlistItem } from "./hooks/useWatchlist";
 import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type ChainTransaction, type TxStatus } from "./services/transactions";
 import { buildWalletSecurityReport } from "./services/security";
-import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
-import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
+import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS, type BaseAssetConfig } from "./data/tokens";
+import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, explorerTransactionUrl, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
 import { usePrices } from "./hooks/usePrices";
-import { fetchPortfolioHistoricalCandles, PORTFOLIO_PRICES } from "./services/prices";
+import { PORTFOLIO_PRICES } from "./services/prices";
+import { reconstructTokenBalanceHistory } from "./services/portfolioHistory";
 import type { BridgeChain } from "./types/bridge";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Activity,
+  ArrowLeft,
   ArrowDownLeft,
   ArrowLeftRight,
   ArrowUpRight,
   Bell,
   BookOpen,
+  CheckCircle2,
   ChevronRight,
   CircleDollarSign,
   Compass,
   Copy,
   CreditCard,
+  Clock3,
   Crosshair,
   ExternalLink,
+  Fuel,
   Globe2,
   Landmark,
   LayoutDashboard,
@@ -66,6 +71,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   TrendingUp,
+  UserRound,
   Wallet,
   X,
 } from "lucide-react";
@@ -80,6 +86,7 @@ import {
 import { ArcPayPage } from "./components/ArcPayPage";
 import { ArcSwapPage } from "./components/ArcSwapPage";
 import { UnifiedBalancePage } from "./components/UnifiedBalancePage";
+import { TransactionSuccessScreen } from "./components/TransactionSuccessScreen";
 import { OrbitBrand } from "./components/OrbitBrand";
 import type { ArcPaymentRequest } from "./services/arcPayment";
 import { useDiscover } from "./hooks/useDiscover";
@@ -582,7 +589,6 @@ const navGroups = [
     items: [
       ["send", "Send", Send],
       ["receive", "Receive", ArrowDownLeft],
-      ["arc-pay", "Arc Pay", CreditCard],
       ["bridge", "Bridge", Network],
       ["swap", "Swap", ArrowLeftRight],
       ["unified-balance", "Unified Balance", CircleDollarSign],
@@ -593,14 +599,6 @@ const navGroups = [
     items: [
       ["security", "Security Center", ShieldCheck],
       ["approvals", "Approvals & Revoke", LockKeyhole],
-    ],
-  },
-  {
-    title: "EXPLORE",
-    items: [
-      ["discover", "Discover", Compass],
-      ["watchlist", "Watchlist", Radar],
-      ["about", "About", BookOpen],
     ],
   },
 ];
@@ -624,7 +622,7 @@ function Sidebar({
 
   return (
     <aside
-      className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-700/80 bg-slate-950/95 px-4 py-6 shadow-[0_32px_80px_rgba(2,6,23,0.65)] backdrop-blur-xl transition-all duration-300 lg:relative lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
+      className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col overflow-y-auto border-r border-slate-700/80 bg-slate-950/95 px-4 py-6 shadow-[0_32px_80px_rgba(2,6,23,0.65)] backdrop-blur-xl transition-all duration-300 lg:fixed lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
     >
       <div className="flex items-center justify-between px-3">
         <div className="flex items-center gap-2">
@@ -637,7 +635,7 @@ function Sidebar({
           <X size={18} />
         </button>
       </div>
-      <div className="mt-8 flex-1 space-y-6 overflow-y-auto">
+      <div className="mt-8 space-y-6">
         {navGroups.map((g) => (
           <div key={g.title}>
             <Label>{g.title}</Label>
@@ -664,23 +662,43 @@ function Sidebar({
           </div>
         ))}
       </div>
-      <div className="border-t border-slate-800 pt-4">
+      <div className="mt-2 border-t border-slate-800 pt-4">
+        <button
+          type="button"
+          onClick={() => {
+            setPage("about");
+            setOpen(false);
+          }}
+          className={`group relative flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-xs font-semibold transition-all duration-200 ${page === "about" ? "bg-sky-500/15 text-white shadow-[0_16px_32px_rgba(14,165,233,0.18)]" : "text-slate-300 hover:bg-slate-800 hover:text-white"}`}
+        >
+          <span className={`flex h-7 w-7 items-center justify-center rounded-xl ${page === "about" ? "bg-sky-500/20 text-sky-200" : "bg-slate-800 text-slate-300 ring-1 ring-slate-700"}`}>
+            <BookOpen size={15} />
+          </span>
+          <span>About</span>
+          {page === "about" && (
+            <span className="ml-auto h-2 w-2 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.7)]" />
+          )}
+        </button>
+      </div>
+      <div className="border-t border-slate-800 pt-3">
         <div className="relative">
           <button
             type="button"
             onClick={() => setWalletMenuOpen((value) => !value)}
-            className="flex w-full items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 p-3 text-left shadow-sm transition hover:border-sky-400/40"
+            className="group flex w-full items-center gap-3 rounded-2xl border border-sky-400/15 bg-[linear-gradient(135deg,rgba(15,23,42,0.96),rgba(23,25,55,0.92))] p-3 text-left shadow-[0_12px_30px_rgba(14,165,233,0.10)] transition hover:border-sky-400/35 hover:shadow-[0_14px_34px_rgba(14,165,233,0.16)]"
           >
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-blue-500 to-violet-500 text-[10px] font-bold text-white">
+            <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-blue-500 to-violet-500 text-[10px] font-bold text-white shadow-[0_0_16px_rgba(59,130,246,0.28)]">
               {isConnected && address ? address.slice(2, 4).toUpperCase() : "WC"}
+              <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-slate-900 ${isConnected ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" : "bg-slate-500"}`} />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold text-slate-100">{isConnected && address ? shortAddress(address) : "Wallet"}</p>
-              <p className="font-mono text-[9px] text-slate-400">
-                {isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : 'Awaiting wallet'}
+              <p className="mt-1 flex items-center gap-1.5 font-mono text-[9px] text-slate-400">
+                <ChainLogo chainId={activeNetwork?.id ?? arcTestnet.id} className="h-3.5 w-3.5" />
+                <span className="truncate">{isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : 'Awaiting wallet'}</span>
               </p>
             </div>
-            <MoreHorizontal size={15} className="text-slate-400" />
+            <MoreHorizontal size={15} className="text-slate-500 transition group-hover:text-slate-300" />
           </button>
           {walletMenuOpen && (
             <div className="absolute bottom-full left-0 right-0 z-20 mb-2 rounded-2xl border border-slate-700 bg-slate-900/95 p-3 shadow-[0_24px_64px_rgba(2,6,23,0.5)]">
@@ -1059,58 +1077,15 @@ export function NetworkIcon({ chainId, className = "" }: { chainId: number; clas
   return <ChainLogo chainId={chainId} className={`h-4 w-4 ${className}`} />;
 }
 
-function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
+function Chart({ portfolio, transactions, walletAddress, isTransactionsLoading, isTransactionsError }: {
+  portfolio: ReturnType<typeof usePortfolio>;
+  transactions: ChainTransaction[];
+  walletAddress?: string;
+  isTransactionsLoading: boolean;
+  isTransactionsError: boolean;
+}) {
   const shouldReduceMotion = useReducedMotion();
-  const [candles, setCandles] = useState<Array<{ time: number; open: number; high: number; low: number; close: number }>>([]);
-  const [isChartLoading, setIsChartLoading] = useState(true);
-  const [chartError, setChartError] = useState<string | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-
-  useEffect(() => {
-    let isActive = true;
-
-    const fetchChart = async () => {
-      const balances = portfolio.assets
-        .filter((asset) => asset.raw > 0n)
-        .map((asset) => ({
-          symbol: asset.symbol,
-          raw: asset.raw,
-          decimals: asset.symbol === 'USDC' ? 6 : asset.symbol === 'cbBTC' ? 8 : 18,
-        }));
-
-      if (balances.length === 0) {
-        if (isActive) {
-          setCandles([]);
-          setChartError(null);
-          setIsChartLoading(false);
-          setHoverIndex(null);
-        }
-        return;
-      }
-
-      try {
-        const history = await fetchPortfolioHistoricalCandles(balances, 30);
-        if (isActive) {
-          setCandles(history.slice(-30));
-          setChartError(null);
-        }
-      } catch (error) {
-        if (isActive) {
-          setCandles([]);
-          setChartError(error instanceof Error ? error.message : 'Historical market data is unavailable.');
-        }
-      } finally {
-        if (isActive) {
-          setIsChartLoading(false);
-        }
-      }
-    };
-
-    void fetchChart();
-    return () => {
-      isActive = false;
-    };
-  }, [portfolio.assets]);
 
   if (portfolio.isLoading) {
     return (
@@ -1133,28 +1108,40 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
     );
   }
 
-  if (candles.length === 0) {
+  const currentAsset = portfolio.assets.find((asset) => asset.symbol === 'USDC');
+  const balanceHistory = walletAddress && currentAsset
+    ? reconstructTokenBalanceHistory({
+      transactions,
+      walletAddress,
+      currentBalance: currentAsset.raw,
+      tokenAddress: ARC_USDC.address,
+    })
+    : [];
+  const currentValue = walletAddress && currentAsset && !portfolio.isDisconnected && !portfolio.isLoading && Number.isFinite(portfolio.totalValueUsd)
+    ? portfolio.totalValueUsd
+    : null;
+
+  if (isTransactionsLoading) {
     return (
       <div className="flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
-        {isChartLoading ? 'Loading portfolio history…' : chartError ? 'Historical market data unavailable.' : 'No wallet balance available for a portfolio history chart.'}
+        Loading confirmed balance history…
       </div>
     );
   }
 
-  const currentPortfolioValue = portfolio.totalValueUsd;
-  const chartCandles = candles.slice(-28).map((candle, index, visibleCandles) => {
-    if (index !== visibleCandles.length - 1 || !Number.isFinite(currentPortfolioValue) || currentPortfolioValue <= 0) {
-      return candle;
-    }
+  if (balanceHistory.length === 0 && currentValue === null) {
+    return (
+      <div className="flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
+        {isTransactionsError ? 'Confirmed balance history unavailable.' : 'No wallet balance available for a portfolio history chart.'}
+      </div>
+    );
+  }
 
-    return {
-      ...candle,
-      high: Math.max(candle.open, currentPortfolioValue),
-      low: Math.min(candle.open, currentPortfolioValue),
-      close: currentPortfolioValue,
-    };
-  });
-  const values = chartCandles.flatMap((candle) => [candle.high, candle.low]);
+  const historicalPoints = balanceHistory.map((point) => ({ time: point.time, value: Number(point.balance) / 10 ** (currentAsset?.symbol === 'USDC' ? 6 : 18) }));
+  const chartPoints = currentValue !== null
+    ? [...historicalPoints, { time: Date.now(), value: currentValue }]
+    : historicalPoints;
+  const values = chartPoints.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
   const range = maxValue - minValue || 1;
@@ -1166,89 +1153,73 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
   const bottomPad = 18;
   const usableWidth = svgWidth - leftPad - rightPad;
   const usableHeight = svgHeight - topPad - bottomPad;
-  const step = usableWidth / Math.max(chartCandles.length, 1);
-  const candleWidth = Math.max(5, Math.min(14, step * 0.68));
-  const hoverCandle = hoverIndex === null ? null : chartCandles[hoverIndex];
-  const tooltipIndex = hoverIndex ?? 0;
+  const step = usableWidth / Math.max(chartPoints.length - 1, 1);
+  const pointFor = (point: { time: number; value: number }, index: number) => ({
+    ...point,
+    x: leftPad + (chartPoints.length === 1 ? usableWidth / 2 : step * index),
+    y: topPad + ((maxValue - point.value) / range) * usableHeight,
+  });
+  const plottedPoints = chartPoints.map(pointFor);
+  const linePoints = plottedPoints.map((point) => `${point.x},${point.y}`).join(' ');
+  const areaPoints = `${leftPad},${svgHeight - bottomPad} ${linePoints} ${svgWidth - rightPad},${svgHeight - bottomPad}`;
+  const hoverPoint = hoverIndex === null ? null : plottedPoints[hoverIndex];
+  const formatChartDate = (time: number) => new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(time));
+  const formatAxisDate = (time: number) => new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(time));
 
   return (
     <div className="space-y-4 pt-2">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-slate-400">
         <span>Portfolio value</span>
-        <span>{`$${(chartCandles[chartCandles.length - 1]?.close ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</span>
+        <span>{`$${(currentValue ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</span>
       </div>
 
       <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),transparent_28%),linear-gradient(180deg,rgba(15,23,42,0.96),rgba(15,23,42,0.82))] p-3">
         <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(to_top,rgba(148,163,184,0.08)_1px,transparent_1px)] [background-size:28px_28px]" />
 
         <div className="relative z-10">
-          {hoverCandle && (
+          {hoverPoint && (
             <div
               className="pointer-events-none absolute z-20 -translate-x-1/2 rounded-xl border border-slate-700 bg-slate-950/95 px-2.5 py-1.5 text-[10px] text-slate-200 shadow-[0_16px_30px_rgba(2,6,23,0.45)]"
               style={{
-                left: `${((tooltipIndex + 0.5) / Math.max(chartCandles.length, 1)) * 100}%`,
-                top: `${Math.max(18, 18 + (maxValue - hoverCandle.high) / range * usableHeight)}px`,
+                left: `${(hoverPoint.x / svgWidth) * 100}%`,
+                top: `${Math.max(8, hoverPoint.y - 52)}px`,
               }}
             >
-              <div className="font-semibold text-white">${hoverCandle.close.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
-              <div className="mt-0.5 flex gap-2 text-[9px] text-slate-400">
-                <span>O ${hoverCandle.open.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                <span>H ${hoverCandle.high.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                <span>L ${hoverCandle.low.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                <span>C ${hoverCandle.close.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-              </div>
+              <div className="font-semibold text-white">${hoverPoint.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+              <div className="mt-0.5 text-[9px] text-slate-400">{formatChartDate(hoverPoint.time)}</div>
             </div>
           )}
 
-          <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="h-64 w-full" role="img" aria-label="Portfolio value chart">
+          <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="h-56 w-full" role="img" aria-label="Portfolio value history chart">
             {[0, 1, 2, 3].map((line) => {
               const y = topPad + (usableHeight / 3) * line;
               return <line key={line} x1={leftPad} x2={svgWidth - rightPad} y1={y} y2={y} stroke="rgba(148,163,184,0.12)" strokeDasharray="4 10" />;
             })}
-
-            {chartCandles.map((candle, index) => {
-              const x = leftPad + step * index + step / 2;
-              const isUp = candle.close >= candle.open;
-              const bodyTop = topPad + ((maxValue - Math.max(candle.open, candle.close)) / range) * usableHeight;
-              const bodyBottom = topPad + ((maxValue - Math.min(candle.open, candle.close)) / range) * usableHeight;
-              const wickTop = topPad + ((maxValue - candle.high) / range) * usableHeight;
-              const wickBottom = topPad + ((maxValue - candle.low) / range) * usableHeight;
-              const bodyHeight = Math.max(1, bodyBottom - bodyTop);
-              const color = isUp ? '#34d399' : '#f87171';
-              const opacity = shouldReduceMotion ? 1 : 0.75;
-
-              return (
-                <g
-                  key={`${candle.time}-${index}`}
-                  onMouseEnter={() => setHoverIndex(index)}
-                  onMouseLeave={() => setHoverIndex(null)}
-                  style={{ cursor: 'pointer' }}
-                  opacity={opacity}
-                >
-                  <line
-                    x1={x}
-                    x2={x}
-                    y1={wickTop}
-                    y2={wickBottom}
-                    stroke={color}
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                  />
-                  <rect
-                    x={x - candleWidth / 2}
-                    y={bodyTop}
-                    width={candleWidth}
-                    height={bodyHeight}
-                    rx={2}
-                    fill={color}
-                    fillOpacity={0.9}
-                    stroke="rgba(255,255,255,0.08)"
-                    strokeWidth="0.8"
-                    style={shouldReduceMotion ? undefined : { filter: `drop-shadow(0 0 8px ${color}33)` }}
-                  />
-                </g>
-              );
-            })}
+            <polygon points={areaPoints} fill="url(#portfolioArea)" opacity={shouldReduceMotion ? 0.24 : 0.34} />
+            <polyline points={linePoints} fill="none" stroke="#60a5fa" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={shouldReduceMotion ? undefined : { filter: 'drop-shadow(0 0 8px rgba(96,165,250,0.45))' }} />
+            <defs>
+              <linearGradient id="portfolioArea" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0" stopColor="#38bdf8" stopOpacity="0.55" />
+                <stop offset="1" stopColor="#2563eb" stopOpacity="0.02" />
+              </linearGradient>
+            </defs>
+            {plottedPoints.map((point, index) => (
+              <g key={`${point.time}-${index}`} onMouseEnter={() => setHoverIndex(index)} onMouseLeave={() => setHoverIndex(null)} style={{ cursor: 'pointer' }}>
+                <circle cx={point.x} cy={point.y} r={index === plottedPoints.length - 1 ? 5 : 3.5} fill="#0f172a" stroke="#7dd3fc" strokeWidth="2" />
+                <title>{`${formatChartDate(point.time)}: $${point.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</title>
+              </g>
+            ))}
+            {plottedPoints.length > 1 && [0, Math.floor((plottedPoints.length - 1) / 2), plottedPoints.length - 1].map((index) => (
+              <text key={`date-${index}`} x={plottedPoints[index].x} y={svgHeight - 2} textAnchor={index === 0 ? 'start' : index === plottedPoints.length - 1 ? 'end' : 'middle'} fill="#94a3b8" fontSize="11">{formatAxisDate(plottedPoints[index].time)}</text>
+            ))}
           </svg>
         </div>
       </div>
@@ -1429,11 +1400,10 @@ function StatCards() {
 }
 function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
   const items = [
-    ["Bridge", "Move across networks", Network, "bridge"],
     ["Send", "Transfer to any wallet", Send, "send"],
     ["Receive", "Fund your wallet", ArrowDownLeft, "receive"],
+    ["Bridge", "Move across networks", Network, "bridge"],
     ["Swap", "Exchange stablecoins", ArrowLeftRight, "swap"],
-    ["Arc Pay", "Create a payment request", CreditCard, "arc-pay"],
     ["Unified Balance", "Manage cross-network USDC", CircleDollarSign, "unified-balance"],
   ];
   return (
@@ -1448,7 +1418,7 @@ function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
           <h2 className="mt-2 text-2xl font-extrabold tracking-[-0.05em] text-white sm:text-3xl">Make a move</h2>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         {items.map(([name, desc, Icon, id], index) => (
           <motion.button
             initial={{ opacity: 0, y: 8 }}
@@ -1677,7 +1647,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const lastSync = portfolio.isLoading ? "UPDATING" : portfolio.isError ? "DEGRADED" : "LIVE";
 
   return (
-    <div className="space-y-7">
+    <div className="space-y-5">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -1715,7 +1685,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           </div>
         </div>
 
-        <div className="relative z-10 mt-8 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
+        <div className="relative z-10 mt-6 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
           <div className="rounded-3xl border border-slate-700/80 bg-slate-900/70 p-5 shadow-[0_22px_50px_rgba(2,6,23,0.45)] backdrop-blur-sm">
             <div className="flex items-center justify-between gap-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Portfolio value</p>
@@ -1781,7 +1751,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                 </span>
               </div>
             </div>
-            <div className="mt-6 rounded-2xl border border-slate-800/80 bg-slate-950/30 p-3">
+            <div className="mt-4 rounded-2xl border border-slate-800/80 bg-slate-950/30 p-3">
               {portfolio.isLoading ? (
                 <div className="space-y-3 py-4">
                   <div className="h-28 animate-pulse rounded-xl bg-white/[0.06]" />
@@ -1796,7 +1766,13 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                   Price data is temporarily unavailable. The wallet balance remains available once pricing recovers.
                 </div>
               ) : (
-                <Chart portfolio={portfolio} />
+                <Chart
+                  portfolio={portfolio}
+                  transactions={transactionsQuery.transactions}
+                  walletAddress={address}
+                  isTransactionsLoading={transactionsQuery.isLoading}
+                  isTransactionsError={transactionsQuery.isError}
+                />
               )}
             </div>
           </Card>
@@ -2544,6 +2520,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const [bridgeAmount, setBridgeAmount] = useState("");
   const [bridgeSlippage, setBridgeSlippage] = useState(0.005);
   const [showBridgeConfirmation, setShowBridgeConfirmation] = useState(false);
+  const [bridgeCompletedAt, setBridgeCompletedAt] = useState<number | null>(null);
   const bridgeFromChain: BridgeChain = { id: bridgeFromChainId, name: getOrbitNetwork(bridgeFromChainId)?.name ?? "Unknown" };
   const bridgeToChain: BridgeChain = { id: bridgeToChainId, name: getOrbitNetwork(bridgeToChainId)?.name ?? "Unknown" };
   const bridgeSameNetwork = bridgeFromChainId === bridgeToChainId; // Prevent same-network bridging
@@ -2559,6 +2536,11 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const bridgeExecution = useBridgeExecution(bridgeQuoteState.quote);
   const resetBridgeExecution = bridgeExecution.reset;
   const bridgeStatus = useBridgeStatus(bridgeQuoteState.quote, bridgeExecution.sourceHash?.toString(), bridgeExecution.status === "source-confirmed" || bridgeExecution.status === "bridging" || Boolean(bridgeExecution.sourceHash));
+  useEffect(() => {
+    if (bridgeExecution.status === "completed") {
+      setBridgeCompletedAt((current) => current ?? Date.now());
+    }
+  }, [bridgeExecution.status]);
   const bridgeWrongNetwork = isConnected && chainId !== bridgeFromChainId;
   const queryClient = useQueryClient();
   const resetBridgeRouteState = useCallback(() => {
@@ -2566,11 +2548,38 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     queryClient.removeQueries({ queryKey: ['bridge-status'] });
     queryClient.removeQueries({ queryKey: ['bridge-quote'] });
     setShowBridgeConfirmation(false);
+    setBridgeCompletedAt(null);
   }, [queryClient, resetBridgeExecution]);
   useEffect(() => {
     resetBridgeRouteState();
   }, [bridgeFromChainId, bridgeToChainId, resetBridgeRouteState]);
   const bridgeReady = isBridgeReviewable({ isConnected, wrongNetwork: bridgeWrongNetwork, sameNetwork: bridgeSameNetwork, hasSourceToken: Boolean(bridgeFromToken), hasDestinationToken: Boolean(bridgeToToken), hasQuote: Boolean(bridgeQuoteState.quote), hasAmount: Boolean(rawBridgeAmount), hasAmountError: Boolean(bridgeAmountError), approvalRequired: bridgeApproval.required, simulationSucceeded: bridgeQuoteState.simulationSucceeded, isSimulating: bridgeQuoteState.isSimulating, quoteFresh: Date.now() - (bridgeQuoteState.quote?.quotedAt ?? 0) <= 30_000 });
+  const bridgeCompletedHash = bridgeStatus.status?.receiving?.txHash ?? bridgeExecution.sourceHash?.toString();
+  const bridgeCompletedChainId = bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId;
+  const bridgeCompletedExplorerUrl = bridgeCompletedHash ? explorerTransactionUrl(bridgeCompletedChainId, bridgeCompletedHash) : undefined;
+  if (isBridge && bridgeExecution.status === "completed" && bridgeCompletedHash && bridgeCompletedExplorerUrl && bridgeQuoteState.quote && bridgeFromToken && bridgeToToken) {
+    return (
+      <TransactionSuccessScreen
+        title="Bridge Successful!"
+        description={`Your assets were successfully bridged from ${bridgeFromChain.name} to ${bridgeToChain.name}.`}
+        amountLabel="Amount bridged"
+        amount={formatUnits(bridgeQuoteState.quote.fromAmount, bridgeFromToken.decimals)}
+        token={{ symbol: bridgeFromToken.symbol, color: "#2775CA" }}
+        networks={[
+          { label: "Source network", network: bridgeFromChain },
+          { label: "Destination network", network: bridgeToChain },
+        ]}
+        transactionHash={bridgeCompletedHash}
+        explorerUrl={bridgeCompletedExplorerUrl}
+        gasFee="Unavailable"
+        completedAt={bridgeCompletedAt ?? Date.now()}
+        primaryLabel="Back to Bridge"
+        secondaryLabel="Bridge Again"
+        onBack={resetBridgeRouteState}
+        onPrimary={resetBridgeRouteState}
+      />
+    );
+  }
   return (
     <div className="mx-auto max-w-5xl space-y-8">
       <PageTitle
@@ -2921,6 +2930,7 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [completedAt, setCompletedAt] = useState<number | null>(null);
   const asset = ARC_USDC;
   const balance = useTokenBalance(asset, address, Boolean(isConnected && isArcTestnet));
   const isPaymentRequestSend = Boolean(paymentRequest);
@@ -2937,6 +2947,13 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
     setAmount(paymentRequest.amount);
     setFormError(null);
   }, [paymentRequest]);
+  useEffect(() => {
+    if (status === "confirmed" && transactionHash) {
+      setCompletedAt((current) => current ?? Date.now());
+    } else if (status !== "confirmed") {
+      setCompletedAt(null);
+    }
+  }, [status, transactionHash]);
   const handleMax = () => {
     setAmount(formatUnits(balanceRaw, asset.decimals));
     setFormError(null);
@@ -2976,11 +2993,164 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
     }
     await send({ asset, recipient: recipient as Address, amount: rawAmount });
   };
+  const handleSendAnother = () => {
+    reset();
+    setFormError(null);
+  };
   const stateMessage = status === "preparing" ? "Preparing transaction and estimating Arc gas..." : status === "confirmation" ? "Confirm this transaction in your wallet." : status === "pending" ? "Transaction pending on Arc Testnet..." : status === "confirmed" ? "Transaction confirmed." : status === "rejected" ? "Transaction rejected in wallet." : status === "failed" ? error?.message ?? "Transaction failed." : null;
+  if (status === "confirmed" && transactionHash) {
+    return (
+      <SendSuccessScreen
+        amount={amount}
+        asset={asset}
+        recipient={recipient}
+        transactionHash={transactionHash}
+        chainId={asset.chainId}
+        gasCost={gasCost}
+        completedAt={completedAt ?? Date.now()}
+        onBack={handleSendAnother}
+        onSendAnother={handleSendAnother}
+      />
+    );
+  }
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <PageTitle label="Move / Send" title="Send assets securely." />
       {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send Arc Testnet USDC.</p><WalletButton className="mt-7" /></Card> : !isArcTestnet ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send uses the official Arc Testnet USDC contract and your connected wallet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send / Arc Testnet</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><div><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Official Arc ERC-20</span></div></div><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend || balance.isLoading || balance.isError} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balance.isLoading ? "..." : balance.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} USDC`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} USDC</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} native USDC` : "Estimated during preparation"}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p></div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || balance.isLoading || balance.isError} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
+    </div>
+  );
+}
+
+function SendSuccessScreen({
+  amount,
+  asset,
+  recipient,
+  transactionHash,
+  chainId,
+  gasCost,
+  completedAt,
+  onBack,
+  onSendAnother,
+}: {
+  amount: string;
+  asset: BaseAssetConfig;
+  recipient: string;
+  transactionHash: string;
+  chainId: number;
+  gasCost: bigint | null;
+  completedAt: number;
+  onBack: () => void;
+  onSendAnother: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const network = getOrbitNetwork(chainId);
+  const networkName = network?.name ?? `Chain ${chainId}`;
+  const gasSymbol = network?.nativeCurrency.symbol ?? asset.symbol;
+  const explorerUrl = explorerTxUrl(transactionHash, chainId);
+  const formattedTime = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(completedAt);
+  const shortHash = `${transactionHash.slice(0, 10)}...${transactionHash.slice(-8)}`;
+
+  const copyHash = async () => {
+    try {
+      await navigator.clipboard.writeText(transactionHash);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div className="mx-auto max-w-4xl pb-8">
+      <button type="button" onClick={onBack} className="mb-4 inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-400 transition hover:bg-white/[.04] hover:text-white">
+        <ArrowLeft size={15} />
+        Back to Send
+      </button>
+      <Card className="overflow-hidden p-5 sm:p-8 lg:p-10" glow>
+        <div className="relative overflow-hidden rounded-[1.25rem] border border-sky-300/10 bg-[radial-gradient(circle_at_50%_18%,rgba(14,165,233,0.12),transparent_34%),rgba(2,8,23,0.35)] px-3 py-10 text-center sm:px-8 sm:py-12">
+          <div className="pointer-events-none absolute inset-0" aria-hidden="true">
+            <span className="absolute left-[22%] top-[18%] h-1.5 w-1.5 rotate-45 rounded-sm bg-sky-300 shadow-[0_0_12px_rgba(125,211,252,0.85)]" />
+            <span className="absolute left-[31%] top-[8%] h-2 w-2 rotate-45 rounded-sm bg-blue-500 shadow-[0_0_14px_rgba(59,130,246,0.7)]" />
+            <span className="absolute right-[29%] top-[12%] h-1.5 w-1.5 rotate-45 rounded-sm bg-cyan-300 shadow-[0_0_12px_rgba(103,232,249,0.8)]" />
+            <span className="absolute right-[20%] top-[27%] h-2 w-2 rotate-45 rounded-sm bg-emerald-300 shadow-[0_0_14px_rgba(110,231,183,0.75)]" />
+            <span className="absolute left-[27%] top-[34%] h-1 w-1 rounded-full bg-cyan-200" />
+            <span className="absolute right-[27%] top-[38%] h-1 w-1 rounded-full bg-sky-300" />
+          </div>
+          <motion.div
+            initial={{ opacity: 0, scale: 0.82 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+            className="relative mx-auto flex h-28 w-28 items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/10 text-emerald-300 shadow-[0_0_0_12px_rgba(52,211,153,0.05),0_0_70px_rgba(45,212,191,0.35)] sm:h-32 sm:w-32"
+          >
+            <CheckCircle2 size={70} strokeWidth={1.6} className="drop-shadow-[0_0_16px_rgba(52,211,153,0.7)] sm:h-20 sm:w-20" />
+          </motion.div>
+          <p className="relative mt-7 font-mono text-[10px] uppercase tracking-[0.24em] text-emerald-300/80">Transaction confirmed</p>
+          <h1 className="relative mt-3 text-3xl font-extrabold tracking-[-0.04em] text-white sm:text-4xl">Transaction <span className="text-emerald-300">Successful!</span></h1>
+          <p className="relative mx-auto mt-3 max-w-xl text-sm leading-6 text-slate-400">Your assets have been sent successfully on {networkName}.</p>
+        </div>
+
+        <div className="mt-5 rounded-2xl border border-slate-700/80 bg-slate-900/55 p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-4 border-b border-white/[.07] pb-4">
+            <div className="flex min-w-0 items-center gap-3">
+              <TokenIcon symbol={asset.symbol} color={asset.color} />
+              <div className="min-w-0 text-left">
+                <p className="text-xs text-slate-400">Amount</p>
+                <p className="mt-1 truncate text-lg font-bold text-white">{amount || "0"} {asset.symbol}</p>
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-semibold text-emerald-300">Sent</span>
+          </div>
+          <div className="divide-y divide-white/[.07]">
+            <SendSuccessDetail icon={<UserRound size={16} />} label="Recipient">
+              <span className="truncate font-mono text-xs text-slate-200">{shortAddress(recipient)}</span>
+            </SendSuccessDetail>
+            <SendSuccessDetail icon={<Network size={16} />} label="Network">
+              <span className="flex items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={chainId} className="h-5 w-5" />{networkName}</span>
+            </SendSuccessDetail>
+            <SendSuccessDetail icon={<ExternalLink size={16} />} label="Transaction Hash">
+              <span className="flex min-w-0 items-center gap-2">
+                <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="truncate font-mono text-xs text-slate-200 underline decoration-slate-600 underline-offset-4 hover:text-cyan-200">{shortHash}</a>
+                <button type="button" onClick={() => void copyHash()} title="Copy transaction hash" className="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-white/[.06] hover:text-white"><Copy size={14} /></button>
+                {copied && <span className="shrink-0 text-[10px] text-emerald-300">Copied</span>}
+              </span>
+            </SendSuccessDetail>
+            <SendSuccessDetail icon={<CheckCircle2 size={16} />} label="Status">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-200"><CheckCircle2 size={13} />Confirmed</span>
+            </SendSuccessDetail>
+            <SendSuccessDetail icon={<Clock3 size={16} />} label="Time">
+              <span className="text-xs text-slate-200">{formattedTime}</span>
+            </SendSuccessDetail>
+            <SendSuccessDetail icon={<Fuel size={16} />} label="Estimated Gas Fee">
+              <span className="text-xs text-slate-200">{gasCost !== null ? `${formatUnits(gasCost, 18)} ${gasSymbol}` : "Unavailable"}</span>
+            </SendSuccessDetail>
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <Button variant="secondary" className="min-h-12 w-full" onClick={() => window.open(explorerUrl, "_blank", "noopener,noreferrer")}>
+            <ExternalLink size={16} />
+            View on ArcScan
+          </Button>
+          <Button className="min-h-12 w-full" onClick={onSendAnother}>
+            <ArrowUpRight size={16} />
+            Send Another
+          </Button>
+        </div>
+        <p className="mt-6 text-center text-xs text-slate-500">Thank you for using ORBIT <span className="text-slate-400">&#9829;</span></p>
+      </Card>
+    </div>
+  );
+}
+
+function SendSuccessDetail({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 items-center gap-3 py-3.5 sm:gap-4">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800/80 text-slate-300">{icon}</span>
+      <span className="shrink-0 text-xs text-slate-400 sm:w-32">{label}</span>
+      <span className="ml-auto min-w-0 text-right">{children}</span>
     </div>
   );
 }
@@ -4153,11 +4323,11 @@ function Dashboard({
   const [open, setOpen] = useState(false);
   return (
     <Space>
-      <div className="relative z-10 flex min-h-screen">
+      <div className="relative z-10 flex h-screen overflow-hidden">
         <Sidebar page={page} setPage={setPage} open={open} setOpen={setOpen} />
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex h-screen min-w-0 flex-1 flex-col lg:ml-64">
           <Topbar onMenu={() => setOpen(true)} />
-          <main className="flex-1 overflow-y-auto px-5 py-8 lg:px-8">
+          <main className={`min-h-0 flex-1 overflow-y-auto px-5 pt-8 lg:px-8 ${page === "home" ? "pb-3" : "pb-8"}`}>
             <AnimatePresence mode="wait">
               <motion.div
                 key={page}

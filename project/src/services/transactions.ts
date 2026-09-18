@@ -205,7 +205,7 @@ function categorize(
     );
     if (sentMatch) return 'Send';
     const receivedMatch = tokenTransfers.some(
-      (transfer) => transfer.direction === 'received' && normalizeAddress(to) === wallet,
+      (transfer) => transfer.direction === 'received' && normalizeAddress(transfer.to ?? '') === wallet,
     );
     if (receivedMatch) return 'Receive';
   }
@@ -458,7 +458,40 @@ async function fetchArcTransactions(address: string, limit: number): Promise<Cha
     transferMap.set(key, bucket);
   }
 
-  return transactionItems
+  const transactionItemsByHash = new Map(
+    transactionItems
+      .filter((transaction) => Boolean(transaction.hash))
+      .map((transaction) => [String(transaction.hash).toLowerCase(), transaction]),
+  );
+  const unmatchedTransferHashes = [...transferMap.keys()]
+    .filter((hash) => !transactionItemsByHash.has(hash));
+  const senderTransactionItems = new Map<string, Promise<BlockscoutTxItem[]>>();
+
+  const fetchSenderTransactions = (sender: string): Promise<BlockscoutTxItem[]> => {
+    const normalizedSender = normalizeAddress(sender);
+    const existingRequest = senderTransactionItems.get(normalizedSender);
+    if (existingRequest) return existingRequest;
+
+    const request = fetchJson<{ items?: BlockscoutTxItem[] }>(
+      `${ARCSCAN_PROXY_BASE_URL}/addresses/${sender}/transactions?items_count=${itemsCount}`,
+    ).then(({ items }) => Array.isArray(items) ? items : []);
+    senderTransactionItems.set(normalizedSender, request);
+    return request;
+  };
+
+  const recoveredTransactions = await Promise.all(unmatchedTransferHashes.map(async (hash) => {
+    const transfer = transferMap.get(hash)?.[0];
+    if (!transfer?.from || !/^0x[a-fA-F0-9]{40}$/.test(transfer.from)) return null;
+    const matchingTransaction = (await fetchSenderTransactions(transfer.from))
+      .find((transaction) => String(transaction.hash ?? '').toLowerCase() === hash);
+    return matchingTransaction ? [hash, matchingTransaction] as const : null;
+  }));
+
+  for (const recoveredTransaction of recoveredTransactions) {
+    if (recoveredTransaction) transactionItemsByHash.set(...recoveredTransaction);
+  }
+
+  return [...transactionItemsByHash.values()]
     .filter((transaction) => Boolean(transaction.hash))
     .map((transaction) => normalizeArcTransaction(
       transaction,

@@ -176,7 +176,10 @@ export async function fetchPortfolioHistoricalCandles(
       continue;
     }
 
-    const timestamp = seriesBySymbol[0]?.candles[index]?.time ?? Date.now();
+    const timestamp = seriesBySymbol[0]?.candles[index]?.time;
+    if (!timestamp) {
+      continue;
+    }
     const previousClose = portfolioSeries[portfolioSeries.length - 1]?.close ?? portfolioValue;
     const open = index === 0 ? portfolioValue : previousClose;
     const high = Math.max(open, portfolioValue);

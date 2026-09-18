@@ -11,6 +11,7 @@ const wallet = '0x1111111111111111111111111111111111111111';
 const recipient = '0x2222222222222222222222222222222222222222';
 const sentHash = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const receivedHash = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const knownPaymentHash = '0xebc0e4ae9b0566f56af408db893e26e817b6ba46c47973cbf5cdef5134ceafea';
 
 function response(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as Response;
@@ -94,6 +95,38 @@ describe('Arc activity provider', () => {
     expect(transactions[1].category).toBe('Receive');
     expect(transactions[1].status).toBe('failed');
     expect(transactions[1].tokenTransfers[0].direction).toBe('received');
+  });
+
+  it('classifies an incoming token transfer by its transfer recipient', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response({ items: [transaction(sentHash, recipient, ARC_USDC_ADDRESS, 'ok')] }))
+      .mockResolvedValueOnce(response({ items: [transfer(sentHash, recipient, wallet, ARC_USDC_ADDRESS)] }));
+
+    const transactions = await createArcProvider().fetchTransactions({
+      address: wallet,
+      chainId: arcTestnet.id,
+      limit: 20,
+    });
+
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]).toMatchObject({ hash: sentHash, category: 'Receive', status: 'success' });
+  });
+
+  it('recovers a transfer whose hash is missing from the recipient transaction list', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response({ items: [transaction(sentHash, wallet, recipient, 'ok')] }))
+      .mockResolvedValueOnce(response({ items: [transfer(knownPaymentHash, recipient, wallet, ARC_USDC_ADDRESS)] }))
+      .mockResolvedValueOnce(response({ items: [transaction(knownPaymentHash, recipient, ARC_USDC_ADDRESS, 'ok')] }));
+
+    const transactions = await createArcProvider().fetchTransactions({
+      address: wallet,
+      chainId: arcTestnet.id,
+      limit: 20,
+    });
+
+    expect(transactions.map((item) => item.hash)).toEqual([sentHash, knownPaymentHash]);
+    expect(transactions[1]).toMatchObject({ category: 'Receive', status: 'success' });
+    expect(transactions[1].tokenTransfers).toHaveLength(1);
   });
 
   it('fails instead of treating an invalid Arc response as an empty history', async () => {
