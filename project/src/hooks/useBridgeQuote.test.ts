@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isBridgeReviewable } from './useBridgeQuote';
+import { isBridgeReviewable, isManualBridgeSimulationRequired } from './useBridgeQuote';
 
 const ready = {
   isConnected: true,
@@ -10,21 +10,19 @@ const ready = {
   hasQuote: true,
   hasAmount: true,
   hasAmountError: false,
-  approvalRequired: false,
-  simulationSucceeded: true,
-  isSimulating: false,
   quoteFresh: true,
 };
 
-describe('bridge review readiness', () => {
-  it('requires successful source-chain simulation', () => {
-    expect(isBridgeReviewable(ready)).toBe(true);
-    expect(isBridgeReviewable({ ...ready, simulationSucceeded: false })).toBe(false);
-    expect(isBridgeReviewable({ ...ready, isSimulating: true })).toBe(false);
+describe('route-aware bridge simulation gating', () => {
+  it('requires legacy CCTP burn simulation only for the CCTP route', () => {
+    expect(isManualBridgeSimulationRequired('forwarding')).toBe(false);
+    expect(isManualBridgeSimulationRequired('cctp')).toBe(true);
   });
+});
 
-  it('keeps review disabled for invalid route or approval state', () => {
+describe('bridge review readiness', () => {
+  it('allows review for a valid route and amount', () => {
+    expect(isBridgeReviewable(ready)).toBe(true);
     expect(isBridgeReviewable({ ...ready, sameNetwork: true })).toBe(false);
-    expect(isBridgeReviewable({ ...ready, approvalRequired: true })).toBe(false);
   });
 });

@@ -37,6 +37,14 @@ export interface BridgeQuote {
   toAmount: bigint | null;
   toAmountMin: bigint | null;
   feeAmount: bigint | null;
+  forwardingFeeAmount?: bigint | null;
+  protocolFeeAmount?: bigint | null;
+  totalSourceDebit?: bigint | null;
+  feePayment?: 'source' | 'destination';
+  transferSpeed?: string;
+  minimumTransferAmount?: bigint | null;
+  feeError?: string;
+  selectedRoute?: 'forwarding' | 'cctp';
   gasAmount: bigint | null;
   gasCosts: string[];
   executionDurationSeconds: number | null;

@@ -117,6 +117,16 @@ export function createCctpProvider(): BridgeProvider {
 }
 
 export const cctpTokenMessengerAbi = tokenMessengerAbi;
+export function encodeCctpBurn(request: BridgeQuoteRequest, maxFee: bigint) {
+  const source = getOrbitNetwork(request.fromChain.id);
+  const destination = getOrbitNetwork(request.toChain.id);
+  if (!source || !destination) throw new Error('CCTP route metadata is unavailable');
+  return encodeFunctionData({
+    abi: tokenMessengerAbi,
+    functionName: 'depositForBurn',
+    args: [request.fromAmount, destination.cctpDomain, toBytes32(request.toAddress), source.usdc, '0x0000000000000000000000000000000000000000000000000000000000000000', maxFee, 2000],
+  });
+}
 export const cctpMessageTransmitterAbi = [{
   type: 'function',
   name: 'receiveMessage',

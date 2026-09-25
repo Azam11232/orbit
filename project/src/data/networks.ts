@@ -48,7 +48,7 @@ export const ETHEREUM_SEPOLIA = defineChain({
   id: 11155111,
   name: 'Ethereum Sepolia',
   nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
-  rpcUrls: { default: { http: ['https://ethereum-sepolia-rpc.publicnode.com'] } },
+  rpcUrls: { default: { http: ['https://ethereum-sepolia-rpc.publicnode.com', 'https://rpc.sepolia.org'] } },
   blockExplorers: { default: { name: 'Etherscan', url: 'https://sepolia.etherscan.io' } },
   testnet: true,
 });

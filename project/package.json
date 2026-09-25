@@ -12,9 +12,11 @@
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
   },
   "dependencies": {
-    "@circle-fin/adapter-viem-v2": "^1.17.1",
+    "@circle-fin/adapter-viem-v2": "^1.18.0",
     "@circle-fin/app-kit": "^1.14.0",
-    "@circle-fin/swap-kit": "^1.6.1",
+    "@circle-fin/bridge-kit": "^1.15.1",
+    "@circle-fin/provider-cctp-v2": "^1.14.0",
+    "@circle-fin/swap-kit": "^1.7.0",
     "@circle-fin/unified-balance-kit": "^1.6.0",
     "@supabase/supabase-js": "^2.57.4",
     "@tanstack/react-query": "^5.102.8",

@@ -11,7 +11,7 @@ import {
   useSwitchChain,
 } from "wagmi";
 import { arcTestnet, base } from "wagmi/chains";
-import { formatEther, formatUnits, isAddress, parseUnits, type Address } from "viem";
+import { formatEther, formatUnits, isAddress, parseUnits, type Address, type Hash } from "viem";
 import { getPortfolioAnalytics, usePortfolio } from "./hooks/usePortfolio";
 import { useApprovals } from "./hooks/useApprovals";
 import { useRevokeApproval } from "./hooks/useRevokeApproval";
@@ -24,38 +24,33 @@ import { useBridgeTokens } from "./hooks/useBridgeTokens";
 import { useBridgeBalance } from "./hooks/useBridgeBalance";
 import { isBridgeReviewable, useBridgeQuote } from "./hooks/useBridgeQuote";
 import { useBridgeApproval } from "./hooks/useBridgeApproval";
-import { useBridgeExecution } from "./hooks/useBridgeExecution";
+import { canShowBridgeSuccess, getRequiredBridgeChainId, isBridgeExecutionStarted, shouldAutoCompleteBridge, type BridgeExecutionStatus, useBridgeExecution } from "./hooks/useBridgeExecution";
 import { useBridgeStatus } from "./hooks/useBridgeStatus";
 import { useTransactions } from "./hooks/useTransactions";
 import { useOrbitSettings } from "./hooks/useOrbitSettings";
 import { useWatchlist, type WatchlistItem } from "./hooks/useWatchlist";
 import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type ChainTransaction, type TxStatus } from "./services/transactions";
 import { buildWalletSecurityReport } from "./services/security";
-import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS, type BaseAssetConfig } from "./data/tokens";
-import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, explorerTransactionUrl, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
+import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
+import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
 import { usePrices } from "./hooks/usePrices";
-import { PORTFOLIO_PRICES } from "./services/prices";
-import { reconstructTokenBalanceHistory } from "./services/portfolioHistory";
+import { fetchPortfolioHistoricalCandles, PORTFOLIO_PRICES } from "./services/prices";
 import type { BridgeChain } from "./types/bridge";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Activity,
-  ArrowLeft,
   ArrowDownLeft,
   ArrowLeftRight,
   ArrowUpRight,
   Bell,
   BookOpen,
-  CheckCircle2,
   ChevronRight,
   CircleDollarSign,
   Compass,
   Copy,
   CreditCard,
-  Clock3,
   Crosshair,
   ExternalLink,
-  Fuel,
   Globe2,
   Landmark,
   LayoutDashboard,
@@ -71,7 +66,6 @@ import {
   SlidersHorizontal,
   Sparkles,
   TrendingUp,
-  UserRound,
   Wallet,
   X,
 } from "lucide-react";
@@ -86,7 +80,6 @@ import {
 import { ArcPayPage } from "./components/ArcPayPage";
 import { ArcSwapPage } from "./components/ArcSwapPage";
 import { UnifiedBalancePage } from "./components/UnifiedBalancePage";
-import { TransactionSuccessScreen } from "./components/TransactionSuccessScreen";
 import { OrbitBrand } from "./components/OrbitBrand";
 import type { ArcPaymentRequest } from "./services/arcPayment";
 import { useDiscover } from "./hooks/useDiscover";
@@ -143,9 +136,42 @@ function shortAddress(address?: string) {
     ? `${address.slice(0, 6)}...${address.slice(-4)}`
     : "Not connected";
 }
-function bridgeExplorerUrl(chainId: number, hash: string) {
-  const explorers: Record<number, string> = { 1: "https://etherscan.io/tx/", 10: "https://optimistic.etherscan.io/tx/", 8453: "https://basescan.org/tx/", 42161: "https://arbiscan.io/tx/" };
+export function bridgeExplorerUrl(chainId: number, hash: string) {
+  const explorers: Record<number, string> = {
+    1: "https://etherscan.io/tx/",
+    10: "https://optimistic.etherscan.io/tx/",
+    8453: "https://basescan.org/tx/",
+    5042002: "https://testnet.arcscan.app/tx/",
+    11155111: "https://sepolia.etherscan.io/tx/",
+    84532: "https://sepolia.basescan.org/tx/",
+    421614: "https://sepolia.arbiscan.io/tx/",
+    11155420: "https://sepolia-optimism.etherscan.io/tx/",
+    43113: "https://testnet.snowtrace.io/tx/",
+    80002: "https://amoy.polygonscan.com/tx/",
+    42161: "https://arbiscan.io/tx/",
+  };
   return explorers[chainId] ? `${explorers[chainId]}${hash}` : null;
+}
+
+export function getBridgeRouteLabel(selectedRoute?: 'forwarding' | 'cctp') {
+  return selectedRoute === 'forwarding' ? 'Circle Forwarding' : 'CCTP V2';
+}
+
+export function isBridgeAllowanceVerifiedForAmount(allowance: bigint, requiredAmount: bigint, isAllowanceLoading: boolean) {
+  if (isAllowanceLoading) return false;
+  return allowance >= requiredAmount;
+}
+export function getBridgeSuccessDestinationHash(executionHash?: Hash, statusHash?: string) {
+  return executionHash ?? statusHash as Hash | undefined;
+}
+
+export function shouldShowBridgeApprovalAction(input: { status: BridgeExecutionStatus; sourceHash?: Hash; approvalRequired: boolean }) {
+  if (!input.approvalRequired) return false;
+  return !isBridgeExecutionStarted(input.status, input.sourceHash);
+}
+
+export function shouldShowBridgeReviewAction(input: { status: BridgeExecutionStatus; sourceHash?: Hash; approvalRequired: boolean; bridgeReady: boolean }) {
+  return !input.approvalRequired && !isBridgeExecutionStarted(input.status, input.sourceHash) && input.bridgeReady;
 }
 
 function formatRefreshMode(mode: "manual" | "balanced" | "live") {
@@ -197,6 +223,12 @@ function WalletButton({ className = "" }: { className?: string }) {
     const bInjected = b.id === "injected" ? 1 : 0;
     return aInjected - bInjected;
   });
+  const visibleConnectors = orderedConnectors.filter((candidate) => {
+    const label = `${candidate.id} ${candidate.name}`.toLowerCase();
+    return !label.includes('coinbase') && !label.includes('injected');
+  });
+  const popularConnectors = visibleConnectors.filter((candidate) => /metamask|phantom|okx|backpack/i.test(`${candidate.id} ${candidate.name}`));
+  const installedConnectors = visibleConnectors.filter((candidate) => !popularConnectors.includes(candidate));
 
   const handleConnectClick = () => {
     if (isPending) return;
@@ -235,61 +267,51 @@ function WalletButton({ className = "" }: { className?: string }) {
       </Button>
 
       {walletPickerOpen && createPortal(
-        <div
-          className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm"
-          onClick={() => setWalletPickerOpen(false)}
-        >
-          <div
-            className="w-full max-w-md rounded-3xl border border-slate-700 bg-slate-950/95 p-4 shadow-[0_30px_80px_rgba(2,6,23,0.6)]"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500">Connect wallet</p>
-                <h3 className="mt-2 text-lg font-bold text-white">Choose a wallet</h3>
+        <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm" onClick={() => setWalletPickerOpen(false)}>
+          <div className="grid w-full max-w-4xl overflow-hidden rounded-[2rem] border border-slate-700/80 bg-slate-950/95 shadow-[0_30px_100px_rgba(2,6,23,0.72)] lg:grid-cols-[1.05fr_0.95fr]" onClick={(event) => event.stopPropagation()}>
+            <section className="p-6 sm:p-8">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">ORBIT wallet</p>
+                  <h3 className="mt-2 text-2xl font-bold tracking-tight text-white">Connect a Wallet</h3>
+                </div>
+                <button type="button" onClick={() => setWalletPickerOpen(false)} className="rounded-xl border border-slate-700 bg-slate-900 p-2 text-slate-300 transition hover:border-sky-400/40 hover:bg-slate-800 hover:text-white" aria-label="Close wallet picker"><X size={16} /></button>
               </div>
-              <button
-                type="button"
-                onClick={() => setWalletPickerOpen(false)}
-                className="rounded-lg border border-slate-700 bg-slate-900 p-2 text-slate-300 hover:bg-slate-800"
-                aria-label="Close wallet picker"
-              >
-                <X size={14} />
-              </button>
-            </div>
-
-            {orderedConnectors.length === 0 ? (
-              <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4 text-sm text-slate-300">
-                No browser wallet was detected. Refresh the page after installing an EIP-6963-compatible wallet.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {orderedConnectors.map((candidate) => (
-                  <button
-                    key={candidate.uid ?? candidate.id}
-                    type="button"
-                    onClick={() => {
-                      setWalletPickerOpen(false);
-                      connect({ connector: candidate });
-                    }}
-                    className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 px-3 py-3 text-left transition hover:border-sky-400/40 hover:bg-slate-800"
-                  >
-                    <div className="flex items-center gap-3">
-                      <img
-                        src={getWalletBrandIcon(candidate.name, candidate.id, candidate.icon)}
-                        alt={candidate.name}
-                        className="h-8 w-8 rounded-full object-cover"
-                      />
-                      <div>
-                        <p className="text-sm font-semibold text-white">{candidate.name}</p>
-                        <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-slate-500">{candidate.id}</p>
-                      </div>
+              {visibleConnectors.length === 0 ? (
+                <div className="mt-8 rounded-2xl border border-slate-700 bg-slate-900/70 p-4 text-sm leading-6 text-slate-300">No supported wallet was detected. Install a compatible wallet and refresh this page.</div>
+              ) : (
+                <div className="mt-8 space-y-7">
+                  {[['Installed', installedConnectors], ['Popular', popularConnectors]].map(([title, candidates]) => (
+                    <div key={title as string}>
+                      <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{title as string}</p>
+                      {candidates.length > 0 ? (
+                        <div className="space-y-2">
+                          {(candidates as typeof visibleConnectors).map((candidate) => (
+                            <button key={candidate.uid ?? candidate.id} type="button" onClick={() => { setWalletPickerOpen(false); connect({ connector: candidate }); }} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/75 px-4 py-3 text-left transition hover:border-sky-400/40 hover:bg-slate-800">
+                              <span className="flex min-w-0 items-center gap-3">
+                                <img src={getWalletBrandIcon(candidate.name, candidate.id, candidate.icon)} alt={candidate.name} className="h-9 w-9 rounded-xl object-cover" />
+                                <span className="min-w-0"><span className="block truncate text-sm font-semibold text-white">{candidate.name}</span><span className="mt-0.5 block truncate font-mono text-[9px] uppercase tracking-[0.12em] text-slate-500">{candidate.id}</span></span>
+                              </span>
+                              {candidate.id === connector?.id && <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />}
+                            </button>
+                          ))}
+                        </div>
+                      ) : <p className="text-xs text-slate-600">No additional wallets detected.</p>}
                     </div>
-                    {candidate.id === connector?.id && <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />}
-                  </button>
-                ))}
+                  ))}
+                </div>
+              )}
+            </section>
+            <section className="border-t border-slate-800 bg-slate-900/55 p-6 sm:p-8 lg:border-l lg:border-t-0">
+              <div className="flex h-full flex-col">
+                <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">Wallet basics</p>
+                <div className="mt-7 flex h-16 w-16 items-center justify-center rounded-2xl border border-sky-300/20 bg-sky-300/10 text-sky-200 shadow-[0_0_32px_rgba(56,189,248,0.14)]"><Wallet size={30} /></div>
+                <h4 className="mt-6 text-2xl font-bold tracking-tight text-white">What is a Wallet?</h4>
+                <p className="mt-3 text-sm leading-6 text-slate-400">A wallet is a secure home for your digital assets and the approvals that let you use them onchain.</p>
+                <div className="mt-8 border-t border-slate-800 pt-6"><h5 className="text-lg font-semibold text-white">A New Way to Log In</h5><p className="mt-2 text-sm leading-6 text-slate-400">Use your wallet to sign in to ORBIT without sharing a password or private key.</p></div>
+                <div className="mt-auto flex flex-wrap items-center gap-4 pt-8"><a href="https://ethereum.org/en/wallets/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center rounded-xl bg-sky-400 px-4 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-sky-300">Get a Wallet</a><a href="https://ethereum.org/en/wallets/" target="_blank" rel="noopener noreferrer" className="text-xs font-semibold text-sky-300 underline underline-offset-4 hover:text-sky-200">Learn More</a></div>
               </div>
-            )}
+            </section>
           </div>
         </div>,
         document.body,
@@ -365,9 +387,6 @@ function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (
           <nav className="hidden items-center justify-center gap-8 text-sm text-slate-300 md:flex md:flex-1">
             <button className="transition hover:text-white" onClick={() => { onLaunch(); onNavigate("security"); }}>
               Security
-            </button>
-            <button className="transition hover:text-white" onClick={() => { onLaunch(); onNavigate("discover"); }}>
-              Discover
             </button>
             <button className="transition hover:text-white" onClick={() => { onLaunch(); onNavigate("about"); }}>
               About
@@ -601,6 +620,12 @@ const navGroups = [
       ["approvals", "Approvals & Revoke", LockKeyhole],
     ],
   },
+  {
+    title: "EXPLORE",
+    items: [
+      ["about", "About", BookOpen],
+    ],
+  },
 ];
 
 function Sidebar({
@@ -622,9 +647,9 @@ function Sidebar({
 
   return (
     <aside
-      className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col overflow-y-auto border-r border-slate-700/80 bg-slate-950/95 px-4 py-6 shadow-[0_32px_80px_rgba(2,6,23,0.65)] backdrop-blur-xl transition-all duration-300 lg:fixed lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
+      className={`fixed inset-y-0 left-0 z-40 flex h-screen w-64 shrink-0 flex-col border-r border-slate-700/80 bg-slate-950/95 px-4 py-5 shadow-[0_32px_80px_rgba(2,6,23,0.65)] backdrop-blur-xl transition-all duration-300 lg:sticky lg:top-0 lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
     >
-      <div className="flex items-center justify-between px-3">
+      <div className="flex items-center justify-between px-3 pb-2">
         <div className="flex items-center gap-2">
           <Logo />
         </div>
@@ -635,70 +660,52 @@ function Sidebar({
           <X size={18} />
         </button>
       </div>
-      <div className="mt-8 space-y-6">
-        {navGroups.map((g) => (
-          <div key={g.title}>
-            <Label>{g.title}</Label>
-            <div className="mt-2 space-y-1.5">
-              {g.items.map(([id, name, Icon]) => (
-                <button
-                  key={id as string}
-                  onClick={() => {
-                    setPage(id as Page);
-                    setOpen(false);
-                  }}
-                  className={`group relative flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-xs font-semibold transition-all duration-200 ${page === id ? "bg-sky-500/15 text-white shadow-[0_16px_32px_rgba(14,165,233,0.18)]" : "text-slate-300 hover:bg-slate-800 hover:text-white"}`}
-                >
-                  <span className={`flex h-7 w-7 items-center justify-center rounded-xl ${page === id ? "bg-sky-500/20 text-sky-200" : "bg-slate-800 text-slate-300 ring-1 ring-slate-700"}`}>
-                    <Icon size={15} />
-                  </span>
-                  <span>{name as string}</span>
-                  {page === id && (
-                    <span className="ml-auto h-2 w-2 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.7)]" />
-                  )}
-                </button>
-              ))}
+      <div className="mt-2 flex-1 min-h-0 overflow-y-auto pr-1">
+        <div className="space-y-4">
+          {navGroups.map((g) => (
+            <div key={g.title}>
+              <Label>{g.title}</Label>
+              <div className="mt-1.5 space-y-1">
+                {g.items.map(([id, name, Icon]) => (
+                  <button
+                    key={id as string}
+                    onClick={() => {
+                      setPage(id as Page);
+                      setOpen(false);
+                    }}
+                    className={`group relative flex w-full items-center gap-3 rounded-2xl px-3 py-2 text-left text-xs font-semibold transition-all duration-200 ${page === id ? "bg-sky-500/15 text-white shadow-[0_16px_32px_rgba(14,165,233,0.18)]" : "text-slate-300 hover:bg-slate-800 hover:text-white"}`}
+                  >
+                    <span className={`flex h-7 w-7 items-center justify-center rounded-xl ${page === id ? "bg-sky-500/20 text-sky-200" : "bg-slate-800 text-slate-300 ring-1 ring-slate-700"}`}>
+                      <Icon size={15} />
+                    </span>
+                    <span>{name as string}</span>
+                    {page === id && (
+                      <span className="ml-auto h-2 w-2 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.7)]" />
+                    )}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
-      <div className="mt-2 border-t border-slate-800 pt-4">
-        <button
-          type="button"
-          onClick={() => {
-            setPage("about");
-            setOpen(false);
-          }}
-          className={`group relative flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-xs font-semibold transition-all duration-200 ${page === "about" ? "bg-sky-500/15 text-white shadow-[0_16px_32px_rgba(14,165,233,0.18)]" : "text-slate-300 hover:bg-slate-800 hover:text-white"}`}
-        >
-          <span className={`flex h-7 w-7 items-center justify-center rounded-xl ${page === "about" ? "bg-sky-500/20 text-sky-200" : "bg-slate-800 text-slate-300 ring-1 ring-slate-700"}`}>
-            <BookOpen size={15} />
-          </span>
-          <span>About</span>
-          {page === "about" && (
-            <span className="ml-auto h-2 w-2 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.7)]" />
-          )}
-        </button>
-      </div>
-      <div className="border-t border-slate-800 pt-3">
+      <div className="mt-auto border-t border-slate-800 pt-3">
         <div className="relative">
           <button
             type="button"
             onClick={() => setWalletMenuOpen((value) => !value)}
-            className="group flex w-full items-center gap-3 rounded-2xl border border-sky-400/15 bg-[linear-gradient(135deg,rgba(15,23,42,0.96),rgba(23,25,55,0.92))] p-3 text-left shadow-[0_12px_30px_rgba(14,165,233,0.10)] transition hover:border-sky-400/35 hover:shadow-[0_14px_34px_rgba(14,165,233,0.16)]"
+            className="flex w-full items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 p-3 text-left shadow-sm transition hover:border-sky-400/40"
           >
-            <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-blue-500 to-violet-500 text-[10px] font-bold text-white shadow-[0_0_16px_rgba(59,130,246,0.28)]">
-              {isConnected && address ? address.slice(2, 4).toUpperCase() : "WC"}
-              <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-slate-900 ${isConnected ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" : "bg-slate-500"}`} />
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-blue-500 to-violet-500 text-[10px] font-bold text-white">
+              <ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold text-slate-100">{isConnected && address ? shortAddress(address) : "Wallet"}</p>
-              <p className="mt-1 flex items-center gap-1.5 font-mono text-[9px] text-slate-400">
-                <ChainLogo chainId={activeNetwork?.id ?? arcTestnet.id} className="h-3.5 w-3.5" />
-                <span className="truncate">{isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : 'Awaiting wallet'}</span>
+              <p className="font-mono text-[9px] text-slate-400">
+                {isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : 'Awaiting wallet'}
               </p>
             </div>
-            <MoreHorizontal size={15} className="text-slate-500 transition group-hover:text-slate-300" />
+            <MoreHorizontal size={15} className="text-slate-400" />
           </button>
           {walletMenuOpen && (
             <div className="absolute bottom-full left-0 right-0 z-20 mb-2 rounded-2xl border border-slate-700 bg-slate-900/95 p-3 shadow-[0_24px_64px_rgba(2,6,23,0.5)]">
@@ -998,7 +1005,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
             }}
             className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 shadow-sm transition hover:border-sky-400/40 hover:bg-slate-800"
           >
-            <ChainLogo chainId={displayNetwork.id} className="h-5 w-5 text-sky-300" />
+            <ChainLogo chainId={displayNetwork.id} className="h-4 w-4 text-sky-300" />
             <span>{isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : "Network"}</span>
             <ChevronRight size={12} className="text-slate-400" />
           </button>
@@ -1043,7 +1050,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
               >
                 <div className="flex items-center gap-2.5">
                   <div className={`flex h-7 w-7 items-center justify-center rounded-xl ${selected ? "bg-sky-500/15 text-sky-200" : "bg-slate-800 text-slate-300"}`}>
-                    <ChainLogo chainId={item.id} className="h-5 w-5" />
+                    <ChainLogo chainId={item.id} className="h-4 w-4" />
                   </div>
                   <div>
                     <div className="text-xs font-semibold">{item.name}</div>
@@ -1077,15 +1084,106 @@ export function NetworkIcon({ chainId, className = "" }: { chainId: number; clas
   return <ChainLogo chainId={chainId} className={`h-4 w-4 ${className}`} />;
 }
 
-function Chart({ portfolio, transactions, walletAddress, isTransactionsLoading, isTransactionsError }: {
-  portfolio: ReturnType<typeof usePortfolio>;
-  transactions: ChainTransaction[];
-  walletAddress?: string;
-  isTransactionsLoading: boolean;
-  isTransactionsError: boolean;
-}) {
+function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
+  const { address, chainId } = useAccount();
   const shouldReduceMotion = useReducedMotion();
+  const historyStorageKey = address
+    ? `orbit-portfolio-balance-history:${chainId ?? 'unknown'}:${address.toLowerCase()}`
+    : `orbit-portfolio-balance-history:${chainId ?? 'unknown'}:disconnected`;
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [chartHistory, setChartHistory] = useState<Array<{ timestamp: number; value: number }>>(() => {
+    if (typeof window === 'undefined') {
+      return [];
+    }
+
+    try {
+      const stored = window.localStorage.getItem(historyStorageKey);
+      if (!stored) {
+        return [];
+      }
+
+      const parsed = JSON.parse(stored) as Array<{ timestamp?: number; value?: number }>;
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      return parsed
+        .filter((point) => {
+          const numericValue = Number(point?.value);
+          return Number.isFinite(point?.timestamp) && Number.isFinite(numericValue) && numericValue > 0;
+        })
+        .map((point) => ({
+          timestamp: Number(point.timestamp),
+          value: Number(point.value),
+        }))
+        .slice(-120);
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const stored = window.localStorage.getItem(historyStorageKey);
+      if (!stored) {
+        setChartHistory([]);
+        return;
+      }
+
+      const parsed = JSON.parse(stored) as Array<{ timestamp?: number; value?: number }>;
+      if (!Array.isArray(parsed)) {
+        setChartHistory([]);
+        return;
+      }
+
+      const nextHistory = parsed
+        .filter((point) => {
+          const numericValue = Number(point?.value);
+          return Number.isFinite(point?.timestamp) && Number.isFinite(numericValue) && numericValue > 0;
+        })
+        .map((point) => ({
+          timestamp: Number(point.timestamp),
+          value: Number(point.value),
+        }))
+        .slice(-120);
+
+      setChartHistory(nextHistory);
+    } catch {
+      setChartHistory([]);
+    }
+  }, [historyStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(historyStorageKey, JSON.stringify(chartHistory));
+    } catch {
+      // localStorage can be unavailable; ignore to keep the chart functional without blocking the app.
+    }
+  }, [chartHistory, historyStorageKey]);
+
+  useEffect(() => {
+    if (!Number.isFinite(portfolio.totalValueUsd) || portfolio.totalValueUsd <= 0) {
+      return;
+    }
+
+    setChartHistory((previous) => {
+      const nextObservation = { timestamp: Date.now(), value: Number(portfolio.totalValueUsd) };
+      const lastObservation = previous[previous.length - 1];
+      if (lastObservation && Math.abs(lastObservation.value - nextObservation.value) < 0.0001) {
+        return previous;
+      }
+
+      return [...previous, nextObservation].slice(-120);
+    });
+  }, [portfolio.totalValueUsd]);
 
   if (portfolio.isLoading) {
     return (
@@ -1108,119 +1206,122 @@ function Chart({ portfolio, transactions, walletAddress, isTransactionsLoading, 
     );
   }
 
-  const currentAsset = portfolio.assets.find((asset) => asset.symbol === 'USDC');
-  const balanceHistory = walletAddress && currentAsset
-    ? reconstructTokenBalanceHistory({
-      transactions,
-      walletAddress,
-      currentBalance: currentAsset.raw,
-      tokenAddress: ARC_USDC.address,
-    })
-    : [];
-  const currentValue = walletAddress && currentAsset && !portfolio.isDisconnected && !portfolio.isLoading && Number.isFinite(portfolio.totalValueUsd)
-    ? portfolio.totalValueUsd
-    : null;
-
-  if (isTransactionsLoading) {
+  const currentPortfolioValue = Number.isFinite(portfolio.totalValueUsd) ? portfolio.totalValueUsd : 0;
+  if (!Number.isFinite(currentPortfolioValue) || currentPortfolioValue <= 0) {
     return (
       <div className="flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
-        Loading confirmed balance history…
+        No wallet balance available for a portfolio chart.
       </div>
     );
   }
 
-  if (balanceHistory.length === 0 && currentValue === null) {
-    return (
-      <div className="flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
-        {isTransactionsError ? 'Confirmed balance history unavailable.' : 'No wallet balance available for a portfolio history chart.'}
-      </div>
-    );
-  }
-
-  const historicalPoints = balanceHistory.map((point) => ({ time: point.time, value: Number(point.balance) / 10 ** (currentAsset?.symbol === 'USDC' ? 6 : 18) }));
-  const chartPoints = currentValue !== null
-    ? [...historicalPoints, { time: Date.now(), value: currentValue }]
-    : historicalPoints;
-  const values = chartPoints.map((point) => point.value);
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
-  const range = maxValue - minValue || 1;
   const svgWidth = 760;
   const svgHeight = 220;
   const leftPad = 12;
   const rightPad = 12;
   const topPad = 18;
-  const bottomPad = 18;
+  const bottomPad = 24;
   const usableWidth = svgWidth - leftPad - rightPad;
   const usableHeight = svgHeight - topPad - bottomPad;
-  const step = usableWidth / Math.max(chartPoints.length - 1, 1);
-  const pointFor = (point: { time: number; value: number }, index: number) => ({
-    ...point,
-    x: leftPad + (chartPoints.length === 1 ? usableWidth / 2 : step * index),
-    y: topPad + ((maxValue - point.value) / range) * usableHeight,
+  const normalizedPoints = chartHistory.length > 0 ? chartHistory : [{ timestamp: Date.now(), value: currentPortfolioValue }];
+  const minValue = Math.min(...normalizedPoints.map((point) => point.value));
+  const maxValue = Math.max(...normalizedPoints.map((point) => point.value));
+  const valueRange = maxValue - minValue || 1;
+  const points = normalizedPoints.map((point, index) => {
+    const x = normalizedPoints.length === 1
+      ? leftPad + usableWidth * 0.5
+      : leftPad + (index / (normalizedPoints.length - 1)) * usableWidth;
+    const y = topPad + usableHeight - ((point.value - minValue) / valueRange) * usableHeight;
+    return { ...point, x, y };
   });
-  const plottedPoints = chartPoints.map(pointFor);
-  const linePoints = plottedPoints.map((point) => `${point.x},${point.y}`).join(' ');
-  const areaPoints = `${leftPad},${svgHeight - bottomPad} ${linePoints} ${svgWidth - rightPad},${svgHeight - bottomPad}`;
-  const hoverPoint = hoverIndex === null ? null : plottedPoints[hoverIndex];
-  const formatChartDate = (time: number) => new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(new Date(time));
-  const formatAxisDate = (time: number) => new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-  }).format(new Date(time));
+
+  const linePath = points.length > 1
+    ? points.reduce((path, point, index) => {
+        if (index === 0) {
+          return `M ${point.x} ${point.y}`;
+        }
+
+        const previous = points[index - 1];
+        const cp1x = previous.x + (point.x - previous.x) * 0.35;
+        const cp1y = previous.y;
+        const cp2x = point.x - (point.x - previous.x) * 0.35;
+        const cp2y = point.y;
+        return `${path} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${point.x} ${point.y}`;
+      }, '')
+    : '';
+  const areaPath = points.length > 1 ? `${linePath} L ${points[points.length - 1].x} ${svgHeight - bottomPad} L ${points[0].x} ${svgHeight - bottomPad} Z` : '';
+  const latestPoint = points[points.length - 1];
+  const currentLabel = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const currentTime = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const hoverPoint = hoverIndex === null ? null : points[hoverIndex] ?? null;
 
   return (
     <div className="space-y-4 pt-2">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-slate-400">
         <span>Portfolio value</span>
-        <span>{`$${(currentValue ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</span>
+        <span>{`$${currentPortfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</span>
       </div>
 
       <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),transparent_28%),linear-gradient(180deg,rgba(15,23,42,0.96),rgba(15,23,42,0.82))] p-3">
         <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(to_top,rgba(148,163,184,0.08)_1px,transparent_1px)] [background-size:28px_28px]" />
 
         <div className="relative z-10">
+          <div className="mb-2 flex items-center justify-between text-[10px] text-slate-400">
+            <span>{points.length > 1 ? 'Balance history' : 'Current balance'}</span>
+            <span>{currentLabel} · {currentTime}</span>
+          </div>
+
+          <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="h-64 w-full" role="img" aria-label="Wallet balance chart">
+            {[0, 1, 2, 3].map((line) => {
+              const y = topPad + (usableHeight / 3) * line;
+              return <line key={line} x1={leftPad} x2={svgWidth - rightPad} y1={y} y2={y} stroke="rgba(148,163,184,0.10)" strokeDasharray="4 12" />;
+            })}
+
+            {points.length > 1 && (
+              <>
+                <path d={areaPath} fill="rgba(96, 165, 250, 0.12)" />
+                <path d={linePath} fill="none" stroke="rgba(125, 211, 252, 0.95)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={shouldReduceMotion ? undefined : { filter: 'drop-shadow(0 0 10px rgba(125,211,252,0.4))' }} />
+              </>
+            )}
+
+            {points.map((point, index) => (
+              <circle
+                key={`${point.timestamp}-${index}`}
+                cx={point.x}
+                cy={point.y}
+                r={index === points.length - 1 ? (shouldReduceMotion ? 5 : 6) : 3.5}
+                fill={index === points.length - 1 ? '#dbeafe' : '#7dd3fc'}
+                stroke={index === points.length - 1 ? '#7dd3fc' : '#e0f2fe'}
+                strokeWidth="1.5"
+                onMouseEnter={() => setHoverIndex(index)}
+                onMouseLeave={() => setHoverIndex(null)}
+                style={{ cursor: 'pointer' }}
+              />
+            ))}
+
+            {latestPoint && (
+              <text x={latestPoint.x} y={latestPoint.y - 18} textAnchor="middle" fill="rgba(226,232,240,0.9)" fontSize="10" fontWeight="700">Now</text>
+            )}
+          </svg>
+
           {hoverPoint && (
             <div
               className="pointer-events-none absolute z-20 -translate-x-1/2 rounded-xl border border-slate-700 bg-slate-950/95 px-2.5 py-1.5 text-[10px] text-slate-200 shadow-[0_16px_30px_rgba(2,6,23,0.45)]"
               style={{
-                left: `${(hoverPoint.x / svgWidth) * 100}%`,
-                top: `${Math.max(8, hoverPoint.y - 52)}px`,
+                left: `${((hoverPoint.x - leftPad) / usableWidth) * 100}%`,
+                top: `${Math.max(18, hoverPoint.y - 100)}px`,
               }}
             >
-              <div className="font-semibold text-white">${hoverPoint.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
-              <div className="mt-0.5 text-[9px] text-slate-400">{formatChartDate(hoverPoint.time)}</div>
+              <div className="font-semibold text-white">${hoverPoint.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+              <div className="mt-0.5 whitespace-nowrap text-[9px] text-slate-400">
+                {new Date(hoverPoint.timestamp).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+              </div>
             </div>
           )}
 
-          <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="h-56 w-full" role="img" aria-label="Portfolio value history chart">
-            {[0, 1, 2, 3].map((line) => {
-              const y = topPad + (usableHeight / 3) * line;
-              return <line key={line} x1={leftPad} x2={svgWidth - rightPad} y1={y} y2={y} stroke="rgba(148,163,184,0.12)" strokeDasharray="4 10" />;
-            })}
-            <polygon points={areaPoints} fill="url(#portfolioArea)" opacity={shouldReduceMotion ? 0.24 : 0.34} />
-            <polyline points={linePoints} fill="none" stroke="#60a5fa" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={shouldReduceMotion ? undefined : { filter: 'drop-shadow(0 0 8px rgba(96,165,250,0.45))' }} />
-            <defs>
-              <linearGradient id="portfolioArea" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0" stopColor="#38bdf8" stopOpacity="0.55" />
-                <stop offset="1" stopColor="#2563eb" stopOpacity="0.02" />
-              </linearGradient>
-            </defs>
-            {plottedPoints.map((point, index) => (
-              <g key={`${point.time}-${index}`} onMouseEnter={() => setHoverIndex(index)} onMouseLeave={() => setHoverIndex(null)} style={{ cursor: 'pointer' }}>
-                <circle cx={point.x} cy={point.y} r={index === plottedPoints.length - 1 ? 5 : 3.5} fill="#0f172a" stroke="#7dd3fc" strokeWidth="2" />
-                <title>{`${formatChartDate(point.time)}: $${point.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</title>
-              </g>
-            ))}
-            {plottedPoints.length > 1 && [0, Math.floor((plottedPoints.length - 1) / 2), plottedPoints.length - 1].map((index) => (
-              <text key={`date-${index}`} x={plottedPoints[index].x} y={svgHeight - 2} textAnchor={index === 0 ? 'start' : index === plottedPoints.length - 1 ? 'end' : 'middle'} fill="#94a3b8" fontSize="11">{formatAxisDate(plottedPoints[index].time)}</text>
-            ))}
-          </svg>
+          <p className="mt-2 text-[10px] leading-5 text-slate-400">
+            {points.length > 1 ? 'Real wallet snapshots collected from the live portfolio value.' : 'Collecting balance history...'}
+          </p>
         </div>
       </div>
     </div>
@@ -1647,7 +1748,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const lastSync = portfolio.isLoading ? "UPDATING" : portfolio.isError ? "DEGRADED" : "LIVE";
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-7">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -1685,7 +1786,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           </div>
         </div>
 
-        <div className="relative z-10 mt-6 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
+        <div className="relative z-10 mt-8 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
           <div className="rounded-3xl border border-slate-700/80 bg-slate-900/70 p-5 shadow-[0_22px_50px_rgba(2,6,23,0.45)] backdrop-blur-sm">
             <div className="flex items-center justify-between gap-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Portfolio value</p>
@@ -1751,7 +1852,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                 </span>
               </div>
             </div>
-            <div className="mt-4 rounded-2xl border border-slate-800/80 bg-slate-950/30 p-3">
+            <div className="mt-6 rounded-2xl border border-slate-800/80 bg-slate-950/30 px-0 pb-0 pt-3">
               {portfolio.isLoading ? (
                 <div className="space-y-3 py-4">
                   <div className="h-28 animate-pulse rounded-xl bg-white/[0.06]" />
@@ -1766,13 +1867,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                   Price data is temporarily unavailable. The wallet balance remains available once pricing recovers.
                 </div>
               ) : (
-                <Chart
-                  portfolio={portfolio}
-                  transactions={transactionsQuery.transactions}
-                  walletAddress={address}
-                  isTransactionsLoading={transactionsQuery.isLoading}
-                  isTransactionsError={transactionsQuery.isError}
-                />
+                <Chart portfolio={portfolio} />
               )}
             </div>
           </Card>
@@ -2488,7 +2583,8 @@ function BridgeBalanceHasEnough(raw: bigint | null, requested: bigint | null): b
 export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const isSwap = type === "swap";
   const isBridge = type === "bridge";
-  const { address, isConnected, chainId } = useAccount();
+  const shouldReduceMotion = useReducedMotion();
+  const { address, isConnected, chainId, connector } = useAccount();
   const { switchChain } = useSwitchChain();
   const portfolio = usePortfolio();
   const [fromSymbol, setFromSymbol] = useState("ETH");
@@ -2520,7 +2616,6 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const [bridgeAmount, setBridgeAmount] = useState("");
   const [bridgeSlippage, setBridgeSlippage] = useState(0.005);
   const [showBridgeConfirmation, setShowBridgeConfirmation] = useState(false);
-  const [bridgeCompletedAt, setBridgeCompletedAt] = useState<number | null>(null);
   const bridgeFromChain: BridgeChain = { id: bridgeFromChainId, name: getOrbitNetwork(bridgeFromChainId)?.name ?? "Unknown" };
   const bridgeToChain: BridgeChain = { id: bridgeToChainId, name: getOrbitNetwork(bridgeToChainId)?.name ?? "Unknown" };
   const bridgeSameNetwork = bridgeFromChainId === bridgeToChainId; // Prevent same-network bridging
@@ -2531,55 +2626,65 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   try { rawBridgeAmount = bridgeAmount && bridgeFromToken ? parseUnits(bridgeAmount, bridgeFromToken.decimals) : null; } catch { rawBridgeAmount = null; }
   const bridgeBalance = useBridgeBalance(bridgeFromToken, address, isConnected);
   const bridgeAmountError = bridgeAmount && rawBridgeAmount === null ? "Invalid amount" : rawBridgeAmount !== null && rawBridgeAmount <= 0n ? "Amount must be greater than zero" : rawBridgeAmount !== null && !bridgeBalance.isWrongNetwork && BridgeBalanceHasEnough(bridgeBalance.raw, rawBridgeAmount) === false ? "Insufficient balance" : null;
-  const bridgeQuoteState = useBridgeQuote(bridgeFromChain, bridgeToChain, bridgeFromToken, bridgeToToken, isBridge && rawBridgeAmount && rawBridgeAmount > 0n && !bridgeAmountError && !bridgeSameNetwork ? rawBridgeAmount : null, address, bridgeSlippage);
+  const bridgeQuoteState = useBridgeQuote(bridgeFromChain, bridgeToChain, bridgeFromToken, bridgeToToken, isBridge && rawBridgeAmount && rawBridgeAmount > 0n && !bridgeAmountError && !bridgeSameNetwork ? rawBridgeAmount : null, address, bridgeSlippage, false, connector);
   const bridgeApproval = useBridgeApproval(bridgeFromToken, address, bridgeQuoteState.quote?.transactionTarget ?? null, rawBridgeAmount);
   const bridgeExecution = useBridgeExecution(bridgeQuoteState.quote);
   const resetBridgeExecution = bridgeExecution.reset;
-  const bridgeStatus = useBridgeStatus(bridgeQuoteState.quote, bridgeExecution.sourceHash?.toString(), bridgeExecution.status === "source-confirmed" || bridgeExecution.status === "bridging" || Boolean(bridgeExecution.sourceHash));
-  useEffect(() => {
-    if (bridgeExecution.status === "completed") {
-      setBridgeCompletedAt((current) => current ?? Date.now());
-    }
-  }, [bridgeExecution.status]);
-  const bridgeWrongNetwork = isConnected && chainId !== bridgeFromChainId;
+  const bridgeStatus = useBridgeStatus(bridgeQuoteState.quote, bridgeExecution.sourceHash?.toString(), bridgeExecution.status === "source-confirmed" || bridgeExecution.status === "attestation-pending" || bridgeExecution.status === "attestation-ready" || bridgeExecution.status === "destination-pending" || bridgeExecution.status === "destination-confirmed" || bridgeExecution.status === "verification-pending" || Boolean(bridgeExecution.sourceHash));
+  const finalDestinationHash = getBridgeSuccessDestinationHash(bridgeExecution.destinationHash, bridgeStatus.status?.receiving?.txHash);
+  const bridgeIsComplete = canShowBridgeSuccess({
+    status: bridgeExecution.status,
+    sourceHash: bridgeExecution.sourceHash,
+    destinationHash: finalDestinationHash,
+    destinationVerified: bridgeExecution.destinationVerified,
+  });
+  const autoCompleteBridgeReady = shouldAutoCompleteBridge({
+    status: bridgeExecution.status,
+    attestationReady: Boolean(bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation),
+    message: bridgeStatus.status?.message,
+    attestation: bridgeStatus.status?.attestation,
+    destinationHash: bridgeExecution.destinationHash,
+  });
+  const bridgeExecutionStarted = isBridgeExecutionStarted(bridgeExecution.status, bridgeExecution.sourceHash);
+  const requiredBridgeChainId = getRequiredBridgeChainId({
+    status: bridgeExecution.status,
+    sourceChainId: bridgeFromChainId,
+    destinationChainId: bridgeToChainId,
+    forwarding: bridgeQuoteState.quote?.selectedRoute === "forwarding",
+  });
+  const requiredBridgeChain = requiredBridgeChainId === bridgeToChainId ? bridgeToChain : bridgeFromChain;
+  const bridgeWrongNetwork = isConnected && chainId !== requiredBridgeChainId && !bridgeIsComplete;
   const queryClient = useQueryClient();
   const resetBridgeRouteState = useCallback(() => {
     resetBridgeExecution();
     queryClient.removeQueries({ queryKey: ['bridge-status'] });
     queryClient.removeQueries({ queryKey: ['bridge-quote'] });
     setShowBridgeConfirmation(false);
-    setBridgeCompletedAt(null);
   }, [queryClient, resetBridgeExecution]);
   useEffect(() => {
     resetBridgeRouteState();
   }, [bridgeFromChainId, bridgeToChainId, resetBridgeRouteState]);
-  const bridgeReady = isBridgeReviewable({ isConnected, wrongNetwork: bridgeWrongNetwork, sameNetwork: bridgeSameNetwork, hasSourceToken: Boolean(bridgeFromToken), hasDestinationToken: Boolean(bridgeToToken), hasQuote: Boolean(bridgeQuoteState.quote), hasAmount: Boolean(rawBridgeAmount), hasAmountError: Boolean(bridgeAmountError), approvalRequired: bridgeApproval.required, simulationSucceeded: bridgeQuoteState.simulationSucceeded, isSimulating: bridgeQuoteState.isSimulating, quoteFresh: Date.now() - (bridgeQuoteState.quote?.quotedAt ?? 0) <= 30_000 });
-  const bridgeCompletedHash = bridgeStatus.status?.receiving?.txHash ?? bridgeExecution.sourceHash?.toString();
-  const bridgeCompletedChainId = bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId;
-  const bridgeCompletedExplorerUrl = bridgeCompletedHash ? explorerTransactionUrl(bridgeCompletedChainId, bridgeCompletedHash) : undefined;
-  if (isBridge && bridgeExecution.status === "completed" && bridgeCompletedHash && bridgeCompletedExplorerUrl && bridgeQuoteState.quote && bridgeFromToken && bridgeToToken) {
-    return (
-      <TransactionSuccessScreen
-        title="Bridge Successful!"
-        description={`Your assets were successfully bridged from ${bridgeFromChain.name} to ${bridgeToChain.name}.`}
-        amountLabel="Amount bridged"
-        amount={formatUnits(bridgeQuoteState.quote.fromAmount, bridgeFromToken.decimals)}
-        token={{ symbol: bridgeFromToken.symbol, color: "#2775CA" }}
-        networks={[
-          { label: "Source network", network: bridgeFromChain },
-          { label: "Destination network", network: bridgeToChain },
-        ]}
-        transactionHash={bridgeCompletedHash}
-        explorerUrl={bridgeCompletedExplorerUrl}
-        gasFee="Unavailable"
-        completedAt={bridgeCompletedAt ?? Date.now()}
-        primaryLabel="Back to Bridge"
-        secondaryLabel="Bridge Again"
-        onBack={resetBridgeRouteState}
-        onPrimary={resetBridgeRouteState}
-      />
-    );
-  }
+  const autoCompleteAttemptKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoCompleteBridgeReady || !bridgeStatus.status?.message || !bridgeStatus.status.attestation) return;
+    if (bridgeExecution.status === "destination-pending" || bridgeExecution.status === "verification-pending" || bridgeExecution.status === "completed") return;
+    const completionKey = `${bridgeExecution.sourceHash ?? "no-source"}:${bridgeStatus.status.message}:${bridgeStatus.status.attestation}`;
+    if (autoCompleteAttemptKeyRef.current === completionKey) return;
+    autoCompleteAttemptKeyRef.current = completionKey;
+    void bridgeExecution.complete(bridgeStatus.status.message, bridgeStatus.status.attestation);
+  }, [autoCompleteBridgeReady, bridgeExecution.sourceHash, bridgeExecution.status, bridgeStatus.status?.attestation, bridgeStatus.status?.message]);
+  const bridgeReady = isBridgeReviewable({ isConnected, wrongNetwork: bridgeWrongNetwork, sameNetwork: bridgeSameNetwork, hasSourceToken: Boolean(bridgeFromToken), hasDestinationToken: Boolean(bridgeToToken), hasQuote: Boolean(bridgeQuoteState.quote), hasAmount: Boolean(rawBridgeAmount), hasAmountError: Boolean(bridgeAmountError), quoteFresh: Date.now() - (bridgeQuoteState.quote?.quotedAt ?? 0) <= 30_000 });
+  const bridgeLifecycleStatus = bridgeExecution.status === "source-pending"
+    ? "Transaction submitted"
+    : bridgeExecution.status === "source-confirmed" || bridgeExecution.status === "attestation-pending" || bridgeExecution.status === "attestation-ready"
+      ? "Bridging in progress"
+      : bridgeExecution.status === "destination-pending"
+        ? "Waiting for destination confirmation"
+        : bridgeExecution.status === "destination-confirmed" || bridgeExecution.status === "verification-pending"
+          ? "Destination transaction confirmed"
+          : bridgeExecution.status === "completed"
+            ? "Bridge completed"
+            : null;
   return (
     <div className="mx-auto max-w-5xl space-y-8">
       <PageTitle
@@ -2658,7 +2763,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                 </div>
               </div>
               {bridgeSameNetwork && <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Source and destination networks must be different.</span></div>}
-              {bridgeWrongNetwork && <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Wrong network. Switch to {bridgeFromChain.name} before bridging.</span><Button variant="secondary" onClick={() => switchChain({ chainId: bridgeFromChainId })}>Switch to {bridgeFromChain.name}</Button></div>}
+              {bridgeWrongNetwork && <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Wrong network. Switch to {requiredBridgeChain.name} before bridging.</span><Button variant="secondary" onClick={() => switchChain({ chainId: requiredBridgeChainId })}>Switch to {requiredBridgeChain.name}</Button></div>}
               <div className="mt-4 rounded-xl border border-white/10 bg-white/[.03] p-4">
                 <Label>Asset</Label>
                 <div className="mt-3 flex items-center justify-between">
@@ -2671,12 +2776,90 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                 </div>
                 <div className="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button type="button" onClick={() => bridgeFromToken && bridgeBalance.raw !== null && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
               </div>
-              <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeSameNetwork ? "Same network" : !isCctpRouteSupported(bridgeFromChainId, bridgeToChainId) ? "Unavailable" : "CCTP V2"}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmount !== null && bridgeQuoteState.quote?.toAmount !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin !== null && bridgeQuoteState.quote?.toAmountMin !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">Depends on Circle attestation</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount !== null && bridgeQuoteState.quote?.feeAmount !== undefined && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Fee determined by Circle/CCTP"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
-              <p className={`mt-4 text-xs ${bridgeSameNetwork ? "text-amber-300" : bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeExecution.status === "failed" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeSameNetwork ? "Select different source and destination networks." : bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "CCTP token catalog unavailable." : bridgeQuoteState.isError ? `CCTP route unavailable: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approve canonical USDC for Circle CCTP." : bridgeQuoteState.isSimulating ? "Checking the CCTP burn on the source chain..." : bridgeQuoteState.simulationError ? `CCTP burn simulation failed: ${bridgeQuoteState.simulationError.message}` : bridgeStatus.status?.status === "DONE" ? "Source message attested. Destination mint requires confirmation." : bridgeQuoteState.quote ? "Ready to review Circle CCTP transfer." : "Enter a USDC amount to request a CCTP quote.")}</p>
-              {bridgeApproval.required ? <Button className="mt-4 w-full" onClick={() => void bridgeApproval.approve()} disabled={bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending"} icon>{bridgeApproval.status === "pending" ? "Approval pending..." : bridgeApproval.status === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation ? <Button className="mt-4 w-full" onClick={() => void bridgeExecution.complete(bridgeStatus.status?.message, bridgeStatus.status?.attestation)} disabled={bridgeExecution.status === "bridging" || bridgeExecution.status === "completed"} icon>{bridgeExecution.status === "bridging" ? "Mint pending..." : bridgeExecution.status === "completed" ? "Bridge completed" : "Mint on destination"}</Button> : <Button className="mt-4 w-full" onClick={() => setShowBridgeConfirmation(true)} disabled={!bridgeReady || bridgeExecution.status === "source-pending"} icon>{bridgeExecution.status === "source-pending" ? "Bridge pending..." : bridgeExecution.status === "source-confirmed" ? "Waiting for attestation..." : "Review bridge"}</Button>}
+              <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeSameNetwork ? "Same network" : !isCctpRouteSupported(bridgeFromChainId, bridgeToChainId) ? "Unavailable" : getBridgeRouteLabel(bridgeQuoteState.quote?.selectedRoute)}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmount !== null && bridgeQuoteState.quote?.toAmount !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin !== null && bridgeQuoteState.quote?.toAmountMin !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">Depends on Circle attestation</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount !== null && bridgeQuoteState.quote?.feeAmount !== undefined && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Fee determined by Circle/CCTP"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
+              <p className={`mt-4 text-xs ${bridgeSameNetwork ? "text-amber-300" : bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeExecution.status === "error" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeSameNetwork ? "Select different source and destination networks." : bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "CCTP token catalog unavailable." : bridgeQuoteState.isError ? `CCTP route unavailable: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approve canonical USDC for Circle CCTP." : bridgeQuoteState.isSimulating ? "Checking the CCTP burn on the source chain..." : bridgeQuoteState.simulationError ? `CCTP burn simulation failed: ${bridgeQuoteState.simulationError.message}` : bridgeStatus.status?.status === "DONE" ? "Source message attested. Destination mint requires confirmation." : bridgeQuoteState.quote ? "Ready to review Circle CCTP transfer." : "Enter a USDC amount to request a CCTP quote.")}</p>
+              {shouldShowBridgeApprovalAction({ status: bridgeExecution.status, sourceHash: bridgeExecution.sourceHash, approvalRequired: bridgeApproval.required }) ? <Button className="mt-4 w-full" onClick={() => void bridgeApproval.approve()} disabled={bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending"} icon>{bridgeApproval.status === "pending" ? "Approval pending..." : bridgeApproval.status === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : autoCompleteBridgeReady || (bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation) ? null : shouldShowBridgeReviewAction({ status: bridgeExecution.status, sourceHash: bridgeExecution.sourceHash, approvalRequired: bridgeApproval.required, bridgeReady: bridgeReady }) ? <Button className="mt-4 w-full" onClick={() => setShowBridgeConfirmation(true)} disabled={!bridgeReady || bridgeExecution.status === "source-pending"} icon>{bridgeExecution.status === "source-pending" ? "Bridge pending..." : bridgeExecution.status === "source-confirmed" ? "Waiting for attestation..." : "Review bridge"}</Button> : null }
+              {bridgeLifecycleStatus && <p className={`mt-3 text-xs ${bridgeExecution.status === "completed" ? "text-emerald-300" : "text-cyan-300"}`}>{bridgeLifecycleStatus}</p>}
               {bridgeExecution.sourceHash && bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) && <p className="mt-2 text-xs text-cyan-300">Source transaction: <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeExecution.sourceHash)}</a></p>}
               {bridgeStatus.status?.receiving?.txHash && bridgeExplorerUrl(bridgeStatus.status.receiving.chainId ?? bridgeToChainId, bridgeStatus.status.receiving.txHash) && <p className="mt-2 text-xs text-emerald-300">Destination transaction: <a href={bridgeExplorerUrl(bridgeStatus.status.receiving.chainId ?? bridgeToChainId, bridgeStatus.status.receiving.txHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeStatus.status.receiving.txHash)}</a></p>}
               {showBridgeConfirmation && bridgeQuoteState.quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{bridgeFromChain.name} → {bridgeToChain.name}</span></div><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{bridgeAmount} {bridgeSymbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{bridgeQuoteState.quote.toAmountMin !== null && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Protocol</span><span>Circle CCTP V2</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the canonical USDC burn transaction in your wallet before signing. The destination mint requires a Circle attestation.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowBridgeConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowBridgeConfirmation(false); void bridgeExecution.execute(); }} disabled={!bridgeReady} icon>Confirm bridge</Button></div></div>}
+              <AnimatePresence>
+                {bridgeIsComplete && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: shouldReduceMotion ? 0 : 0.2 }}
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm sm:p-6"
+                  >
+                    <motion.div
+                      initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 12, scale: shouldReduceMotion ? 1 : 0.97 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: shouldReduceMotion ? 0 : 8, scale: shouldReduceMotion ? 1 : 0.98 }}
+                      transition={{ duration: shouldReduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] }}
+                      className="w-full max-w-xl overflow-hidden rounded-2xl border border-emerald-300/25 bg-slate-900/95 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                          <motion.div
+                            initial={{ scale: shouldReduceMotion ? 1 : 0.75, opacity: shouldReduceMotion ? 1 : 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            transition={{ delay: shouldReduceMotion ? 0 : 0.08, duration: shouldReduceMotion ? 0 : 0.25 }}
+                            className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-emerald-300/40 bg-emerald-300/10 text-emerald-300 shadow-[0_0_28px_rgba(52,211,153,0.22)]"
+                          >
+                            <span className="absolute inset-1 rounded-full border border-emerald-300/20" />
+                            <svg viewBox="0 0 24 24" className="relative h-6 w-6" fill="none" aria-hidden="true">
+                              <motion.path d="m5 12 4 4L19 6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" initial={{ pathLength: shouldReduceMotion ? 1 : 0, opacity: shouldReduceMotion ? 1 : 0 }} animate={{ pathLength: 1, opacity: 1 }} transition={{ delay: shouldReduceMotion ? 0 : 0.16, duration: shouldReduceMotion ? 0 : 0.32 }} />
+                            </svg>
+                          </motion.div>
+                          <div>
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-300">Transaction confirmed</p>
+                            <h3 className="mt-1 text-2xl font-bold tracking-tight text-white">Bridge Successful!</h3>
+                          </div>
+                        </div>
+                        <button type="button" onClick={() => resetBridgeRouteState()} className="rounded-full border border-white/10 bg-white/5 p-2 text-slate-300 transition hover:bg-white/10 hover:text-white" aria-label="Close bridge success popup"><X size={17} /></button>
+                      </div>
+                      <p className="mt-4 text-sm leading-6 text-slate-400">Your assets were successfully bridged from <span className="font-semibold text-slate-200">{bridgeFromChain.name}</span> to <span className="font-semibold text-slate-200">{bridgeToChain.name}</span>.</p>
+                      <div className="mt-5 grid gap-2 sm:grid-cols-3">
+                        <div className="rounded-xl border border-white/10 bg-white/[.035] p-3">
+                          <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Amount bridged</p>
+                          <p className="mt-1 font-mono text-sm font-semibold text-white">{bridgeQuoteState.quote?.fromAmount !== undefined ? `${formatUnits(bridgeQuoteState.quote.fromAmount, bridgeFromToken?.decimals ?? 6)} ${bridgeSymbol}` : "—"}</p>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[.035] p-3">
+                          <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Source network</p>
+                          <p className="mt-1 truncate text-sm font-semibold text-white">{bridgeFromChain.name}</p>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[.035] p-3">
+                          <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Destination network</p>
+                          <p className="mt-1 truncate text-sm font-semibold text-white">{bridgeToChain.name}</p>
+                        </div>
+                      </div>
+                      <div className="mt-4 divide-y divide-white/10 rounded-xl border border-white/10 bg-slate-950/35">
+                        <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs">
+                          <span className="text-slate-500">Source transaction</span>
+                          {bridgeExecution.sourceHash ? (
+                            bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ? <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="inline-flex min-w-0 items-center gap-1 font-mono text-cyan-300 underline">{shortAddr(bridgeExecution.sourceHash)} <ExternalLink size={12} /></a> : <span className="truncate font-mono text-slate-300">{shortAddr(bridgeExecution.sourceHash)}</span>
+                          ) : <span className="font-mono text-slate-500">Pending</span>}
+                        </div>
+                        <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs">
+                          <span className="text-slate-500">Destination transaction</span>
+                          {finalDestinationHash ? (
+                            bridgeExplorerUrl(bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId, finalDestinationHash) ? <a href={bridgeExplorerUrl(bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId, finalDestinationHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="inline-flex min-w-0 items-center gap-1 font-mono text-cyan-300 underline">{shortAddr(finalDestinationHash)} <ExternalLink size={12} /></a> : <span className="truncate font-mono text-slate-300">{shortAddr(finalDestinationHash)}</span>
+                          ) : <span className="font-mono text-slate-500">Pending</span>}
+                        </div>
+                        <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs">
+                          <span className="text-slate-500">Status</span>
+                          <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-300"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />Confirmed</span>
+                        </div>
+                        {bridgeQuoteState.quote?.quotedAt && <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs"><span className="text-slate-500">Time</span><span className="font-mono text-slate-300">{new Date(bridgeQuoteState.quote.quotedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div>}
+                      </div>
+                      <div className="mt-5 flex justify-end">
+                        <Button onClick={() => resetBridgeRouteState()} className="px-5">Done</Button>
+                      </div>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </>
           ) : null}
         </Card>
@@ -2930,7 +3113,6 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
-  const [completedAt, setCompletedAt] = useState<number | null>(null);
   const asset = ARC_USDC;
   const balance = useTokenBalance(asset, address, Boolean(isConnected && isArcTestnet));
   const isPaymentRequestSend = Boolean(paymentRequest);
@@ -2947,13 +3129,6 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
     setAmount(paymentRequest.amount);
     setFormError(null);
   }, [paymentRequest]);
-  useEffect(() => {
-    if (status === "confirmed" && transactionHash) {
-      setCompletedAt((current) => current ?? Date.now());
-    } else if (status !== "confirmed") {
-      setCompletedAt(null);
-    }
-  }, [status, transactionHash]);
   const handleMax = () => {
     setAmount(formatUnits(balanceRaw, asset.decimals));
     setFormError(null);
@@ -2993,164 +3168,11 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
     }
     await send({ asset, recipient: recipient as Address, amount: rawAmount });
   };
-  const handleSendAnother = () => {
-    reset();
-    setFormError(null);
-  };
   const stateMessage = status === "preparing" ? "Preparing transaction and estimating Arc gas..." : status === "confirmation" ? "Confirm this transaction in your wallet." : status === "pending" ? "Transaction pending on Arc Testnet..." : status === "confirmed" ? "Transaction confirmed." : status === "rejected" ? "Transaction rejected in wallet." : status === "failed" ? error?.message ?? "Transaction failed." : null;
-  if (status === "confirmed" && transactionHash) {
-    return (
-      <SendSuccessScreen
-        amount={amount}
-        asset={asset}
-        recipient={recipient}
-        transactionHash={transactionHash}
-        chainId={asset.chainId}
-        gasCost={gasCost}
-        completedAt={completedAt ?? Date.now()}
-        onBack={handleSendAnother}
-        onSendAnother={handleSendAnother}
-      />
-    );
-  }
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <PageTitle label="Move / Send" title="Send assets securely." />
       {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send Arc Testnet USDC.</p><WalletButton className="mt-7" /></Card> : !isArcTestnet ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send uses the official Arc Testnet USDC contract and your connected wallet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send / Arc Testnet</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><div><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Official Arc ERC-20</span></div></div><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend || balance.isLoading || balance.isError} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balance.isLoading ? "..." : balance.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} USDC`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} USDC</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} native USDC` : "Estimated during preparation"}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p></div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || balance.isLoading || balance.isError} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
-    </div>
-  );
-}
-
-function SendSuccessScreen({
-  amount,
-  asset,
-  recipient,
-  transactionHash,
-  chainId,
-  gasCost,
-  completedAt,
-  onBack,
-  onSendAnother,
-}: {
-  amount: string;
-  asset: BaseAssetConfig;
-  recipient: string;
-  transactionHash: string;
-  chainId: number;
-  gasCost: bigint | null;
-  completedAt: number;
-  onBack: () => void;
-  onSendAnother: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const network = getOrbitNetwork(chainId);
-  const networkName = network?.name ?? `Chain ${chainId}`;
-  const gasSymbol = network?.nativeCurrency.symbol ?? asset.symbol;
-  const explorerUrl = explorerTxUrl(transactionHash, chainId);
-  const formattedTime = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(completedAt);
-  const shortHash = `${transactionHash.slice(0, 10)}...${transactionHash.slice(-8)}`;
-
-  const copyHash = async () => {
-    try {
-      await navigator.clipboard.writeText(transactionHash);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
-  };
-
-  return (
-    <div className="mx-auto max-w-4xl pb-8">
-      <button type="button" onClick={onBack} className="mb-4 inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-400 transition hover:bg-white/[.04] hover:text-white">
-        <ArrowLeft size={15} />
-        Back to Send
-      </button>
-      <Card className="overflow-hidden p-5 sm:p-8 lg:p-10" glow>
-        <div className="relative overflow-hidden rounded-[1.25rem] border border-sky-300/10 bg-[radial-gradient(circle_at_50%_18%,rgba(14,165,233,0.12),transparent_34%),rgba(2,8,23,0.35)] px-3 py-10 text-center sm:px-8 sm:py-12">
-          <div className="pointer-events-none absolute inset-0" aria-hidden="true">
-            <span className="absolute left-[22%] top-[18%] h-1.5 w-1.5 rotate-45 rounded-sm bg-sky-300 shadow-[0_0_12px_rgba(125,211,252,0.85)]" />
-            <span className="absolute left-[31%] top-[8%] h-2 w-2 rotate-45 rounded-sm bg-blue-500 shadow-[0_0_14px_rgba(59,130,246,0.7)]" />
-            <span className="absolute right-[29%] top-[12%] h-1.5 w-1.5 rotate-45 rounded-sm bg-cyan-300 shadow-[0_0_12px_rgba(103,232,249,0.8)]" />
-            <span className="absolute right-[20%] top-[27%] h-2 w-2 rotate-45 rounded-sm bg-emerald-300 shadow-[0_0_14px_rgba(110,231,183,0.75)]" />
-            <span className="absolute left-[27%] top-[34%] h-1 w-1 rounded-full bg-cyan-200" />
-            <span className="absolute right-[27%] top-[38%] h-1 w-1 rounded-full bg-sky-300" />
-          </div>
-          <motion.div
-            initial={{ opacity: 0, scale: 0.82 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-            className="relative mx-auto flex h-28 w-28 items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/10 text-emerald-300 shadow-[0_0_0_12px_rgba(52,211,153,0.05),0_0_70px_rgba(45,212,191,0.35)] sm:h-32 sm:w-32"
-          >
-            <CheckCircle2 size={70} strokeWidth={1.6} className="drop-shadow-[0_0_16px_rgba(52,211,153,0.7)] sm:h-20 sm:w-20" />
-          </motion.div>
-          <p className="relative mt-7 font-mono text-[10px] uppercase tracking-[0.24em] text-emerald-300/80">Transaction confirmed</p>
-          <h1 className="relative mt-3 text-3xl font-extrabold tracking-[-0.04em] text-white sm:text-4xl">Transaction <span className="text-emerald-300">Successful!</span></h1>
-          <p className="relative mx-auto mt-3 max-w-xl text-sm leading-6 text-slate-400">Your assets have been sent successfully on {networkName}.</p>
-        </div>
-
-        <div className="mt-5 rounded-2xl border border-slate-700/80 bg-slate-900/55 p-4 sm:p-5">
-          <div className="flex items-center justify-between gap-4 border-b border-white/[.07] pb-4">
-            <div className="flex min-w-0 items-center gap-3">
-              <TokenIcon symbol={asset.symbol} color={asset.color} />
-              <div className="min-w-0 text-left">
-                <p className="text-xs text-slate-400">Amount</p>
-                <p className="mt-1 truncate text-lg font-bold text-white">{amount || "0"} {asset.symbol}</p>
-              </div>
-            </div>
-            <span className="shrink-0 text-xs font-semibold text-emerald-300">Sent</span>
-          </div>
-          <div className="divide-y divide-white/[.07]">
-            <SendSuccessDetail icon={<UserRound size={16} />} label="Recipient">
-              <span className="truncate font-mono text-xs text-slate-200">{shortAddress(recipient)}</span>
-            </SendSuccessDetail>
-            <SendSuccessDetail icon={<Network size={16} />} label="Network">
-              <span className="flex items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={chainId} className="h-5 w-5" />{networkName}</span>
-            </SendSuccessDetail>
-            <SendSuccessDetail icon={<ExternalLink size={16} />} label="Transaction Hash">
-              <span className="flex min-w-0 items-center gap-2">
-                <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="truncate font-mono text-xs text-slate-200 underline decoration-slate-600 underline-offset-4 hover:text-cyan-200">{shortHash}</a>
-                <button type="button" onClick={() => void copyHash()} title="Copy transaction hash" className="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-white/[.06] hover:text-white"><Copy size={14} /></button>
-                {copied && <span className="shrink-0 text-[10px] text-emerald-300">Copied</span>}
-              </span>
-            </SendSuccessDetail>
-            <SendSuccessDetail icon={<CheckCircle2 size={16} />} label="Status">
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-200"><CheckCircle2 size={13} />Confirmed</span>
-            </SendSuccessDetail>
-            <SendSuccessDetail icon={<Clock3 size={16} />} label="Time">
-              <span className="text-xs text-slate-200">{formattedTime}</span>
-            </SendSuccessDetail>
-            <SendSuccessDetail icon={<Fuel size={16} />} label="Estimated Gas Fee">
-              <span className="text-xs text-slate-200">{gasCost !== null ? `${formatUnits(gasCost, 18)} ${gasSymbol}` : "Unavailable"}</span>
-            </SendSuccessDetail>
-          </div>
-        </div>
-
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <Button variant="secondary" className="min-h-12 w-full" onClick={() => window.open(explorerUrl, "_blank", "noopener,noreferrer")}>
-            <ExternalLink size={16} />
-            View on ArcScan
-          </Button>
-          <Button className="min-h-12 w-full" onClick={onSendAnother}>
-            <ArrowUpRight size={16} />
-            Send Another
-          </Button>
-        </div>
-        <p className="mt-6 text-center text-xs text-slate-500">Thank you for using ORBIT <span className="text-slate-400">&#9829;</span></p>
-      </Card>
-    </div>
-  );
-}
-
-function SendSuccessDetail({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
-  return (
-    <div className="flex min-w-0 items-center gap-3 py-3.5 sm:gap-4">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800/80 text-slate-300">{icon}</span>
-      <span className="shrink-0 text-xs text-slate-400 sm:w-32">{label}</span>
-      <span className="ml-auto min-w-0 text-right">{children}</span>
     </div>
   );
 }
@@ -4325,9 +4347,9 @@ function Dashboard({
     <Space>
       <div className="relative z-10 flex h-screen overflow-hidden">
         <Sidebar page={page} setPage={setPage} open={open} setOpen={setOpen} />
-        <div className="flex h-screen min-w-0 flex-1 flex-col lg:ml-64">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <Topbar onMenu={() => setOpen(true)} />
-          <main className={`min-h-0 flex-1 overflow-y-auto px-5 pt-8 lg:px-8 ${page === "home" ? "pb-3" : "pb-8"}`}>
+          <main className="flex-1 overflow-y-auto px-5 py-8 lg:px-8">
             <AnimatePresence mode="wait">
               <motion.div
                 key={page}
