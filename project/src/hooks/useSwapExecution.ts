@@ -60,7 +60,7 @@ export function useSwapExecution() {
       ]);
       if (receipt.status !== 'success') throw new Error('Swap transaction reverted on Base');
       setStatus('confirmed');
-      await queryClient.invalidateQueries();
+      void queryClient.invalidateQueries();
     } catch (caughtError) {
       setStatus('failed');
       setError(caughtError instanceof Error ? caughtError : new Error('Swap failed'));

@@ -205,10 +205,7 @@ export function useSendTransaction(): UseSendTransactionResult {
         throw new Error('Transaction reverted on Arc Testnet');
       }
       setStatus('confirmed');
-      await queryClient.invalidateQueries({ queryKey: ['prices'] });
-      await queryClient.invalidateQueries({ queryKey: ['transactions', address, activeChainId] });
-      await queryClient.invalidateQueries({ queryKey: ['balance'] });
-      await queryClient.invalidateQueries();
+      void queryClient.invalidateQueries();
     } catch (caughtError) {
       setStatus(isUserRejectedError(caughtError) ? 'rejected' : 'failed');
       setError(caughtError instanceof Error ? caughtError : new Error('Transaction failed'));

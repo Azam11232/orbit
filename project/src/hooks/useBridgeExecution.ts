@@ -4,8 +4,9 @@ import { useAccount, usePublicClient, useSendTransaction, useSwitchChain } from 
 import { decodeEventLog, encodeFunctionData, erc20Abi, formatUnits, type Address, type EIP1193Provider, type Hash, type Hex } from 'viem';
 import type { BridgeQuote, BridgeStatus } from '../types/bridge';
 import { cctpMessageTransmitterAbi } from '../services/bridge/cctp';
-import { CircleForwardingError, executeCircleForwarding, getForwardingStatusOutcome, isAuthoritativeForwardingSuccess, isCircleForwardingSupported, pollCircleForwardingStatus } from '../services/bridge/circleForwarding';
+import { CircleForwardingError, executeCircleForwarding, getForwardingPollRetryDelay, getForwardingStatusOutcome, isAuthoritativeForwardingSuccess, isCircleForwardingSupported, isFastArcSepoliaForwarding, pollCircleForwardingStatus } from '../services/bridge/circleForwarding';
 import { getOrbitNetwork } from '../data/networks';
+import { markArcForwardingTiming, timeArcForwardingAwait, type ArcForwardingTiming } from '../services/bridge/arcForwardingTiming';
 
 export type BridgeExecutionStatus = 'idle' | 'preflight' | 'approval-required' | 'approval-pending' | 'approval-confirmed' | 'source-pending' | 'source-confirmed' | 'attestation-pending' | 'attestation-ready' | 'destination-pending' | 'destination-confirmed' | 'verification-pending' | 'completed' | 'error' | 'cancelled';
 const QUOTE_MAX_AGE_MS = 30_000;
@@ -33,7 +34,7 @@ export function verifyDestinationReceipt(input: DestinationReceiptVerificationIn
       const decoded = decodeEventLog({ abi: erc20Abi, data: log.data, topics });
       if (decoded.eventName !== 'Transfer') return false;
       const args = decoded.args as { from: Address; to: Address; value: bigint };
-      return args.to.toLowerCase() === input.recipient.toLowerCase() && (input.requireExactAmount === false ? args.value > 0n : args.value === input.expectedAmount);
+      return args.to.toLowerCase() === input.recipient.toLowerCase() && (input.requireExactAmount === false ? args.value >= input.expectedAmount : args.value === input.expectedAmount);
     } catch {
       return false;
     }
@@ -42,6 +43,10 @@ export function verifyDestinationReceipt(input: DestinationReceiptVerificationIn
 
 export function getRequiredSourceDebit(quote: Pick<BridgeQuote, 'fromAmount' | 'totalSourceDebit'>) {
   return quote.totalSourceDebit ?? quote.fromAmount;
+}
+
+export function shouldReadAppSourceBalance(input: { forwardingEnabled: boolean; sourceChainId: number; destinationChainId: number; fromAmount: bigint; totalSourceDebit?: bigint | null }) {
+  return !(input.forwardingEnabled && isFastArcSepoliaForwarding(input.sourceChainId, input.destinationChainId) && input.totalSourceDebit === input.fromAmount);
 }
 
 export function canShowBridgeSuccess(input: { status: BridgeExecutionStatus; sourceHash?: Hash; destinationHash?: Hash; destinationVerified: boolean }) {
@@ -111,6 +116,7 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
   const [error, setError] = useState<Error | null>(null);
   const forwardingStatusSeededRef = useRef(false);
   const forwardingCompletedRef = useRef(false);
+  const forwardingTimingRef = useRef<ArcForwardingTiming>();
   const activeQuoteRef = useRef<BridgeQuote>();
   const sourceSubmissionGuardRef = useRef(createBridgeExecutionOneShotGuard());
   const sourceSubmissionKeyRef = useRef<string | null>(null);
@@ -154,7 +160,18 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
       while (!cancelled && Date.now() - startedAt < FORWARDING_POLL_TIMEOUT_MS) {
         try {
           const provider = await connector.getProvider();
-          const forwarding = await pollCircleForwardingStatus({ provider: provider as EIP1193Provider, sourceChainId: activeQuote.fromChain.id, sourceHash, recipient: address });
+          const fastArcSepoliaForwarding = isFastArcSepoliaForwarding(activeQuote.fromChain.id, activeQuote.toChain.id);
+          const forwardingPollRetryDelay = getForwardingPollRetryDelay(activeQuote.fromChain.id, activeQuote.toChain.id);
+          const forwarding = await pollCircleForwardingStatus({
+            provider: provider as EIP1193Provider,
+            sourceChainId: activeQuote.fromChain.id,
+            sourceHash,
+            recipient: address,
+            timing: forwardingTimingRef.current,
+            pollingConfig: fastArcSepoliaForwarding ? { maxRetries: 1, retryDelay: forwardingPollRetryDelay } : undefined,
+          });
+          if (forwarding) markArcForwardingTiming(forwardingTimingRef.current, 'Circle status response received');
+          if (forwarding?.forwardTxHash) markArcForwardingTiming(forwardingTimingRef.current, 'destination hash received');
           if (cancelled) return;
           const outcome = getForwardingStatusOutcome(forwarding?.forwardState, forwarding?.forwardTxHash);
           if (outcome === 'failed') {
@@ -165,6 +182,30 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
           const authoritativeForwardingSuccess = isAuthoritativeForwardingSuccess(forwarding ?? { forwardState: undefined, forwardTxHash: destinationHash });
           if ((forwarding && outcome === 'completed' && authoritativeForwardingSuccess) || Boolean(destinationHash && destinationHash.length > 2)) {
             const confirmedHash = forwarding?.forwardTxHash as Hash | undefined ?? destinationHash;
+            if (fastArcSepoliaForwarding) {
+              if (!confirmedHash || !destinationClient) {
+                await new Promise<void>((resolve) => window.setTimeout(resolve, FORWARDING_RECONCILIATION_INTERVAL_MS));
+                continue;
+              }
+              markArcForwardingTiming(forwardingTimingRef.current, 'destination receipt wait started');
+              const receipt = await timeArcForwardingAwait(forwardingTimingRef.current, 'destination receipt wait', () => destinationClient.waitForTransactionReceipt({ hash: confirmedHash, pollingInterval: FORWARDING_RECONCILIATION_INTERVAL_MS }));
+              markArcForwardingTiming(forwardingTimingRef.current, 'destination receipt confirmed');
+              const destination = getOrbitNetwork(activeQuote.toChain.id);
+              if (!destination || !verifyDestinationReceipt({
+                receiptStatus: receipt.status,
+                receiptTo: receipt.to,
+                expectedMessageTransmitter: destination.messageTransmitterV2,
+                expectedToken: destination.usdc,
+                recipient: address,
+                expectedAmount: activeQuote.toAmount ?? activeQuote.fromAmount,
+                requireExactAmount: false,
+                logs: receipt.logs,
+              })) {
+                setStatus('error');
+                setError(new Error('Circle forwarding destination receipt did not verify the expected USDC transfer'));
+                return;
+              }
+            }
             forwardingCompletedRef.current = true;
             setDestinationHash(confirmedHash);
             setDestinationVerified(true);
@@ -174,6 +215,7 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
               receiving: { txHash: confirmedHash ?? undefined, chainId: activeQuote.toChain.id },
               sending: { txHash: sourceHash, chainId: activeQuote.fromChain.id },
             });
+            markArcForwardingTiming(forwardingTimingRef.current, 'success state set');
             setStatus('completed');
             return;
           }
@@ -187,7 +229,9 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
     void reconcile();
     return () => { cancelled = true; };
   }, [activeQuote, address, connector, queryClient, sourceHash, status]);
-  const execute = async () => {
+  const execute = async (timing?: ArcForwardingTiming) => {
+    forwardingTimingRef.current = timing;
+    markArcForwardingTiming(timing, 'execute() started');
     setError(null);
     if (quote) activeQuoteRef.current = quote;
     if (status !== 'idle' && status !== 'preflight' && status !== 'error' && status !== 'cancelled') {
@@ -227,12 +271,24 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
     const forwardingEnabled = selectedRoute === 'forwarding';
     if (!forwardingEnabled && (!quote.transactionTarget || !quote.transactionData || quote.transactionData === '0x')) { const nextError = new Error('Bridge transaction data is incomplete'); setStatus('error'); setError(nextError); return; }
     try {
-    const currentBalancePromise = quote.fromToken.isNative
-      ? publicClient.getBalance({ address })
-      : publicClient.readContract({ address: quote.fromToken.address, abi: erc20Abi, functionName: 'balanceOf', args: [address] });
-    const providerPromise = forwardingEnabled ? connector?.getProvider() : undefined;
+    const readAppSourceBalance = shouldReadAppSourceBalance({
+      forwardingEnabled,
+      sourceChainId: quote.fromChain.id,
+      destinationChainId: quote.toChain.id,
+      fromAmount: quote.fromAmount,
+      totalSourceDebit: quote.totalSourceDebit,
+    });
+    const currentBalancePromise = !readAppSourceBalance
+      ? Promise.resolve(undefined)
+      : timeArcForwardingAwait(timing, 'app source balance read', () => quote.fromToken.isNative
+        ? publicClient.getBalance({ address })
+        : publicClient.readContract({ address: quote.fromToken.address, abi: erc20Abi, functionName: 'balanceOf', args: [address] }));
+    if (!readAppSourceBalance) markArcForwardingTiming(timing, 'app source balance check skipped');
+    const providerPromise = forwardingEnabled && connector
+      ? timeArcForwardingAwait(timing, 'provider acquisition', () => connector.getProvider())
+      : undefined;
     const [currentBalance, provider] = await Promise.all([currentBalancePromise, providerPromise]);
-    if (currentBalance < getRequiredSourceDebit(quote)) { const nextError = new Error('Insufficient source-chain balance for the quoted transfer and fees'); setStatus('error'); setError(nextError); if (sourceSubmissionKeyRef.current) { sourceSubmissionGuardRef.current.release(sourceSubmissionKeyRef.current); sourceSubmissionKeyRef.current = null; } return; }
+    if (currentBalance !== undefined && currentBalance < getRequiredSourceDebit(quote)) { const nextError = new Error('Insufficient source-chain balance for the quoted transfer and fees'); setStatus('error'); setError(nextError); if (sourceSubmissionKeyRef.current) { sourceSubmissionGuardRef.current.release(sourceSubmissionKeyRef.current); sourceSubmissionKeyRef.current = null; } return; }
     const preflightTarget = quote.transactionTarget;
     const preflightData = quote.transactionData;
     if (!forwardingEnabled) {
@@ -267,6 +323,7 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
           quote: forwardingQuote,
           destinationAmount: quote.toAmount ?? undefined,
           totalSourceDebit: quote.totalSourceDebit ?? undefined,
+          timing,
           onStep: (step) => {
             const stepName = step.name.toLowerCase();
             if (stepName === 'approve' && step.state === 'pending') {
@@ -274,8 +331,11 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
             } else if (stepName === 'approve' && step.state === 'success') {
               setStatus('approval-confirmed');
             } else if (stepName === 'burn' && step.state === 'success' && step.txHash) {
+              markArcForwardingTiming(timing, 'source tx hash available');
+              markArcForwardingTiming(timing, 'source receipt confirmed');
               setSourceHash(step.txHash as Hash);
             } else if (stepName === 'mint' && step.state === 'success' && step.txHash) {
+              markArcForwardingTiming(timing, 'destination hash received');
               setDestinationHash(step.txHash as Hash);
               setStatus('verification-pending');
             }
@@ -298,6 +358,28 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
         setStatus('verification-pending');
         const authoritativeForwardingSuccess = forwarded.forwarding ? isAuthoritativeForwardingSuccess(forwarded.forwarding) : Boolean(forwarded.destinationHash);
         if (!authoritativeForwardingSuccess) throw new Error('Circle forwarding completed without an authoritative destination result');
+        if (isFastArcSepoliaForwarding(quote.fromChain.id, quote.toChain.id)) {
+          if (!forwarded.destinationHash || !destinationClient) throw new Error('Circle forwarding confirmation did not include a verifiable destination transaction');
+          const confirmedDestinationHash = forwarded.destinationHash;
+          markArcForwardingTiming(timing, 'destination receipt wait started');
+          const destinationReceipt = await timeArcForwardingAwait(timing, 'destination receipt wait', () => Promise.race([
+            destinationClient.waitForTransactionReceipt({ hash: confirmedDestinationHash, pollingInterval: FORWARDING_RECONCILIATION_INTERVAL_MS }),
+            new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Destination transaction confirmation timed out')), RECEIPT_TIMEOUT_MS)),
+          ]));
+          markArcForwardingTiming(timing, 'destination receipt confirmed');
+          const destination = getOrbitNetwork(quote.toChain.id);
+          const receiptVerified = Boolean(destination && verifyDestinationReceipt({
+            receiptStatus: destinationReceipt.status,
+            receiptTo: destinationReceipt.to,
+            expectedMessageTransmitter: destination.messageTransmitterV2,
+            expectedToken: destination.usdc,
+            recipient: address,
+            expectedAmount: forwarded.destinationAmount,
+            requireExactAmount: false,
+            logs: destinationReceipt.logs,
+          }));
+          if (!receiptVerified) throw new Error('Circle forwarding destination receipt did not verify the expected USDC transfer');
+        }
         forwardingCompletedRef.current = true;
         setDestinationVerified(true);
         queryClient.setQueryData<BridgeStatus>(['bridge-status', quote.id, forwarded.sourceHash.toString()], {
@@ -306,6 +388,7 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
           receiving: { txHash: forwarded.destinationHash, chainId: quote.toChain.id },
           sending: { txHash: forwarded.sourceHash, chainId: quote.fromChain.id },
         });
+        markArcForwardingTiming(timing, 'success state set');
         setStatus('completed');
         return forwarded.sourceHash;
       }

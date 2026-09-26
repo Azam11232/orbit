@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ARC_PRIMARY_NETWORK, ARBITRUM_SEPOLIA, AVALANCHE_FUJI, BASE_SEPOLIA, ETHEREUM_SEPOLIA, OP_SEPOLIA, POLYGON_AMOY } from '../../data/networks';
 import { FORWARDING_RECONCILIATION_INTERVAL_MS } from '../../hooks/useBridgeExecution';
 import { isDestinationGasReady } from '../../hooks/useBridgeQuote';
-import { calculateForwardedDestinationAmount, calculateForwardingQuoteAmounts, createCircleForwardingParams, forwardingRouteLabel, getCircleForwardingApprovalAmount, getCircleForwardingApprovalTarget, getCircleForwardingConfig, getForwardingFailureDetail, getForwardingStatusOutcome, getForwardingTerminalError, getWalletRequestDiagnostic, isAuthoritativeForwardingSuccess, isCircleForwardingSourceFeeSupported, isCircleForwardingSupported, isForwardingDeliveryReady, isForwardingPendingResult, isForwardingRetryableResult, verifyCircleForwardingResult } from './circleForwarding';
+import { calculateForwardedDestinationAmount, calculateForwardingQuoteAmounts, createCircleForwardingParams, forwardingRouteLabel, getCircleForwardingApprovalAmount, getCircleForwardingApprovalTarget, getCircleForwardingConfig, getForwardingFailureDetail, getForwardingPollRetryDelay, getForwardingStatusOutcome, getForwardingTerminalError, getWalletRequestDiagnostic, isAuthoritativeForwardingSuccess, isCircleForwardingSourceFeeSupported, isCircleForwardingSupported, isFastArcSepoliaForwarding, isForwardingDeliveryReady, isForwardingPendingResult, isForwardingRetryableResult, verifyCircleForwardingResult } from './circleForwarding';
 
 const source = ARC_PRIMARY_NETWORK.id;
 const recipient = '0x0000000000000000000000000000000000000002' as const;
@@ -91,6 +91,13 @@ describe('BridgeKit forwarding parameters', () => {
 });
 
 describe('Circle forwarding route capability', () => {
+  it('uses a faster relay retry delay only for Arc to Ethereum Sepolia', () => {
+    expect(getForwardingPollRetryDelay(ARC_PRIMARY_NETWORK.id, ETHEREUM_SEPOLIA.id)).toBe(1_000);
+    expect(isFastArcSepoliaForwarding(ARC_PRIMARY_NETWORK.id, ETHEREUM_SEPOLIA.id)).toBe(true);
+    expect(getForwardingPollRetryDelay(ARC_PRIMARY_NETWORK.id, BASE_SEPOLIA.id)).toBeUndefined();
+    expect(isFastArcSepoliaForwarding(ARC_PRIMARY_NETWORK.id, BASE_SEPOLIA.id)).toBe(false);
+  });
+
   it.each([ETHEREUM_SEPOLIA, BASE_SEPOLIA, ARBITRUM_SEPOLIA])('enables forwarding to %s', (destination) => {
     expect(isCircleForwardingSupported(source, destination.id)).toBe(true);
     expect(forwardingRouteLabel(source, destination.id)).toBe('Circle forwarding destination');

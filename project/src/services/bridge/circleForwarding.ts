@@ -2,14 +2,15 @@ import { createViemAdapterFromProvider } from '@circle-fin/adapter-viem-v2';
 import { BridgeKit, type BridgeResult } from '@circle-fin/bridge-kit';
 import { CCTPV2BridgingProvider } from '@circle-fin/provider-cctp-v2';
 import { parseUnits, type Address, type EIP1193Provider, type Hash } from 'viem';
-import { getOrbitNetwork } from '../../data/networks';
+import { ARC_PRIMARY_NETWORK, ETHEREUM_SEPOLIA, getOrbitNetwork } from '../../data/networks';
+import { markArcForwardingTiming, timeArcForwardingAwait, type ArcForwardingTiming } from './arcForwardingTiming';
 
 const kit = new BridgeKit();
 const cctpProvider = new CCTPV2BridgingProvider();
 export const CIRCLE_FORWARDING_CONFIG = { feePayment: 'destination' as const, transferSpeed: 'FAST' as const };
 export type CircleForwardingStatus = { forwardState?: string | null; forwardTxHash?: string | null; eventNonce?: string; forwardErrorCode?: string | null; forwardErrorDetails?: string | null };
 const forwarderProvider = cctpProvider as unknown as {
-  fetchRelayerMint(source: unknown, transactionHash: string): Promise<CircleForwardingStatus>;
+  fetchRelayerMint(source: unknown, transactionHash: string, config?: { timeout?: number; maxRetries?: number; retryDelay?: number }): Promise<CircleForwardingStatus>;
 };
 type CircleChain = 'Arc_Testnet' | 'Ethereum_Sepolia' | 'Base_Sepolia' | 'Arbitrum_Sepolia' | 'Optimism_Sepolia' | 'Avalanche_Fuji' | 'Polygon_Amoy_Testnet';
 type CircleStep = { name: string; state: 'pending' | 'success' | 'error' | 'noop'; txHash?: string; errorMessage?: string; errorCategory?: string; forwarded?: boolean };
@@ -40,6 +41,16 @@ export function isCircleForwardingSupported(sourceChainId: number, destinationCh
     destination?.cctp?.contracts.v2 &&
     destination.cctp.forwarderSupported?.destination === true,
   );
+}
+
+export function getForwardingPollRetryDelay(sourceChainId: number, destinationChainId: number) {
+  return sourceChainId === ARC_PRIMARY_NETWORK.id && destinationChainId === ETHEREUM_SEPOLIA.id
+    ? 1_000
+    : undefined;
+}
+
+export function isFastArcSepoliaForwarding(sourceChainId: number, destinationChainId: number) {
+  return getForwardingPollRetryDelay(sourceChainId, destinationChainId) !== undefined;
 }
 
 export interface CircleForwardingResult {
@@ -114,17 +125,72 @@ function getCapabilityLookupDetails(chainId: number, capabilities: unknown) {
   };
 }
 
-function instrumentForwardingAdapter(adapter: CircleAdapter, context: ForwardingCapabilityContext) {
-  if (!import.meta.env.DEV) return adapter;
+function instrumentForwardingAdapter(adapter: CircleAdapter, context: ForwardingCapabilityContext, timing?: ArcForwardingTiming) {
+  if (!import.meta.env.DEV && !timing) return adapter;
   const diagnosticAdapter = adapter as CircleAdapter & {
     supportsAtomicBatch?: (chain: { chainId: number; chain?: string }) => Promise<boolean>;
     batchExecute?: (...args: unknown[]) => Promise<unknown>;
   };
+  const instrumented = adapter as unknown as Record<string, unknown>;
+  let sourceBurnSubmitted = false;
+  const wrapTimedMethod = (name: string, label: string, matches?: (args: unknown[]) => boolean) => {
+    const method = instrumented[name];
+    if (!timing || typeof method !== 'function') return;
+    instrumented[name] = async (...args: unknown[]) => {
+      if (matches && !matches(args)) return (method as (...args: unknown[]) => Promise<unknown>).apply(adapter, args);
+      const result = await timeArcForwardingAwait(timing, label, () => (method as (...args: unknown[]) => Promise<unknown>).apply(adapter, args));
+      if (name === 'waitForTransaction') markArcForwardingTiming(timing, 'source receipt confirmed');
+      return result;
+    };
+  };
+  wrapTimedMethod('getAddress', 'wallet/account resolution');
+  wrapTimedMethod('readAction', 'BridgeKit balance validation', (args) => args[0] === 'usdc.balanceOf');
+  if (timing && typeof instrumented.prepareAction === 'function') {
+    const prepareAction = instrumented.prepareAction as (...args: unknown[]) => Promise<Record<string, unknown>>;
+    instrumented.prepareAction = async (...args: unknown[]) => {
+      const action = String(args[0]);
+      const isBridgePreparation = action.includes('increaseAllowance') || action.includes('depositForBurn');
+      const request = isBridgePreparation
+        ? await timeArcForwardingAwait(timing, `approval/burn preparation (${action})`, () => prepareAction.apply(adapter, args))
+        : action === 'usdc.balanceOf'
+          ? await timeArcForwardingAwait(timing, 'BridgeKit balance validation', () => prepareAction.apply(adapter, args))
+        : await prepareAction.apply(adapter, args);
+      if (typeof request.estimate === 'function') {
+        const estimate = (request.estimate as (...estimateArgs: unknown[]) => Promise<unknown>).bind(request);
+        request.estimate = (...estimateArgs: unknown[]) => timeArcForwardingAwait(timing, `gas estimation (${action})`, () => estimate(...estimateArgs));
+      }
+      if (typeof request.execute === 'function') {
+        const execute = (request.execute as (...executeArgs: unknown[]) => Promise<unknown>).bind(request);
+        request.execute = async (...executeArgs: unknown[]) => {
+          const result = await timeArcForwardingAwait(timing, `transaction request (${action})`, () => execute(...executeArgs));
+          if (action.includes('depositForBurn') && typeof result === 'string') {
+            sourceBurnSubmitted = true;
+            markArcForwardingTiming(timing, 'source tx hash available');
+          }
+          return result;
+        };
+      }
+      return request;
+    };
+  }
+  if (timing && typeof instrumented.waitForTransaction === 'function') {
+    const waitForTransaction = instrumented.waitForTransaction as (...args: unknown[]) => Promise<unknown>;
+    instrumented.waitForTransaction = async (...args: unknown[]) => {
+      if (!sourceBurnSubmitted) return waitForTransaction.apply(adapter, args);
+      try {
+        const receipt = await timeArcForwardingAwait(timing, 'source receipt wait', () => waitForTransaction.apply(adapter, args));
+        markArcForwardingTiming(timing, 'source receipt confirmed');
+        return receipt;
+      } finally {
+        sourceBurnSubmitted = false;
+      }
+    };
+  }
   if (typeof diagnosticAdapter.supportsAtomicBatch === 'function') {
     const supportsAtomicBatch = diagnosticAdapter.supportsAtomicBatch.bind(adapter);
     diagnosticAdapter.supportsAtomicBatch = async (chain) => {
       try {
-        const supported = await supportsAtomicBatch(chain);
+        const supported = await timeArcForwardingAwait(timing, 'wallet_getCapabilities', () => supportsAtomicBatch(chain));
         console.debug('[Orbit bridge] forwarding capability decision', {
           ...context,
           walletClientChainId: chain.chainId,
@@ -146,6 +212,13 @@ function instrumentForwardingAdapter(adapter: CircleAdapter, context: Forwarding
         throw error;
       }
     };
+  }
+  if (typeof diagnosticAdapter.batchExecute === 'function' && timing) {
+    const batchExecute = diagnosticAdapter.batchExecute.bind(adapter);
+    diagnosticAdapter.batchExecute = (async (...args: unknown[]) => {
+      const result = await timeArcForwardingAwait(timing, 'approval/burn batch execution', () => batchExecute(...args));
+      return result;
+    }) as typeof diagnosticAdapter.batchExecute;
   }
   return adapter;
 }
@@ -256,13 +329,29 @@ export function getWalletRequestDiagnostic(args: { method: string; params?: unkn
   };
 }
 
-function withWalletRequestDiagnostics(provider: EIP1193Provider, context?: ForwardingCapabilityContext): EIP1193Provider {
-  if (!import.meta.env.DEV) return provider;
+function withWalletRequestDiagnostics(provider: EIP1193Provider, context?: ForwardingCapabilityContext, timing?: ArcForwardingTiming): EIP1193Provider {
+  if (!import.meta.env.DEV && !timing) return provider;
   return {
     ...provider,
     request: async (args) => {
-      console.debug('[Orbit bridge] wallet request', getWalletRequestDiagnostic(args));
-      const response = await provider.request(args as never);
+      if (import.meta.env.DEV) console.debug('[Orbit bridge] wallet request', getWalletRequestDiagnostic(args));
+      const isSubmission = args.method === 'wallet_sendCalls' || args.method === 'eth_sendTransaction' || args.method === 'eth_sendRawTransaction';
+      if (timing && isSubmission) markArcForwardingTiming(timing, `${args.method} invoked`);
+      const request = () => provider.request(args as never);
+      const response = timing && args.method === 'wallet_getCapabilities'
+        ? await timeArcForwardingAwait(timing, 'wallet_getCapabilities request', request)
+        : timing && args.method === 'wallet_getCallsStatus'
+          ? await timeArcForwardingAwait(timing, 'wallet_getCallsStatus', request)
+        : timing && isSubmission
+          ? await timeArcForwardingAwait(timing, `${args.method} wallet request`, request)
+          : await request();
+      if (timing && isSubmission) markArcForwardingTiming(timing, 'wallet request resolved');
+      if (timing && args.method === 'wallet_getCallsStatus' && response && typeof response === 'object' && 'receipts' in response) {
+        const receipts = (response as { receipts?: unknown }).receipts;
+        if (Array.isArray(receipts) && receipts.some((receipt) => receipt && typeof receipt === 'object' && ('transactionHash' in receipt || 'txHash' in receipt))) {
+          markArcForwardingTiming(timing, 'source tx hash available');
+        }
+      }
       if (args.method === 'wallet_getCapabilities' && context) {
         console.debug('[Orbit bridge] wallet_getCapabilities response', {
           ...context,
@@ -288,6 +377,7 @@ export async function executeCircleForwarding(input: {
   quote?: unknown;
   destinationAmount?: bigint;
   totalSourceDebit?: bigint;
+  timing?: ArcForwardingTiming;
   onStep?: (step: CircleStep) => void;
 }): Promise<CircleForwardingResult> {
   const sourceChain = getSdkChain(input.sourceChainId);
@@ -296,8 +386,27 @@ export async function executeCircleForwarding(input: {
     throw new Error('Circle forwarding is unavailable for this route');
   }
 
+  const retryDelay = getForwardingPollRetryDelay(input.sourceChainId, input.destinationChainId);
+  const executionKit = retryDelay === undefined ? kit : new BridgeKit();
+  if (retryDelay !== undefined) {
+    const forwardingProvider = executionKit.providers[0] as unknown as {
+      fetchRelayerMint: (source: unknown, transactionHash: string, config?: { timeout?: number; maxRetries?: number; retryDelay?: number }) => Promise<unknown>;
+    };
+    const fetchRelayerMint = forwardingProvider.fetchRelayerMint.bind(forwardingProvider);
+    forwardingProvider.fetchRelayerMint = async (source, transactionHash, config) => {
+      const forwarding = await timeArcForwardingAwait(input.timing, 'Circle forwarding status request', () => fetchRelayerMint(source, transactionHash, { ...config, retryDelay })) as CircleForwardingStatus;
+      markArcForwardingTiming(input.timing, 'Circle status response received');
+      if (forwarding.forwardTxHash) markArcForwardingTiming(input.timing, 'destination hash received');
+      return forwarding;
+    };
+  }
+
   const context = { sourceChainId: input.sourceChainId, destinationChainId: input.destinationChainId };
-  const adapter = instrumentForwardingAdapter(await createViemAdapterFromProvider({ provider: withWalletRequestDiagnostics(input.provider, context) }), context);
+  const adapter = instrumentForwardingAdapter(
+    await timeArcForwardingAwait(input.timing, 'Circle adapter creation', () => createViemAdapterFromProvider({ provider: withWalletRequestDiagnostics(input.provider, context, input.timing) })),
+    context,
+    input.timing,
+  );
   const bridgeParams = createCircleForwardingParams(input, adapter);
   const estimate = input.quote ? undefined : await kit.estimate(bridgeParams);
   const estimateRecord = estimate as (typeof estimate & { amountReceived?: string; totalDebit?: string; quote?: unknown }) | undefined;
@@ -306,17 +415,33 @@ export async function executeCircleForwarding(input: {
   const executionFees = estimateRecord?.fees ?? [];
   const forwardingFee = executionFees.filter((fee) => fee.type === 'forwarder').reduce((total, fee) => total + (fee.amount ? parseUnits(fee.amount, 6) : 0n), 0n);
   const protocolFee = executionFees.filter((fee) => fee.type !== 'forwarder').reduce((total, fee) => total + (fee.amount ? parseUnits(fee.amount, 6) : 0n), 0n);
-  const eventKit = kit as unknown as { on(action: string, handler: (payload: unknown) => void): void; off(action: string, handler: (payload: unknown) => void): void };
-  const handleBurn = (payload: unknown) => input.onStep?.((payload as { values: CircleStep }).values);
+  const eventKit = executionKit as unknown as { on(action: string, handler: (payload: unknown) => void): void; off(action: string, handler: (payload: unknown) => void): void };
+  const handleBurn = (payload: unknown) => {
+    const step = (payload as { values: CircleStep }).values;
+    if (step.state === 'success' && step.txHash) {
+      markArcForwardingTiming(input.timing, 'source receipt confirmed');
+    }
+    input.onStep?.(step);
+  };
   const handleAttestation = (payload: unknown) => input.onStep?.((payload as { values: CircleStep }).values);
   const handleMint = (payload: unknown) => input.onStep?.((payload as { values: CircleStep }).values);
   eventKit.on('burn', handleBurn);
   eventKit.on('fetchAttestation', handleAttestation);
   eventKit.on('mint', handleMint);
   let result: BridgeResult;
+  const originalFetch = globalThis.fetch;
+  if (input.timing) {
+    globalThis.fetch = (async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = request instanceof Request ? request.url : String(request);
+      if (!url.includes('/v2/burn/USDC/fees/26/0')) return originalFetch.call(globalThis, request, init);
+      const feeName = url.includes('forward=true') ? 'forwarding fee request' : 'FAST burn fee request';
+      return timeArcForwardingAwait(input.timing, feeName, () => originalFetch.call(globalThis, request, init));
+    }) as typeof fetch;
+  }
   try {
-    result = await kit.bridge(input.quote ? { ...bridgeParams, quote: input.quote } : estimateRecord?.quote ? { ...bridgeParams, quote: estimateRecord.quote } : bridgeParams);
+    result = await executionKit.bridge(input.quote ? { ...bridgeParams, quote: input.quote } : estimateRecord?.quote ? { ...bridgeParams, quote: estimateRecord.quote } : bridgeParams);
   } finally {
+    if (input.timing) globalThis.fetch = originalFetch;
     eventKit.off('burn', handleBurn);
     eventKit.off('fetchAttestation', handleAttestation);
     eventKit.off('mint', handleMint);
@@ -328,6 +453,8 @@ export async function executeCircleForwarding(input: {
   const mint = getStep(result, 'mint');
   let forwarding = getForwardingData(result);
   let destinationHash = (mint?.txHash ?? forwarding?.forwardTxHash) as Hash | undefined;
+  if (forwarding) markArcForwardingTiming(input.timing, 'Circle status response received');
+  if (destinationHash) markArcForwardingTiming(input.timing, 'destination hash received');
   if (sourceHash && !verifyCircleForwardingResult({
     result,
     sourceChainId: input.sourceChainId,
@@ -346,9 +473,11 @@ export async function executeCircleForwarding(input: {
     }
     emitForwardingDiagnostic('poll-start', input, forwarding);
     try {
-      forwarding = await forwarderProvider.fetchRelayerMint({ adapter, chain: sourceChain, address: input.recipient }, sourceHash);
+      forwarding = await timeArcForwardingAwait(input.timing, 'Circle forwarding status request', () => forwarderProvider.fetchRelayerMint({ adapter, chain: sourceChain, address: input.recipient }, sourceHash, retryDelay === undefined ? undefined : { retryDelay }));
       emitForwardingDiagnostic('poll-complete', input, forwarding);
       destinationHash = (forwarding.forwardTxHash ?? destinationHash) as Hash | undefined;
+      markArcForwardingTiming(input.timing, 'Circle status response received');
+      if (destinationHash) markArcForwardingTiming(input.timing, 'destination hash received');
     } catch (caughtError) {
       emitForwardingDiagnostic('poll-failed', input, forwarding, caughtError);
       const error = new CircleForwardingError(`Circle forwarding failed: ${caughtError instanceof Error ? caughtError.message : String(caughtError)}`);
@@ -441,15 +570,15 @@ export function getForwardingStatusOutcome(forwardState?: string | null, forward
   return 'pending';
 }
 
-export async function pollCircleForwardingStatus(input: { provider: EIP1193Provider; sourceChainId: number; sourceHash: Hash; recipient: Address; timeoutMs?: number }) {
+export async function pollCircleForwardingStatus(input: { provider: EIP1193Provider; sourceChainId: number; sourceHash: Hash; recipient: Address; timeoutMs?: number; pollingConfig?: { timeout?: number; maxRetries?: number; retryDelay?: number }; timing?: ArcForwardingTiming }) {
   const sourceChain = getSdkChain(input.sourceChainId);
   if (!sourceChain) throw new Error('Circle forwarding source network is unavailable');
-  const adapter = await createViemAdapterFromProvider({ provider: withWalletRequestDiagnostics(input.provider) });
+  const adapter = await timeArcForwardingAwait(input.timing, 'status adapter creation', () => createViemAdapterFromProvider({ provider: withWalletRequestDiagnostics(input.provider, undefined, input.timing) }));
   const timeoutMs = input.timeoutMs ?? 15_000;
   let timer: number | undefined;
   try {
     return await Promise.race([
-      forwarderProvider.fetchRelayerMint({ adapter, chain: sourceChain, address: input.recipient }, input.sourceHash),
+      timeArcForwardingAwait(input.timing, 'Circle forwarding status request', () => forwarderProvider.fetchRelayerMint({ adapter, chain: sourceChain, address: input.recipient }, input.sourceHash, input.pollingConfig)),
       new Promise<undefined>((resolve) => { timer = window.setTimeout(() => resolve(undefined), timeoutMs); }),
     ]);
   } finally {

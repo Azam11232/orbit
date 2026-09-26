@@ -26,13 +26,14 @@ import { isBridgeReviewable, useBridgeQuote } from "./hooks/useBridgeQuote";
 import { useBridgeApproval } from "./hooks/useBridgeApproval";
 import { canShowBridgeSuccess, getRequiredBridgeChainId, isBridgeExecutionStarted, shouldAutoCompleteBridge, type BridgeExecutionStatus, useBridgeExecution } from "./hooks/useBridgeExecution";
 import { useBridgeStatus } from "./hooks/useBridgeStatus";
+import { beginArcForwardingTiming, markArcForwardingTiming, type ArcForwardingTiming } from "./services/bridge/arcForwardingTiming";
 import { useTransactions } from "./hooks/useTransactions";
 import { useOrbitSettings } from "./hooks/useOrbitSettings";
 import { useWatchlist, type WatchlistItem } from "./hooks/useWatchlist";
 import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type ChainTransaction, type TxStatus } from "./services/transactions";
 import { buildWalletSecurityReport } from "./services/security";
 import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
-import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ORBIT_NETWORKS, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
+import { ARC_PRIMARY_NETWORK, CCTP_BRIDGE_NETWORKS, ETHEREUM_SEPOLIA, ORBIT_NETWORKS, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
 import { usePrices } from "./hooks/usePrices";
 import { fetchPortfolioHistoricalCandles, PORTFOLIO_PRICES } from "./services/prices";
 import type { BridgeChain } from "./types/bridge";
@@ -79,6 +80,7 @@ import {
 } from "./components/ui";
 import { ArcPayPage } from "./components/ArcPayPage";
 import { ArcSwapPage } from "./components/ArcSwapPage";
+import { TransactionSuccessScreen } from "./components/TransactionSuccessScreen";
 import { UnifiedBalancePage } from "./components/UnifiedBalancePage";
 import { OrbitBrand } from "./components/OrbitBrand";
 import type { ArcPaymentRequest } from "./services/arcPayment";
@@ -2583,7 +2585,6 @@ function BridgeBalanceHasEnough(raw: bigint | null, requested: bigint | null): b
 export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const isSwap = type === "swap";
   const isBridge = type === "bridge";
-  const shouldReduceMotion = useReducedMotion();
   const { address, isConnected, chainId, connector } = useAccount();
   const { switchChain } = useSwitchChain();
   const portfolio = usePortfolio();
@@ -2616,6 +2617,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   const [bridgeAmount, setBridgeAmount] = useState("");
   const [bridgeSlippage, setBridgeSlippage] = useState(0.005);
   const [showBridgeConfirmation, setShowBridgeConfirmation] = useState(false);
+  const bridgeTimingRef = useRef<ArcForwardingTiming>();
   const bridgeFromChain: BridgeChain = { id: bridgeFromChainId, name: getOrbitNetwork(bridgeFromChainId)?.name ?? "Unknown" };
   const bridgeToChain: BridgeChain = { id: bridgeToChainId, name: getOrbitNetwork(bridgeToChainId)?.name ?? "Unknown" };
   const bridgeSameNetwork = bridgeFromChainId === bridgeToChainId; // Prevent same-network bridging
@@ -2638,6 +2640,9 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     destinationHash: finalDestinationHash,
     destinationVerified: bridgeExecution.destinationVerified,
   });
+  useLayoutEffect(() => {
+    if (bridgeIsComplete) markArcForwardingTiming(bridgeTimingRef.current, "success popup rendered");
+  }, [bridgeIsComplete]);
   const autoCompleteBridgeReady = shouldAutoCompleteBridge({
     status: bridgeExecution.status,
     attestationReady: Boolean(bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation),
@@ -2777,87 +2782,37 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                 <div className="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button type="button" onClick={() => bridgeFromToken && bridgeBalance.raw !== null && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
               </div>
               <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeSameNetwork ? "Same network" : !isCctpRouteSupported(bridgeFromChainId, bridgeToChainId) ? "Unavailable" : getBridgeRouteLabel(bridgeQuoteState.quote?.selectedRoute)}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmount !== null && bridgeQuoteState.quote?.toAmount !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin !== null && bridgeQuoteState.quote?.toAmountMin !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">Depends on Circle attestation</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount !== null && bridgeQuoteState.quote?.feeAmount !== undefined && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Fee determined by Circle/CCTP"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
-              <p className={`mt-4 text-xs ${bridgeSameNetwork ? "text-amber-300" : bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeExecution.status === "error" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeSameNetwork ? "Select different source and destination networks." : bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "CCTP token catalog unavailable." : bridgeQuoteState.isError ? `CCTP route unavailable: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approve canonical USDC for Circle CCTP." : bridgeQuoteState.isSimulating ? "Checking the CCTP burn on the source chain..." : bridgeQuoteState.simulationError ? `CCTP burn simulation failed: ${bridgeQuoteState.simulationError.message}` : bridgeStatus.status?.status === "DONE" ? "Source message attested. Destination mint requires confirmation." : bridgeQuoteState.quote ? "Ready to review Circle CCTP transfer." : "Enter a USDC amount to request a CCTP quote.")}</p>
+              <p className={`mt-4 text-xs ${bridgeSameNetwork ? "text-amber-300" : bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeExecution.status === "error" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeSameNetwork ? "Select different source and destination networks." : bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "CCTP token catalog unavailable." : bridgeQuoteState.isError ? `CCTP route unavailable: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approve canonical USDC for Circle CCTP." : bridgeQuoteState.isSimulating ? "Checking the CCTP burn on the source chain..." : bridgeQuoteState.simulationError ? `CCTP burn simulation failed: ${bridgeQuoteState.simulationError.message}` : bridgeStatus.status?.status === "DONE" ? "Source message attested. Destination mint requires confirmation." : bridgeQuoteState.quote?.selectedRoute === "forwarding" ? (bridgeExecutionStarted ? "Circle forwarding is processing the destination transfer." : "Ready to review Circle forwarding transfer.") : bridgeQuoteState.quote ? "Ready to review Circle CCTP transfer." : "Enter a USDC amount to request a CCTP quote.")}</p>
               {shouldShowBridgeApprovalAction({ status: bridgeExecution.status, sourceHash: bridgeExecution.sourceHash, approvalRequired: bridgeApproval.required }) ? <Button className="mt-4 w-full" onClick={() => void bridgeApproval.approve()} disabled={bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending"} icon>{bridgeApproval.status === "pending" ? "Approval pending..." : bridgeApproval.status === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : autoCompleteBridgeReady || (bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation) ? null : shouldShowBridgeReviewAction({ status: bridgeExecution.status, sourceHash: bridgeExecution.sourceHash, approvalRequired: bridgeApproval.required, bridgeReady: bridgeReady }) ? <Button className="mt-4 w-full" onClick={() => setShowBridgeConfirmation(true)} disabled={!bridgeReady || bridgeExecution.status === "source-pending"} icon>{bridgeExecution.status === "source-pending" ? "Bridge pending..." : bridgeExecution.status === "source-confirmed" ? "Waiting for attestation..." : "Review bridge"}</Button> : null }
               {bridgeLifecycleStatus && <p className={`mt-3 text-xs ${bridgeExecution.status === "completed" ? "text-emerald-300" : "text-cyan-300"}`}>{bridgeLifecycleStatus}</p>}
               {bridgeExecution.sourceHash && bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) && <p className="mt-2 text-xs text-cyan-300">Source transaction: <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeExecution.sourceHash)}</a></p>}
               {bridgeStatus.status?.receiving?.txHash && bridgeExplorerUrl(bridgeStatus.status.receiving.chainId ?? bridgeToChainId, bridgeStatus.status.receiving.txHash) && <p className="mt-2 text-xs text-emerald-300">Destination transaction: <a href={bridgeExplorerUrl(bridgeStatus.status.receiving.chainId ?? bridgeToChainId, bridgeStatus.status.receiving.txHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeStatus.status.receiving.txHash)}</a></p>}
-              {showBridgeConfirmation && bridgeQuoteState.quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{bridgeFromChain.name} → {bridgeToChain.name}</span></div><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{bridgeAmount} {bridgeSymbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{bridgeQuoteState.quote.toAmountMin !== null && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Protocol</span><span>Circle CCTP V2</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the canonical USDC burn transaction in your wallet before signing. The destination mint requires a Circle attestation.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowBridgeConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowBridgeConfirmation(false); void bridgeExecution.execute(); }} disabled={!bridgeReady} icon>Confirm bridge</Button></div></div>}
+              {showBridgeConfirmation && bridgeQuoteState.quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{bridgeFromChain.name} → {bridgeToChain.name}</span></div><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{bridgeAmount} {bridgeSymbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{bridgeQuoteState.quote.toAmountMin !== null && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Protocol</span><span>Circle CCTP V2</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the canonical USDC burn transaction in your wallet before signing. The destination mint requires a Circle attestation.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowBridgeConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { const timing = bridgeFromChainId === ARC_PRIMARY_NETWORK.id && bridgeToChainId === ETHEREUM_SEPOLIA.id && bridgeQuoteState.quote?.selectedRoute === "forwarding" ? beginArcForwardingTiming() : undefined; bridgeTimingRef.current = timing; setShowBridgeConfirmation(false); void bridgeExecution.execute(timing); }} disabled={!bridgeReady} icon>Confirm bridge</Button></div></div>}
               <AnimatePresence>
-                {bridgeIsComplete && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: shouldReduceMotion ? 0 : 0.2 }}
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm sm:p-6"
-                  >
-                    <motion.div
-                      initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 12, scale: shouldReduceMotion ? 1 : 0.97 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: shouldReduceMotion ? 0 : 8, scale: shouldReduceMotion ? 1 : 0.98 }}
-                      transition={{ duration: shouldReduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] }}
-                      className="w-full max-w-xl overflow-hidden rounded-2xl border border-emerald-300/25 bg-slate-900/95 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6"
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex items-center gap-3">
-                          <motion.div
-                            initial={{ scale: shouldReduceMotion ? 1 : 0.75, opacity: shouldReduceMotion ? 1 : 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            transition={{ delay: shouldReduceMotion ? 0 : 0.08, duration: shouldReduceMotion ? 0 : 0.25 }}
-                            className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-emerald-300/40 bg-emerald-300/10 text-emerald-300 shadow-[0_0_28px_rgba(52,211,153,0.22)]"
-                          >
-                            <span className="absolute inset-1 rounded-full border border-emerald-300/20" />
-                            <svg viewBox="0 0 24 24" className="relative h-6 w-6" fill="none" aria-hidden="true">
-                              <motion.path d="m5 12 4 4L19 6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" initial={{ pathLength: shouldReduceMotion ? 1 : 0, opacity: shouldReduceMotion ? 1 : 0 }} animate={{ pathLength: 1, opacity: 1 }} transition={{ delay: shouldReduceMotion ? 0 : 0.16, duration: shouldReduceMotion ? 0 : 0.32 }} />
-                            </svg>
-                          </motion.div>
-                          <div>
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-300">Transaction confirmed</p>
-                            <h3 className="mt-1 text-2xl font-bold tracking-tight text-white">Bridge Successful!</h3>
-                          </div>
-                        </div>
-                        <button type="button" onClick={() => resetBridgeRouteState()} className="rounded-full border border-white/10 bg-white/5 p-2 text-slate-300 transition hover:bg-white/10 hover:text-white" aria-label="Close bridge success popup"><X size={17} /></button>
-                      </div>
-                      <p className="mt-4 text-sm leading-6 text-slate-400">Your assets were successfully bridged from <span className="font-semibold text-slate-200">{bridgeFromChain.name}</span> to <span className="font-semibold text-slate-200">{bridgeToChain.name}</span>.</p>
-                      <div className="mt-5 grid gap-2 sm:grid-cols-3">
-                        <div className="rounded-xl border border-white/10 bg-white/[.035] p-3">
-                          <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Amount bridged</p>
-                          <p className="mt-1 font-mono text-sm font-semibold text-white">{bridgeQuoteState.quote?.fromAmount !== undefined ? `${formatUnits(bridgeQuoteState.quote.fromAmount, bridgeFromToken?.decimals ?? 6)} ${bridgeSymbol}` : "—"}</p>
-                        </div>
-                        <div className="rounded-xl border border-white/10 bg-white/[.035] p-3">
-                          <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Source network</p>
-                          <p className="mt-1 truncate text-sm font-semibold text-white">{bridgeFromChain.name}</p>
-                        </div>
-                        <div className="rounded-xl border border-white/10 bg-white/[.035] p-3">
-                          <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Destination network</p>
-                          <p className="mt-1 truncate text-sm font-semibold text-white">{bridgeToChain.name}</p>
-                        </div>
-                      </div>
-                      <div className="mt-4 divide-y divide-white/10 rounded-xl border border-white/10 bg-slate-950/35">
-                        <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs">
-                          <span className="text-slate-500">Source transaction</span>
-                          {bridgeExecution.sourceHash ? (
-                            bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ? <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="inline-flex min-w-0 items-center gap-1 font-mono text-cyan-300 underline">{shortAddr(bridgeExecution.sourceHash)} <ExternalLink size={12} /></a> : <span className="truncate font-mono text-slate-300">{shortAddr(bridgeExecution.sourceHash)}</span>
-                          ) : <span className="font-mono text-slate-500">Pending</span>}
-                        </div>
-                        <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs">
-                          <span className="text-slate-500">Destination transaction</span>
-                          {finalDestinationHash ? (
-                            bridgeExplorerUrl(bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId, finalDestinationHash) ? <a href={bridgeExplorerUrl(bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId, finalDestinationHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="inline-flex min-w-0 items-center gap-1 font-mono text-cyan-300 underline">{shortAddr(finalDestinationHash)} <ExternalLink size={12} /></a> : <span className="truncate font-mono text-slate-300">{shortAddr(finalDestinationHash)}</span>
-                          ) : <span className="font-mono text-slate-500">Pending</span>}
-                        </div>
-                        <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs">
-                          <span className="text-slate-500">Status</span>
-                          <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-300"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />Confirmed</span>
-                        </div>
-                        {bridgeQuoteState.quote?.quotedAt && <div className="flex items-center justify-between gap-4 px-4 py-3 text-xs"><span className="text-slate-500">Time</span><span className="font-mono text-slate-300">{new Date(bridgeQuoteState.quote.quotedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div>}
-                      </div>
-                      <div className="mt-5 flex justify-end">
-                        <Button onClick={() => resetBridgeRouteState()} className="px-5">Done</Button>
-                      </div>
-                    </motion.div>
-                  </motion.div>
+                {bridgeIsComplete && bridgeExecution.sourceHash && bridgeQuoteState.quote && (
+                  <TransactionSuccessScreen
+                    title="Bridge Successful!"
+                    description={<>Your assets were successfully bridged from <span className="font-semibold text-slate-200">{bridgeFromChain.name}</span> to <span className="font-semibold text-slate-200">{bridgeToChain.name}</span>.</>}
+                    amountLabel="Amount bridged"
+                    amount={formatUnits(bridgeQuoteState.quote.fromAmount, bridgeFromToken?.decimals ?? 6)}
+                    token={{ symbol: bridgeSymbol, color: ARC_USDC.color }}
+                    networks={[
+                      { label: "Source network", network: bridgeFromChain },
+                      { label: "Destination network", network: bridgeToChain },
+                    ]}
+                    transactionLabel="Source transaction"
+                    transactionHash={bridgeExecution.sourceHash}
+                    explorerUrl={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash)}
+                    additionalTransactions={[{
+                      label: "Destination transaction",
+                      transactionHash: finalDestinationHash,
+                      explorerUrl: finalDestinationHash ? bridgeExplorerUrl(bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId, finalDestinationHash) : null,
+                    }]}
+                    completedAt={bridgeQuoteState.quote.quotedAt}
+                    primaryLabel="Done"
+                    onBack={resetBridgeRouteState}
+                    onPrimary={resetBridgeRouteState}
+                  />
                 )}
               </AnimatePresence>
             </>
@@ -3113,11 +3068,16 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [completedAt, setCompletedAt] = useState<number | null>(null);
   const asset = ARC_USDC;
   const balance = useTokenBalance(asset, address, Boolean(isConnected && isArcTestnet));
   const isPaymentRequestSend = Boolean(paymentRequest);
   const balanceRaw = balance.raw;
   const isBusy = status === "preparing" || status === "confirmation" || status === "pending";
+  useEffect(() => {
+    if (status === "confirmed" && transactionHash) setCompletedAt((current) => current ?? Date.now());
+    else setCompletedAt(null);
+  }, [status, transactionHash]);
   const setInput = (setter: (value: string) => void, value: string) => {
     setter(value);
     setFormError(null);
@@ -3169,6 +3129,26 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
     await send({ asset, recipient: recipient as Address, amount: rawAmount });
   };
   const stateMessage = status === "preparing" ? "Preparing transaction and estimating Arc gas..." : status === "confirmation" ? "Confirm this transaction in your wallet." : status === "pending" ? "Transaction pending on Arc Testnet..." : status === "confirmed" ? "Transaction confirmed." : status === "rejected" ? "Transaction rejected in wallet." : status === "failed" ? error?.message ?? "Transaction failed." : null;
+  if (status === "confirmed" && transactionHash) {
+    return (
+      <TransactionSuccessScreen
+        title="Send Successful!"
+        description={`Your ${asset.symbol} transfer was successfully confirmed on Arc Testnet.`}
+        amountLabel="Amount sent"
+        amount={amount}
+        token={asset}
+        networks={[{ label: "Network", network: { id: arcTestnet.id, name: "Arc Testnet" } }]}
+        recipient={recipient}
+        transactionHash={transactionHash}
+        explorerUrl={explorerTxUrl(transactionHash, arcTestnet.id)}
+        gasFee={gasCost === null ? "Unavailable" : `${formatEther(gasCost)} USDC`}
+        completedAt={completedAt ?? Date.now()}
+        primaryLabel="Send Again"
+        onBack={reset}
+        onPrimary={reset}
+      />
+    );
+  }
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <PageTitle label="Move / Send" title="Send assets securely." />

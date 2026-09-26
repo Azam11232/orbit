@@ -154,7 +154,6 @@ export function ArcSwapPage() {
         gasFee="Unavailable"
         completedAt={completedAt ?? Date.now()}
         primaryLabel="Back to Swap"
-        secondaryLabel="Swap Again"
         onBack={resetSwap}
         onPrimary={resetSwap}
       />

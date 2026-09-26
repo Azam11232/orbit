@@ -1,9 +1,10 @@
 import { encodeAbiParameters, encodeEventTopics, erc20Abi, type Address, type Hex } from 'viem';
 import { describe, expect, it } from 'vitest';
 import { bridgeExplorerUrl, getBridgeRouteLabel, getBridgeSuccessDestinationHash, shouldShowBridgeApprovalAction, shouldShowBridgeReviewAction } from '../App';
-import { canApplyForwardingPending, canShowBridgeSuccess, createBridgeExecutionOneShotGuard, getRequiredBridgeChainId, getRequiredSourceDebit, isBridgeExecutionStarted, shouldAutoCompleteBridge, shouldResetBridgeExecution, shouldSkipInitialForwardingStatusPoll, verifyDestinationReceipt } from './useBridgeExecution';
+import { canApplyForwardingPending, canShowBridgeSuccess, createBridgeExecutionOneShotGuard, getRequiredBridgeChainId, getRequiredSourceDebit, isBridgeExecutionStarted, shouldAutoCompleteBridge, shouldReadAppSourceBalance, shouldResetBridgeExecution, shouldSkipInitialForwardingStatusPoll, verifyDestinationReceipt } from './useBridgeExecution';
 import { isBridgeStatusPollingEnabled } from './useBridgeStatus';
 import { verifyCircleForwardingResult } from '../services/bridge/circleForwarding';
+import { ARC_PRIMARY_NETWORK, ETHEREUM_SEPOLIA } from '../data/networks';
 
 const transmitter = '0x1111111111111111111111111111111111111111' as Address;
 const token = '0x2222222222222222222222222222222222222222' as Address;
@@ -21,14 +22,14 @@ function transferLog(value = amount, transferToken = token, transferRecipient = 
   };
 }
 
-function forwardingReceipt(value = amount, transferRecipient = recipient) {
+function forwardingReceipt(value = amount, transferRecipient = recipient, expectedAmount = amount) {
   return {
     receiptStatus: 'success' as const,
     receiptTo: transmitter,
     expectedMessageTransmitter: transmitter,
     expectedToken: token,
     recipient,
-    expectedAmount: amount,
+    expectedAmount,
     requireExactAmount: false,
     logs: [transferLog(value, token, transferRecipient)],
   };
@@ -47,8 +48,16 @@ describe('Bridge destination verification', () => {
     })).toBe(true);
   });
 
-  it.each([amount, 999_999n])('accepts forwarding receipts with a positive actual amount (%s)', (value) => {
+  it.each([amount, 1_100_000n])('accepts forwarding receipts at or above the expected amount (%s)', (value) => {
     expect(verifyDestinationReceipt(forwardingReceipt(value))).toBe(true);
+  });
+
+  it('accepts the actual Arc to Sepolia forwarding amount above the quoted minimum', () => {
+    expect(verifyDestinationReceipt(forwardingReceipt(977_818n, recipient, 927_493n))).toBe(true);
+  });
+
+  it('rejects an Arc to Sepolia forwarding amount below the quoted minimum', () => {
+    expect(verifyDestinationReceipt(forwardingReceipt(900_000n, recipient, 927_493n))).toBe(false);
   });
 
   it.each([
@@ -79,6 +88,26 @@ describe('Bridge destination verification', () => {
 });
 
 describe('Bridge success gating', () => {
+  it('skips the app source balance read for Arc to Sepolia forwarding with equal debit and amount', () => {
+    expect(shouldReadAppSourceBalance({
+      forwardingEnabled: true,
+      sourceChainId: ARC_PRIMARY_NETWORK.id,
+      destinationChainId: ETHEREUM_SEPOLIA.id,
+      fromAmount: 4_200_000n,
+      totalSourceDebit: 4_200_000n,
+    })).toBe(false);
+  });
+
+  it('keeps the app source balance read when the source debit differs from the amount', () => {
+    expect(shouldReadAppSourceBalance({
+      forwardingEnabled: true,
+      sourceChainId: ARC_PRIMARY_NETWORK.id,
+      destinationChainId: ETHEREUM_SEPOLIA.id,
+      fromAmount: 4_200_000n,
+      totalSourceDebit: 4_250_000n,
+    })).toBe(true);
+  });
+
   it('uses total source debit when source-paid fees are quoted', () => {
     expect(getRequiredSourceDebit({ fromAmount: 1_000_000n, totalSourceDebit: 1_025_000n })).toBe(1_025_000n);
     expect(getRequiredSourceDebit({ fromAmount: 1_000_000n, totalSourceDebit: null })).toBe(1_000_000n);
