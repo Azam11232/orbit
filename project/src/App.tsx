@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   useAccount,
   useBalance,
@@ -696,18 +696,18 @@ function Sidebar({
           <button
             type="button"
             onClick={() => setWalletMenuOpen((value) => !value)}
-            className="flex w-full items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 p-3 text-left shadow-sm transition hover:border-sky-400/40"
+            className={`orbit-wallet-identity flex w-full items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 p-3 text-left shadow-sm transition hover:border-sky-400/40${isConnected ? ' is-connected' : ''}`}
           >
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-blue-500 to-violet-500 text-[10px] font-bold text-white">
+            <div className="orbit-wallet-identity__network flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-blue-500 to-violet-500 text-[10px] font-bold text-white">
               <ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />
             </div>
-            <div className="min-w-0 flex-1">
+            <div className="orbit-wallet-identity__details min-w-0 flex-1">
               <p className="text-xs font-bold text-slate-100">{isConnected && address ? shortAddress(address) : "Wallet"}</p>
-              <p className="font-mono text-[9px] text-slate-400">
+              <p className="orbit-wallet-identity__network-name font-mono text-[9px] text-slate-400">
                 {isConnected ? activeNetwork?.name ?? `Chain ${chainId}` : 'Awaiting wallet'}
               </p>
             </div>
-            <MoreHorizontal size={15} className="text-slate-400" />
+            <MoreHorizontal size={15} className="orbit-wallet-identity__menu text-slate-400" />
           </button>
           {walletMenuOpen && (
             <div className="absolute bottom-full left-0 right-0 z-20 mb-2 rounded-2xl border border-slate-700 bg-slate-900/95 p-3 shadow-[0_24px_64px_rgba(2,6,23,0.5)]">
@@ -1088,7 +1088,6 @@ export function NetworkIcon({ chainId, className = "" }: { chainId: number; clas
 
 function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
   const { address, chainId } = useAccount();
-  const shouldReduceMotion = useReducedMotion();
   const historyStorageKey = address
     ? `orbit-portfolio-balance-history:${chainId ?? 'unknown'}:${address.toLowerCase()}`
     : `orbit-portfolio-balance-history:${chainId ?? 'unknown'}:disconnected`;
@@ -1256,6 +1255,24 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
   const currentLabel = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   const currentTime = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const hoverPoint = hoverIndex === null ? null : points[hoverIndex] ?? null;
+  const handleChartMouseMove = (event: React.MouseEvent<SVGSVGElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width === 0 || bounds.height === 0 || points.length === 0) {
+      return;
+    }
+
+    const scale = Math.min(bounds.width / svgWidth, bounds.height / svgHeight);
+    const renderedWidth = svgWidth * scale;
+    const horizontalOffset = (bounds.width - renderedWidth) / 2;
+    const pointerX = Math.max(
+      leftPad,
+      Math.min(svgWidth - rightPad, ((event.clientX - bounds.left - horizontalOffset) / renderedWidth) * svgWidth),
+    );
+    const nearestIndex = points.reduce((nearest, point, index) => (
+      Math.abs(point.x - pointerX) < Math.abs(points[nearest].x - pointerX) ? index : nearest
+    ), 0);
+    setHoverIndex(nearestIndex);
+  };
 
   return (
     <div className="space-y-4 pt-2">
@@ -1264,7 +1281,7 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
         <span>{`$${currentPortfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</span>
       </div>
 
-      <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),transparent_28%),linear-gradient(180deg,rgba(15,23,42,0.96),rgba(15,23,42,0.82))] p-3">
+      <div className="orbit-chart-surface relative overflow-hidden rounded-2xl border border-slate-800 p-3">
         <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(to_top,rgba(148,163,184,0.08)_1px,transparent_1px)] [background-size:28px_28px]" />
 
         <div className="relative z-10">
@@ -1273,45 +1290,59 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
             <span>{currentLabel} · {currentTime}</span>
           </div>
 
-          <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="h-64 w-full" role="img" aria-label="Wallet balance chart">
+          <svg
+            viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+            className="h-64 w-full"
+            role="img"
+            aria-label="Wallet balance chart"
+            onMouseMove={handleChartMouseMove}
+            onMouseLeave={() => setHoverIndex(null)}
+          >
+            <defs>
+              <linearGradient id="orbit-portfolio-area" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#a4c3aa" stopOpacity="0.19" />
+                <stop offset="62%" stopColor="#a4c3aa" stopOpacity="0.055" />
+                <stop offset="100%" stopColor="#a4c3aa" stopOpacity="0" />
+              </linearGradient>
+            </defs>
             {[0, 1, 2, 3].map((line) => {
               const y = topPad + (usableHeight / 3) * line;
-              return <line key={line} x1={leftPad} x2={svgWidth - rightPad} y1={y} y2={y} stroke="rgba(148,163,184,0.10)" strokeDasharray="4 12" />;
+              return <line key={line} className="orbit-chart-grid-line" x1={leftPad} x2={svgWidth - rightPad} y1={y} y2={y} />;
             })}
 
             {points.length > 1 && (
               <>
-                <path d={areaPath} fill="rgba(96, 165, 250, 0.12)" />
-                <path d={linePath} fill="none" stroke="rgba(125, 211, 252, 0.95)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={shouldReduceMotion ? undefined : { filter: 'drop-shadow(0 0 10px rgba(125,211,252,0.4))' }} />
+                <path className="orbit-chart-area" d={areaPath} fill="url(#orbit-portfolio-area)" />
+                <path className="orbit-chart-line" d={linePath} fill="none" stroke="#a4c3aa" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
               </>
+            )}
+
+            {hoverPoint && (
+              <line className="orbit-chart-crosshair" x1={hoverPoint.x} x2={hoverPoint.x} y1={topPad} y2={svgHeight - bottomPad} />
             )}
 
             {points.map((point, index) => (
               <circle
                 key={`${point.timestamp}-${index}`}
+                className={`orbit-chart-point${index === points.length - 1 ? ' orbit-chart-point--latest' : ''}${index === hoverIndex ? ' orbit-chart-point--hovered' : ''}`}
                 cx={point.x}
                 cy={point.y}
-                r={index === points.length - 1 ? (shouldReduceMotion ? 5 : 6) : 3.5}
-                fill={index === points.length - 1 ? '#dbeafe' : '#7dd3fc'}
-                stroke={index === points.length - 1 ? '#7dd3fc' : '#e0f2fe'}
-                strokeWidth="1.5"
-                onMouseEnter={() => setHoverIndex(index)}
-                onMouseLeave={() => setHoverIndex(null)}
-                style={{ cursor: 'pointer' }}
+                r={index === hoverIndex ? 4 : index === points.length - 1 ? 3 : 1.35}
               />
             ))}
 
             {latestPoint && (
-              <text x={latestPoint.x} y={latestPoint.y - 18} textAnchor="middle" fill="rgba(226,232,240,0.9)" fontSize="10" fontWeight="700">Now</text>
+              <text className="orbit-chart-now-label" x={latestPoint.x} y={Math.max(topPad + 12, latestPoint.y - 16)} textAnchor="middle">Now</text>
             )}
           </svg>
 
           {hoverPoint && (
             <div
-              className="pointer-events-none absolute z-20 -translate-x-1/2 rounded-xl border border-slate-700 bg-slate-950/95 px-2.5 py-1.5 text-[10px] text-slate-200 shadow-[0_16px_30px_rgba(2,6,23,0.45)]"
+              className="orbit-chart-tooltip pointer-events-none absolute z-20 rounded-xl border border-slate-700 bg-slate-950/95 px-2.5 py-1.5 text-[10px] text-slate-200 shadow-[0_16px_30px_rgba(2,6,23,0.45)]"
               style={{
                 left: `${((hoverPoint.x - leftPad) / usableWidth) * 100}%`,
                 top: `${Math.max(18, hoverPoint.y - 100)}px`,
+                transform: `translateX(${hoverPoint.x < svgWidth * 0.24 ? '0' : hoverPoint.x > svgWidth * 0.76 ? '-100%' : '-50%'})`,
               }}
             >
               <div className="font-semibold text-white">${hoverPoint.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
@@ -1350,77 +1381,96 @@ function StatCards() {
   const displayAssetError = !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && displayAsset?.isError && displayAsset.raw === 0n;
 
   return (
-    <div className="grid gap-4 md:grid-cols-3">
-      <Card className="p-5" glow>
-        <div className="flex items-center justify-between">
+    <div className="orbit-stat-panel grid gap-4 md:grid-cols-3">
+      <Card className="orbit-home-stat-card orbit-home-stat-card--balance p-5" glow>
+        <div className="orbit-home-stat-heading flex items-center justify-between">
           <Label>Arc USDC Balance</Label>
-          <span className="rounded-xl bg-sky-100 p-2 text-sky-700 ring-1 ring-sky-200">
+          <span className="orbit-home-stat-icon orbit-home-stat-icon--balance rounded-xl bg-sky-100 p-2 text-sky-700 ring-1 ring-sky-200" aria-hidden="true">
             <Wallet size={16} />
           </span>
         </div>
-        {portfolio.isDisconnected ? (
-          <>
-            <p className="mt-5 text-2xl font-extrabold text-slate-400">
-              Connect wallet
-            </p>
-            <p className="mt-2 text-xs text-slate-500">
-              Live Arc ERC-20 balance appears here
-            </p>
-          </>
-        ) : displayAsset?.isLoading ? (
-          <>
-            <p className="mt-5 h-7 w-32 animate-pulse rounded bg-white/10" />
-            <p className="mt-2 h-3 w-24 animate-pulse rounded bg-white/10" />
-          </>
-        ) : (
-          <>
-            <p className="mt-5 text-3xl font-extrabold tracking-[-0.06em]">
-              {displayAsset?.isError ? "Unavailable" : displayAsset?.formatted ?? "0"}{" "}
-              <span className="text-xl text-slate-500">{isArcTestnet ? "USDC" : "ETH"}</span>
-            </p>
-            <p className="mt-2 text-xs font-semibold text-cyan-300">
-              Live balance{" "}
-              <span className="font-normal text-slate-500">on Arc Testnet</span>
-            </p>
-          </>
-        )}
-        {isArcTestnet ? (
-          <p className="mt-2 text-xs text-cyan-300">
-            Arc Testnet connected. USDC is read through its ERC-20 interface.
-          </p>
-        ) : portfolio.isWrongNetwork ? (
-          <p className="mt-2 text-xs text-amber-300">
-            Wrong network — switch to Arc Testnet
-          </p>
-        ) : null}
-        {displayAssetError && (
-          <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-rose-400/20 bg-rose-500/5 p-2.5">
-            <p className="text-[11px] text-rose-200">Arc USDC balance could not be read.</p>
-            <button
-              type="button"
-              onClick={() => window.location.reload()}
-              className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-rose-200 transition hover:bg-rose-500/15"
-            >
-              Retry
-            </button>
+        <div className="orbit-balance-stage">
+          <div className="orbit-balance-field" aria-hidden="true">
+            <svg viewBox="0 0 240 170" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <g className="orbit-balance-field-grid">
+                <path d="M80 4V166M112 4V166M144 4V166M176 4V166M208 4V166M49 34H236M49 66H236M49 98H236M49 130H236" />
+              </g>
+              <g className="orbit-balance-field-orbits">
+                <ellipse cx="154" cy="91" rx="85" ry="34" transform="rotate(-24 154 91)" />
+                <ellipse cx="154" cy="91" rx="69" ry="23" transform="rotate(18 154 91)" />
+                <path d="M65 122C98 73 142 59 230 76" />
+                <path d="M88 150C127 111 176 103 236 111" />
+              </g>
+              <g className="orbit-balance-field-points">
+                <circle cx="91" cy="64" r="2" />
+                <circle cx="202" cy="58" r="2.5" />
+                <circle cx="169" cy="124" r="1.75" />
+                <circle cx="222" cy="112" r="1.5" />
+              </g>
+            </svg>
           </div>
-        )}
-      </Card>
-      <Card className="p-5">
-        <div className="flex items-center justify-between">
-          <Label>Portfolio mix</Label>
-          <span className="rounded-xl bg-violet-300/10 p-2 text-violet-300 ring-1 ring-violet-400/20">
-            <Globe2 size={16} />
-          </span>
+          <div className="orbit-balance-copy">
+            {portfolio.isDisconnected ? (
+              <>
+                <p className="orbit-balance-connect mt-5 text-2xl font-extrabold text-slate-400">
+                  Connect wallet
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  Live Arc ERC-20 balance appears here
+                </p>
+              </>
+            ) : displayAsset?.isLoading ? (
+              <>
+                <p className="mt-5 h-7 w-32 animate-pulse rounded bg-white/10" />
+                <p className="mt-2 h-3 w-24 animate-pulse rounded bg-white/10" />
+              </>
+            ) : (
+              <>
+                <p className="orbit-balance-amount mt-5 text-3xl font-extrabold tracking-[-0.06em]">
+                  <span className="orbit-balance-number">{displayAsset?.isError ? "Unavailable" : displayAsset?.formatted ?? "0"}</span>
+                  <span className="orbit-balance-currency text-xl text-slate-500">{isArcTestnet ? "USDC" : "ETH"}</span>
+                </p>
+                <p className="orbit-balance-live mt-2 text-xs font-semibold text-cyan-300">
+                  <span className="orbit-balance-live-dot" aria-hidden="true" />
+                  <span>Live balance</span>
+                  <span className="orbit-balance-live-separator" aria-hidden="true">·</span>
+                  <span className="orbit-balance-network font-normal text-slate-500">on Arc Testnet</span>
+                </p>
+              </>
+            )}
+            <div className="orbit-balance-footer">
+              {isArcTestnet ? (
+                <p className="orbit-balance-note mt-2 text-xs text-cyan-300">
+                  Arc Testnet connected. USDC is read through its ERC-20 interface.
+                </p>
+              ) : portfolio.isWrongNetwork ? (
+                <p className="orbit-balance-note orbit-balance-note--warning mt-2 text-xs text-amber-300">
+                  Wrong network — switch to Arc Testnet
+                </p>
+              ) : null}
+              {displayAssetError && (
+                <div className="orbit-balance-error mt-3 flex items-center justify-between gap-2 rounded-xl border border-rose-400/20 bg-rose-500/5 p-2.5">
+                  <p className="text-[11px] text-rose-200">Arc USDC balance could not be read.</p>
+                  <button
+                    type="button"
+                    onClick={() => window.location.reload()}
+                    className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-rose-200 transition hover:bg-rose-500/15"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-        <div className="mt-5 flex items-end justify-between">
-          <p className="text-3xl font-extrabold tracking-[-0.06em]">
-            {heldAssets.length}{" "}
-            <span className="text-sm font-medium text-slate-500">
-              active asset{heldAssets.length === 1 ? "" : "s"}
-            </span>
-          </p>
-          <div className="flex -space-x-1">
+      </Card>
+      <Card className="orbit-home-stat-card orbit-home-stat-card--mix p-5">
+        <div className="orbit-home-stat-heading flex items-center justify-between">
+          <Label>Portfolio mix</Label>
+          <div className="orbit-mix-header-meta">
+            <span className="orbit-mix-count-value">{heldAssets.length}</span>
+            <span className="orbit-mix-count-label">active asset{heldAssets.length === 1 ? "" : "s"}</span>
+            <div className="orbit-mix-avatars flex -space-x-1">
             {heldAssets.slice(0, 4).map((a) => (
               <span
                 key={a.symbol}
@@ -1430,69 +1480,81 @@ function StatCards() {
                 {a.symbol === "ETH" ? "Ξ" : a.symbol === "USDC" ? "$" : a.symbol === "cbBTC" ? "₿" : a.symbol.slice(0, 1)}
               </span>
             ))}
+            </div>
           </div>
         </div>
-        <div className="mt-5 flex h-1.5 overflow-hidden rounded-full bg-slate-900/80">
-          {heldAssets.length === 0 ? (
-            <div className="h-full w-full rounded-full bg-gradient-to-r from-slate-700 to-slate-800" />
-          ) : (
-            heldAssets.map((a) => {
-              const total = heldAssets.reduce((sum, item) => sum + (item.valueUsd ?? 0), 0);
-              const pct = total > 0 && a.valueUsd !== null ? (a.valueUsd / total) * 100 : 0;
-              return (
-                <div
-                  key={a.symbol}
-                  className="h-full"
-                  style={{ width: `${Math.max(8, pct)}%`, background: a.color }}
-                />
-              );
-            })
-          )}
+        <div className="orbit-mix-distribution">
+          <div className="orbit-mix-allocation-readout">
+            {heldAssets.length === 1 ? (
+              <>
+                <strong>{heldAssets[0].allocationPercent.toFixed(1)}%</strong>
+                <span>allocated</span>
+              </>
+            ) : (
+              <span>Asset allocation</span>
+            )}
+          </div>
+          <div className="orbit-mix-progress flex h-1.5 overflow-hidden rounded-full bg-slate-900/80">
+            {heldAssets.length === 0 ? (
+              <div className="h-full w-full rounded-full bg-gradient-to-r from-slate-700 to-slate-800" />
+            ) : (
+              heldAssets.map((a) => {
+                const total = heldAssets.reduce((sum, item) => sum + (item.valueUsd ?? 0), 0);
+                const pct = total > 0 && a.valueUsd !== null ? (a.valueUsd / total) * 100 : 0;
+                return (
+                  <div
+                    key={a.symbol}
+                    className="h-full"
+                    style={{ width: `${Math.max(8, pct)}%`, background: a.color }}
+                  />
+                );
+              })
+            )}
+          </div>
         </div>
-        <div className="mt-4 space-y-2">
+        <div className="orbit-mix-assets mt-4 space-y-2">
           {heldAssets.length === 0 ? (
             <p className="text-xs text-slate-500">No Arc asset balances are currently detected.</p>
           ) : (
             heldAssets.map((asset) => (
-              <div key={asset.symbol} className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/40 px-2.5 py-2">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <TokenIcon symbol={asset.symbol} color={asset.color} />
+              <div key={asset.symbol} className="orbit-mix-asset-row flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/40 px-2.5 py-2">
+                <div className="orbit-mix-asset-identity flex items-center gap-2.5 min-w-0">
+                  <span className="orbit-mix-token-shell"><TokenIcon symbol={asset.symbol} color={asset.color} /></span>
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-slate-100">{asset.name}</p>
-                    <p className="text-[10px] uppercase tracking-[0.12em] text-slate-500">{asset.symbol}</p>
+                    <p className="orbit-mix-asset-name truncate text-sm font-semibold text-slate-100">{asset.name}</p>
+                    <p className="orbit-mix-asset-symbol text-[10px] uppercase tracking-[0.12em] text-slate-500">{asset.symbol}</p>
                   </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-xs font-semibold text-slate-200">{asset.valueUsd !== null ? `$${asset.valueUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : 'N/A'}</p>
-                  <p className="text-[10px] text-slate-500">{asset.allocationPercent.toFixed(1)}%</p>
+                <div className="orbit-mix-asset-value text-right">
+                  <p className="orbit-mix-asset-amount text-xs font-semibold text-slate-200">{asset.valueUsd !== null ? `$${asset.valueUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : 'N/A'}</p>
+                  <p className="orbit-mix-asset-allocation text-[10px] text-slate-500">{asset.allocationPercent.toFixed(1)}%</p>
                 </div>
               </div>
             ))
           )}
         </div>
       </Card>
-      <Card className="p-5">
-        <div className="flex items-center justify-between">
+      <Card className="orbit-home-stat-card orbit-home-stat-card--security p-5">
+        <div className="orbit-home-stat-heading flex items-center justify-between">
           <Label>Security Score</Label>
-          <span className="rounded-xl bg-emerald-300/10 p-2 text-emerald-300 ring-1 ring-emerald-400/20">
+          <span className="orbit-home-stat-icon orbit-home-stat-icon--security rounded-xl bg-emerald-300/10 p-2 text-emerald-300 ring-1 ring-emerald-400/20" aria-hidden="true">
             <ShieldCheck size={16} />
           </span>
         </div>
-        <div className="mt-3 flex items-center gap-5">
-          <div
-            className="relative flex h-20 w-20 items-center justify-center rounded-full"
-            style={{
-              background: `conic-gradient(${scoreColor === "green" ? "#34d399" : scoreColor === "amber" ? "#fbbf24" : "#f87171"} 0 ${report.score}%, #1b2933 ${report.score}% 100%)`,
-            }}
-          >
-            <div className="flex h-[68px] w-[68px] flex-col items-center justify-center rounded-full bg-[#101827]">
-              <b className="text-xl">{report.score}</b>
-              <span className="font-mono text-[8px] text-slate-500">/ 100</span>
-            </div>
+        <div className="orbit-security-system">
+          <div className="orbit-security-integrity" aria-hidden="true">
+            <span className="orbit-security-integrity-inner">
+              <ShieldCheck className="orbit-security-center-shield" size={19} />
+            </span>
           </div>
-          <div>
-            <Pill color={scoreColor}>{scoreColor === "green" ? "Protected" : scoreColor === "amber" ? "Watch" : "High risk"}</Pill>
-            <p className="mt-2 text-xs text-slate-500">
+          <div className="orbit-security-score-readout">
+            <strong className="orbit-security-score-value">{report.score}</strong>
+            <span className="orbit-security-score-denominator">/ 100</span>
+          </div>
+          <span className="orbit-security-system-divider" aria-hidden="true" />
+          <div className="orbit-security-status">
+            <span className="orbit-security-status-pill"><Pill color={scoreColor}>{scoreColor === "green" ? "Protected" : scoreColor === "amber" ? "Watch" : "High risk"}</Pill></span>
+            <p className="orbit-security-alert-copy">
               {report.approvalAlerts.length > 0 ? `${report.approvalAlerts.length} alert${report.approvalAlerts.length === 1 ? "" : "s"} detected` : "No material alerts"}
             </p>
           </div>
@@ -1511,6 +1573,7 @@ function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
   ];
   return (
     <motion.div
+      className="orbit-actions"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.28, ease: "easeOut" }}
@@ -1521,18 +1584,18 @@ function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
           <h2 className="mt-2 text-2xl font-extrabold tracking-[-0.05em] text-white sm:text-3xl">Make a move</h2>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+      <div className="orbit-action-grid grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         {items.map(([name, desc, Icon, id], index) => (
           <motion.button
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.04, duration: 0.18, ease: "easeOut" }}
-            whileHover={{ y: -4, scale: 1.01 }}
+            whileHover={{ y: -2, scale: 1.005 }}
             onClick={() => setPage(id as Page)}
             key={name as string}
-            className="group rounded-2xl border border-slate-700/80 bg-slate-900/80 p-4 text-left shadow-[0_18px_40px_rgba(2,6,23,0.22)] transition-all duration-200 hover:border-sky-400/40 hover:bg-slate-900"
+            className="orbit-quick-action group rounded-2xl border border-slate-700/80 bg-slate-900/80 p-4 text-left shadow-[0_18px_40px_rgba(2,6,23,0.22)] transition-all duration-200 hover:border-sky-400/40 hover:bg-slate-900"
           >
-            <div className="mb-7 flex h-11 w-11 items-center justify-center rounded-2xl border border-sky-400/20 bg-gradient-to-br from-sky-500/12 to-violet-500/10 text-slate-100 shadow-[0_0_18px_rgba(125,211,252,0.12)] transition duration-200 group-hover:-translate-y-0.5 group-hover:border-sky-300/40 group-hover:bg-sky-500/10 group-hover:text-sky-200">
+            <div className="orbit-quick-action__icon mb-7 flex h-11 w-11 items-center justify-center rounded-2xl border border-sky-400/20 bg-gradient-to-br from-sky-500/12 to-violet-500/10 text-slate-100 shadow-[0_0_18px_rgba(125,211,252,0.12)] transition duration-200 group-hover:-translate-y-0.5 group-hover:border-sky-300/40 group-hover:bg-sky-500/10 group-hover:text-sky-200">
               <Icon size={17} />
             </div>
             <p className="text-sm font-bold text-white">{name as string}</p>
@@ -1750,15 +1813,15 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const lastSync = portfolio.isLoading ? "UPDATING" : portfolio.isError ? "DEGRADED" : "LIVE";
 
   return (
-    <div className="space-y-7">
+    <div className="orbit-home">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, ease: 'easeOut' }}
-        className="page-shell relative overflow-hidden rounded-[28px] p-5 sm:p-6 lg:p-7"
+        className="orbit-home-hero page-shell relative overflow-hidden rounded-[28px] p-6 sm:p-8 lg:p-10"
       >
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.12),transparent_18%),radial-gradient(circle_at_bottom_right,_rgba(139,92,246,0.18),transparent_24%),linear-gradient(135deg,rgba(2,6,23,0.96),rgba(15,23,42,0.88),rgba(2,6,23,0.96))]" />
-        <div className="absolute inset-0 opacity-80">
+        <div className="orbit-home-hero__wash absolute inset-0" />
+        <div className="orbit-home-hero__ornaments absolute inset-0 opacity-80">
           <div className="absolute left-10 top-10 h-40 w-40 rounded-full border border-sky-400/20 bg-sky-400/5 blur-2xl" />
           <div className="absolute right-10 top-20 h-56 w-56 rounded-full border border-violet-400/20 bg-violet-500/10 blur-3xl" />
           <div className="absolute bottom-8 left-1/2 h-72 w-72 -translate-x-1/2 rounded-full border border-cyan-300/10" />
@@ -1769,19 +1832,11 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.45, ease: 'easeOut' }}
           >
-            <motion.p
-              className="text-sm font-semibold tracking-[0.18em] text-sky-300 uppercase"
-              animate={
-                window.matchMedia('(prefers-reduced-motion: reduce)').matches
-                  ? { opacity: 1 }
-                  : { opacity: [0.78, 1, 0.84], filter: ['drop-shadow(0 0 0 rgba(125,211,252,0))', 'drop-shadow(0 0 12px rgba(125,211,252,0.28))', 'drop-shadow(0 0 0 rgba(125,211,252,0))'] }
-              }
-              transition={{ duration: 2.8, repeat: Infinity, ease: 'easeInOut' }}
-            >
+            <p className="orbit-home-greeting text-sm font-semibold uppercase tracking-[0.18em]">
               {greeting}
-            </motion.p>
+            </p>
           </motion.div>
-          <div className="rounded-full border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 shadow-[0_0_24px_rgba(34,211,238,0.12)]">
+          <div className="orbit-sync-status rounded-full border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 shadow-[0_0_24px_rgba(34,211,238,0.12)]">
             <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-300">
               Last sync <span className="text-sky-200">{lastSync}</span>
             </p>
@@ -1789,32 +1844,58 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
         </div>
 
         <div className="relative z-10 mt-8 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
-          <div className="rounded-3xl border border-slate-700/80 bg-slate-900/70 p-5 shadow-[0_22px_50px_rgba(2,6,23,0.45)] backdrop-blur-sm">
+          <div className="orbit-primary-metric rounded-3xl border border-slate-700/80 bg-slate-900/70 p-6 shadow-[0_22px_50px_rgba(2,6,23,0.45)] backdrop-blur-sm">
+            <div className="orbit-value-field" aria-hidden="true">
+              <svg viewBox="0 0 260 210" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <g className="orbit-value-field__fixed">
+                  <circle cx="130" cy="105" r="82" stroke="rgba(195,214,198,.22)" />
+                  <circle cx="130" cy="105" r="59" stroke="rgba(155,186,163,.18)" stroke-dasharray="2 7" />
+                  <ellipse cx="130" cy="105" rx="111" ry="48" transform="rotate(-28 130 105)" stroke="rgba(139,159,197,.24)" />
+                  <path d="M22 127C58 88 92 77 123 98C153 118 181 133 237 76" stroke="rgba(169,193,174,.28)" />
+                  <circle cx="130" cy="105" r="30" fill="rgba(170,196,175,.035)" stroke="rgba(184,211,190,.28)" />
+                  <circle cx="130" cy="105" r="5" fill="rgba(202,224,205,.82)" />
+                  <circle cx="130" cy="105" r="10" stroke="rgba(167,202,174,.32)" />
+                  <circle cx="42" cy="125" r="3" fill="rgba(153,187,162,.8)" />
+                  <circle cx="225" cy="82" r="3.5" fill="rgba(166,183,218,.78)" />
+                  <circle cx="174" cy="40" r="2.5" fill="rgba(212,192,155,.76)" />
+                  <circle cx="83" cy="172" r="2" fill="rgba(175,200,181,.68)" />
+                </g>
+                <g className="orbit-value-field__moving">
+                  <circle cx="130" cy="105" r="96" stroke="rgba(146,184,156,.32)" stroke-dasharray="32 145 18 410" />
+                  <circle cx="130" cy="9" r="2.5" fill="rgba(194,222,198,.9)" />
+                </g>
+                <g className="orbit-value-field__counter">
+                  <circle cx="130" cy="105" r="69" stroke="rgba(139,157,204,.2)" stroke-dasharray="1 10" />
+                  <circle cx="62" cy="93" r="2.2" fill="rgba(167,181,224,.82)" />
+                </g>
+                <path className="orbit-value-field__light" d="M28 139C66 105 99 91 130 105C160 119 191 131 232 74" pathLength="1" />
+              </svg>
+            </div>
             <div className="flex items-center justify-between gap-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Portfolio value</p>
-              <Pill color="green">{lastSync}</Pill>
+              <span className="orbit-live-badge"><Pill color="green">{lastSync}</Pill></span>
             </div>
             <div className="mt-4 flex items-end justify-between gap-4">
               <div>
-                <p className="text-4xl font-extrabold tracking-[-0.08em] text-white md:text-5xl">{value}</p>
+                <p className="orbit-primary-value text-4xl font-extrabold tracking-[-0.08em] text-white md:text-5xl">{value}</p>
                 <p className="mt-2 text-sm text-slate-300">{valueDetail}</p>
               </div>
             </div>
           </div>
 
-          <div className="rounded-3xl border border-slate-200 bg-slate-900 p-5 text-white shadow-[0_18px_40px_rgba(15,23,42,0.10)]">
+          <div className="orbit-security-summary rounded-3xl border border-slate-200 bg-slate-900 p-5 text-white shadow-[0_18px_40px_rgba(15,23,42,0.10)]">
             <div className="flex items-center justify-between">
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Security status</p>
-              <span className={`rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] ${security.score >= 85 ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : security.score >= 60 ? 'border-amber-400/40 bg-amber-500/10 text-amber-200' : 'border-rose-400/40 bg-rose-500/10 text-rose-200'}`}>
+              <span className={`orbit-security-state rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] ${security.score >= 85 ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : security.score >= 60 ? 'border-amber-400/40 bg-amber-500/10 text-amber-200' : 'border-rose-400/40 bg-rose-500/10 text-rose-200'}`}>
                 {security.score >= 85 ? 'Protected' : security.score >= 60 ? 'Watch' : 'High risk'}
               </span>
             </div>
             <div className="mt-4 flex items-end justify-between gap-4">
               <div>
-                <p className="text-4xl font-extrabold tracking-[-0.08em]">{security.score}</p>
+                <p className="orbit-security-score text-4xl font-extrabold tracking-[-0.08em]">{security.score}</p>
                 <p className="text-xs text-slate-300">/ 100 wallet score</p>
               </div>
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 ring-1 ring-white/10">
+              <div className="orbit-security-mark flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 ring-1 ring-white/10">
                 <ShieldCheck size={20} className="text-sky-300" />
               </div>
             </div>
@@ -1825,13 +1906,13 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
       <StatCards />
       <QuickActions setPage={setPage} />
 
-      <div className="grid gap-4 lg:grid-cols-1">
+      <div className="orbit-home-chart-section grid gap-4 lg:grid-cols-1">
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.25, delay: 0.05 }}
         >
-          <Card className="p-5">
+          <Card className="orbit-chart-card p-5">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <Label>Portfolio snapshot</Label>
@@ -1854,7 +1935,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                 </span>
               </div>
             </div>
-            <div className="mt-6 rounded-2xl border border-slate-800/80 bg-slate-950/30 px-0 pb-0 pt-3">
+            <div className="orbit-chart-frame mt-6 rounded-2xl border border-slate-800/80 bg-slate-950/30 px-0 pb-0 pt-3">
               {portfolio.isLoading ? (
                 <div className="space-y-3 py-4">
                   <div className="h-28 animate-pulse rounded-xl bg-white/[0.06]" />
@@ -1876,10 +1957,10 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
         </motion.div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="orbit-signal-grid grid gap-4 md:grid-cols-3">
         {[{ label: 'Security overview', value: security.score, meta: `${approvalCount} alert${approvalCount === 1 ? '' : 's'} need review`, tone: security.score >= 85 ? 'green' : security.score >= 60 ? 'amber' : 'red', badge: security.severity }, { label: 'Opportunity feed', value: discover.data?.opportunities.length ?? 0, meta: discover.isLoading ? 'Refreshing public market data...' : discover.isError ? 'Discover feed unavailable' : 'Public yield opportunities loaded', tone: 'cyan', badge: 'LIVE' }, { label: 'Watchlist', value: watchlist.items.length, meta: watchlist.items.length > 0 ? 'Saved and ready for quick review' : 'No items saved yet', tone: 'purple', badge: 'TRACKED' }].map((tile, index) => (
           <motion.div key={tile.label} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, delay: 0.08 + index * 0.04 }}>
-            <Card className="p-5">
+            <Card className="orbit-signal-card p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <Label>{tile.label}</Label>
@@ -2755,31 +2836,31 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                 <Label>Bridge assets</Label>
                 <h2 className="mt-2 text-xl font-bold">Select route</h2>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
+              <div className="orbit-bridge-route-grid grid grid-cols-2 gap-3">
+                <div className="orbit-bridge-network-card orbit-bridge-network-card--from rounded-xl border border-white/10 bg-white/[.04] p-4">
                   <Label>From</Label>
-                  <div className="mt-3 flex items-center gap-2 text-xs text-slate-400"><ChainLogo chainId={bridgeFromChainId} className="h-5 w-5" />{bridgeFromChain.name}</div>
+                  <div className="orbit-bridge-network-current mt-3 flex items-center gap-2 text-xs text-slate-400"><ChainLogo chainId={bridgeFromChainId} className="h-5 w-5" /><span className="orbit-bridge-network-name">{bridgeFromChain.name}</span></div>
                   <BridgeNetworkPicker label="Bridge source network" value={bridgeFromChainId} options={allBridgeNetworks.filter((chain) => chain.id !== bridgeToChainId)} onChange={setBridgeFromChainId} disabled={bridgeExecution.status === "source-pending"} />
                 </div>
-                <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
+                <div className="orbit-bridge-network-card orbit-bridge-network-card--to rounded-xl border border-white/10 bg-white/[.04] p-4">
                   <Label>To</Label>
-                  <div className="mt-3 flex items-center gap-2 text-xs text-slate-400"><ChainLogo chainId={bridgeToChainId} className="h-5 w-5" />{bridgeToChain.name}</div>
+                  <div className="orbit-bridge-network-current mt-3 flex items-center gap-2 text-xs text-slate-400"><ChainLogo chainId={bridgeToChainId} className="h-5 w-5" /><span className="orbit-bridge-network-name">{bridgeToChain.name}</span></div>
                   <BridgeNetworkPicker label="Bridge destination network" value={bridgeToChainId} options={allBridgeNetworks.filter((chain) => chain.id !== bridgeFromChainId)} onChange={setBridgeToChainId} disabled={bridgeExecution.status === "source-pending"} />
                 </div>
               </div>
               {bridgeSameNetwork && <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Source and destination networks must be different.</span></div>}
               {bridgeWrongNetwork && <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Wrong network. Switch to {requiredBridgeChain.name} before bridging.</span><Button variant="secondary" onClick={() => switchChain({ chainId: requiredBridgeChainId })}>Switch to {requiredBridgeChain.name}</Button></div>}
-              <div className="mt-4 rounded-xl border border-white/10 bg-white/[.03] p-4">
+              <div className="orbit-bridge-asset-card mt-4 rounded-xl border border-white/10 bg-white/[.03] p-4">
                 <Label>Asset</Label>
-                <div className="mt-3 flex items-center justify-between">
+                <div className="orbit-bridge-asset-header mt-3 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="rounded-lg border border-white/10 bg-[#101725] p-2 font-bold text-white">USDC</div>
+                    <div className="orbit-bridge-asset-token rounded-lg border border-white/10 bg-[#101725] p-2 font-bold text-white">USDC</div>
                   </div>
-                  <span className="font-mono text-xs text-slate-500">
+                  <span className="orbit-bridge-asset-balance font-mono text-xs text-slate-500">
                     Balance {bridgeBalance.isDisconnected ? 'Connect wallet' : bridgeBalance.isLoading ? "..." : bridgeFromToken && bridgeBalance.raw !== null ? formatUnits(bridgeBalance.raw, bridgeFromToken.decimals) : "Unavailable"}
                   </span>
                 </div>
-                <div className="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button type="button" onClick={() => bridgeFromToken && bridgeBalance.raw !== null && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
+                <div className="orbit-bridge-amount-control mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><button type="button" onClick={() => bridgeFromToken && bridgeBalance.raw !== null && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} className="font-mono text-[10px] font-bold text-cyan-300">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
               </div>
               <div className="mt-4 space-y-2 rounded-xl bg-white/[.03] p-4 text-xs"><div className="flex justify-between"><span className="text-slate-500">Route</span><span className="font-semibold">{bridgeSameNetwork ? "Same network" : !isCctpRouteSupported(bridgeFromChainId, bridgeToChainId) ? "Unavailable" : getBridgeRouteLabel(bridgeQuoteState.quote?.selectedRoute)}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmount !== null && bridgeQuoteState.quote?.toAmount !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmount, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.toAmountMin !== null && bridgeQuoteState.quote?.toAmountMin !== undefined && bridgeToToken ? `${formatUnits(bridgeQuoteState.quote.toAmountMin, bridgeToToken.decimals)} ${bridgeToToken.symbol}` : "Unavailable"}</span></div><div className="flex justify-between"><span className="text-slate-500">Estimated completion</span><span className="font-mono text-slate-300">Depends on Circle attestation</span></div><div className="flex justify-between"><span className="text-slate-500">Bridge fee</span><span className="font-mono text-slate-300">{bridgeQuoteState.quote?.feeAmount !== null && bridgeQuoteState.quote?.feeAmount !== undefined && bridgeFromToken ? formatUnits(bridgeQuoteState.quote.feeAmount, bridgeFromToken.decimals) : "Fee determined by Circle/CCTP"}</span></div><div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={bridgeSlippage} onChange={(event) => setBridgeSlippage(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={0.001}>0.1%</option><option value={0.005}>0.5%</option><option value={0.01}>1%</option></select></div></div>
               <p className={`mt-4 text-xs ${bridgeSameNetwork ? "text-amber-300" : bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeExecution.status === "error" ? "text-rose-300" : bridgeExecution.status === "completed" ? "text-emerald-300" : "text-slate-500"}`}>{bridgeSameNetwork ? "Select different source and destination networks." : bridgeAmountError ?? bridgeExecution.error?.message ?? (bridgeWrongNetwork ? `Switch to ${bridgeFromChain.name} before bridging.` : bridgeTokensQuery.isError ? "CCTP token catalog unavailable." : bridgeQuoteState.isError ? `CCTP route unavailable: ${bridgeQuoteState.error instanceof Error ? bridgeQuoteState.error.message : "provider unavailable"}` : bridgeApproval.required ? "Approve canonical USDC for Circle CCTP." : bridgeQuoteState.isSimulating ? "Checking the CCTP burn on the source chain..." : bridgeQuoteState.simulationError ? `CCTP burn simulation failed: ${bridgeQuoteState.simulationError.message}` : bridgeStatus.status?.status === "DONE" ? "Source message attested. Destination mint requires confirmation." : bridgeQuoteState.quote?.selectedRoute === "forwarding" ? (bridgeExecutionStarted ? "Circle forwarding is processing the destination transfer." : "Ready to review Circle forwarding transfer.") : bridgeQuoteState.quote ? "Ready to review Circle CCTP transfer." : "Enter a USDC amount to request a CCTP quote.")}</p>
@@ -3199,7 +3280,7 @@ function BridgeNetworkPicker({
   };
 
   return (
-    <div ref={pickerRef} className="relative mt-3">
+    <div ref={pickerRef} className="orbit-bridge-network-picker relative mt-3">
       <button
         type="button"
         aria-haspopup="listbox"
@@ -3224,7 +3305,7 @@ function BridgeNetworkPicker({
             setOpen((current) => !current);
           }
         }}
-        className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#101725] px-3 py-2.5 text-left text-sm font-bold text-white outline-none transition hover:border-cyan-300/30 focus-visible:border-cyan-300/50 focus-visible:ring-2 focus-visible:ring-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+        className="orbit-bridge-network-picker__trigger flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#101725] px-3 py-2.5 text-left text-sm font-bold text-white outline-none transition hover:border-cyan-300/30 focus-visible:border-cyan-300/50 focus-visible:ring-2 focus-visible:ring-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-60"
       >
         <span className="flex min-w-0 items-center gap-2">
           <ChainLogo chainId={selected?.id ?? value} className="h-5 w-5 shrink-0" />

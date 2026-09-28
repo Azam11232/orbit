@@ -8,8 +8,8 @@ import eurcLogo from '../assets/tokens/eurc.svg';
 export function Card({ children, className = '', glow = false }: { children: ReactNode; className?: string; glow?: boolean }) {
   return (
     <motion.div
-      whileHover={{ y: -2, scale: 1.001 }}
-      transition={{ duration: 0.22, ease: 'easeOut' }}
+      whileHover={{ y: -1 }}
+      transition={{ duration: 0.18, ease: 'easeOut' }}
       className={`premium-card ${glow ? 'panel-glow' : ''} ${className}`}
     >
       {children}
@@ -18,7 +18,7 @@ export function Card({ children, className = '', glow = false }: { children: Rea
 }
 
 export function Label({ children }: { children: ReactNode }) {
-  return <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-400">{children}</p>;
+  return <p className="orbit-label font-mono text-[10px] uppercase tracking-[0.24em] text-slate-400">{children}</p>;
 }
 
 export function Pill({ children, color = 'cyan' }: { children: ReactNode; color?: 'cyan' | 'green' | 'amber' | 'red' | 'purple' }) {
@@ -39,11 +39,11 @@ export function Button({ children, variant = 'primary', onClick, className = '',
       whileTap={{ scale: 0.985 }}
       onClick={onClick}
       disabled={disabled}
-      className={`group inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60 ${variant === 'primary'
-        ? 'bg-gradient-to-r from-sky-500 to-blue-600 text-white shadow-[0_18px_38px_rgba(59,130,246,0.35)] hover:brightness-110'
+      className={`orbit-button group inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60 ${variant === 'primary'
+        ? 'orbit-button--primary'
         : variant === 'secondary'
-          ? 'border border-slate-700 bg-slate-900/80 text-slate-100 shadow-[0_10px_22px_rgba(2,6,23,0.28)] hover:border-sky-400/40 hover:bg-slate-800'
-          : 'text-slate-300 hover:bg-slate-800 hover:text-white'} ${className}`}
+          ? 'orbit-button--secondary'
+          : 'orbit-button--ghost'} ${className}`}
     >
       {children}
       {icon && <ArrowUpRight size={15} className="transition-transform duration-200 group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />}
