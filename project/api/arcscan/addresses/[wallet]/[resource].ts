@@ -52,8 +52,8 @@ export default async function handler(request: VercelRequest, response: VercelRe
 
   const requestUrl = new URL(request.url ?? '/', 'https://orbit.local');
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
-  const address = pathParts.at(-2);
-  const resource = pathParts.at(-1);
+  const address = pathParts[pathParts.length - 2];
+  const resource = pathParts[pathParts.length - 1];
 
   if (!address || !WALLET_ADDRESS_PATTERN.test(address) || !resource || !ALLOWED_RESOURCES.has(resource)) {
     response.status(400).json({ error: 'Invalid ArcScan transaction request' });
