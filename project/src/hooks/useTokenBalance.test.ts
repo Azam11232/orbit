@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { ARC_USDC, BASE_ERC20_ASSETS } from '../data/tokens';
-import { ARC_PORTFOLIO_TOKENS, getPortfolioAnalytics, isPortfolioReadEnabled, type PortfolioAsset } from './usePortfolio';
+import {
+  ARC_PORTFOLIO_TOKENS,
+  getPortfolioAnalytics,
+  getPortfolioAssetCountState,
+  getPortfolioAssetValue,
+  getPortfolioUsdStatusLabel,
+  isPortfolioReadEnabled,
+  type PortfolioAsset,
+} from './usePortfolio';
 import { formatTokenBalance } from './useTokenBalance';
 
 function arcAsset(overrides: Partial<PortfolioAsset> = {}): PortfolioAsset {
@@ -50,21 +58,57 @@ describe('Arc USDC balance configuration', () => {
 
   it('allocates a funded USDC-only Arc portfolio at 100%', () => {
     const analytics = getPortfolioAnalytics([arcAsset()], [], 'Arc Testnet');
+    expect(getPortfolioAssetValue('1.25', 1_250_000n, 1, false)).toBe(1.25);
     expect(analytics.totalValueUsd).toBe(1.25);
     expect(analytics.allocation[0].allocationPercent).toBe(100);
     expect(analytics.zeroBalance).toBe(false);
   });
 
   it('keeps a funded token distinct from a zero balance when USD pricing is unavailable', () => {
-    const analytics = getPortfolioAnalytics([arcAsset({ priceUsd: null, valueUsd: null })], [], 'Arc Testnet');
-    expect(analytics.totalValueUsd).toBe(0);
+    const raw = 1_250_000n;
+    const valueUsd = getPortfolioAssetValue('1.25', raw, null, false);
+    const asset = arcAsset({ raw, formatted: '1.25', priceUsd: null, valueUsd });
+    const analytics = getPortfolioAnalytics([asset], [], 'Arc Testnet');
+
+    expect(asset.raw).toBe(raw);
+    expect(analytics.totalValueUsd).toBeNull();
+    expect(analytics.performance.valueUsd).toBeNull();
+    expect(analytics.performance.available).toBe(false);
+    expect(analytics.valuationUnavailable).toBe(true);
+    expect(analytics.allocation[0].allocationPercent).toBeNull();
+    expect(analytics.stablecoinExposurePercent).toBeNull();
+    expect(analytics.concentrationPercent).toBeNull();
     expect(analytics.zeroBalance).toBe(false);
-    expect(analytics.allocation[0].allocationPercent).toBe(0);
+  });
+
+  it('does not use cached prices after the price query fails', () => {
+    const valueUsd = getPortfolioAssetValue('1.25', 1_250_000n, 1, true);
+    const analytics = getPortfolioAnalytics([arcAsset({ valueUsd })]);
+
+    expect(valueUsd).toBeNull();
+    expect(analytics.performance.valueUsd).toBeNull();
+    expect(analytics.totalValueUsd).toBeNull();
+    expect(analytics.valuationUnavailable).toBe(true);
   });
 
   it('reports an empty Arc portfolio for a zero balance', () => {
-    const analytics = getPortfolioAnalytics([arcAsset({ formatted: '0', raw: 0n, valueUsd: 0 })], [], 'Arc Testnet');
+    const valueUsd = getPortfolioAssetValue('0', 0n, null, true);
+    const analytics = getPortfolioAnalytics([arcAsset({ formatted: '0', raw: 0n, priceUsd: null, valueUsd })], [], 'Arc Testnet');
+
+    expect(analytics.totalValueUsd).toBe(0);
+    expect(analytics.performance.valueUsd).toBe(0);
     expect(analytics.zeroBalance).toBe(true);
     expect(analytics.allocation[0].allocationPercent).toBe(0);
+  });
+
+  it('does not label disconnected portfolio values as live', () => {
+    expect(getPortfolioUsdStatusLabel(true, false)).toBe('wallet not connected');
+    expect(getPortfolioUsdStatusLabel(false, false)).toBe('live');
+  });
+
+  it('shows loading instead of a zero asset count before balance reads complete', () => {
+    expect(getPortfolioAssetCountState(true, false, 0)).toEqual({ value: '…', label: 'LOADING' });
+    expect(getPortfolioAssetCountState(false, false, 0)).toEqual({ value: '0', label: 'ASSETS' });
+    expect(getPortfolioAssetCountState(false, false, 1)).toEqual({ value: '1', label: 'ASSETS' });
   });
 });

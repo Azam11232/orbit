@@ -145,11 +145,15 @@ describe('Bridge success gating', () => {
   });
 
   it('allows verified forwarder-only success without a destination hash', () => {
-    expect(canShowBridgeSuccess({ status: 'completed', sourceHash, destinationHash, destinationVerified: true })).toBe(true);
+    expect(canShowBridgeSuccess({ status: 'completed', sourceHash, destinationVerified: true })).toBe(true);
   });
 
-  it('shows the success screen when a completed CCTP bridge has the source and destination hashes even before destination verification is flagged', () => {
-    expect(canShowBridgeSuccess({ status: 'completed', sourceHash, destinationHash, destinationVerified: false })).toBe(true);
+  it('does not show success for an unverified destination hash', () => {
+    expect(canShowBridgeSuccess({ status: 'completed', sourceHash, destinationHash, destinationVerified: false })).toBe(false);
+  });
+
+  it('shows success for a completed CCTP bridge after its destination receipt is verified', () => {
+    expect(canShowBridgeSuccess({ status: 'completed', sourceHash, destinationHash, destinationVerified: true })).toBe(true);
   });
 
   it('treats a successful destination mint tx as authoritative even when the forwarder result lacks a final state', () => {

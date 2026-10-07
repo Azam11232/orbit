@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import { ExternalLink, X } from 'lucide-react';
 import { Button } from './ui';
@@ -24,6 +24,7 @@ export interface TransactionSuccessScreenProps {
   recipient?: string;
   transactionLabel?: string;
   transactionHash: string;
+  successChimeKey?: string;
   explorerUrl: string | null;
   additionalTransactions?: { label: string; transactionHash?: string; explorerUrl?: string | null }[];
   gasFee?: string;
@@ -41,6 +42,78 @@ function shortAddress(value: string) {
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
 }
 
+const playedSuccessChimes = new Set<string>();
+
+function playSuccessChime(key: string) {
+  if (playedSuccessChimes.has(key)) return;
+  playedSuccessChimes.add(key);
+
+  if (typeof window === 'undefined' || typeof window.AudioContext !== 'function') return;
+
+  let context: AudioContext;
+  try {
+    context = new window.AudioContext();
+  } catch {
+    return;
+  }
+
+  const closeContext = () => { void context.close().catch(() => {}); };
+  const play = () => {
+    try {
+      if (context.state !== 'running') {
+        closeContext();
+        return;
+      }
+
+      const startedAt = context.currentTime;
+      const output = context.createGain();
+      output.gain.setValueAtTime(0.0001, startedAt);
+      output.gain.exponentialRampToValueAtTime(0.08, startedAt + 0.025);
+      output.gain.exponentialRampToValueAtTime(0.0001, startedAt + 0.68);
+      output.connect(context.destination);
+
+      [523.25, 659.25, 783.99].forEach((frequency, index) => {
+        const noteStart = startedAt + index * 0.085;
+        const noteEnd = noteStart + 0.42;
+        const oscillator = context.createOscillator();
+        const voice = context.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(frequency, noteStart);
+        voice.gain.setValueAtTime(0.0001, noteStart);
+        voice.gain.exponentialRampToValueAtTime(index === 2 ? 0.16 : 0.12, noteStart + 0.025);
+        voice.gain.exponentialRampToValueAtTime(0.0001, noteEnd);
+        oscillator.connect(voice);
+        voice.connect(output);
+        oscillator.start(noteStart);
+        oscillator.stop(noteEnd + 0.02);
+      });
+
+      window.setTimeout(closeContext, 900);
+    } catch {
+      closeContext();
+    }
+  };
+
+  if (context.state === 'running') {
+    play();
+    return;
+  }
+
+  const closeTimeout = window.setTimeout(closeContext, 1200);
+  try {
+    void context.resume().then(() => {
+      window.clearTimeout(closeTimeout);
+      play();
+    }).catch(() => {
+      window.clearTimeout(closeTimeout);
+      closeContext();
+    });
+  } catch {
+    window.clearTimeout(closeTimeout);
+    closeContext();
+  }
+}
+
 export function TransactionSuccessScreen({
   title,
   description,
@@ -52,6 +125,7 @@ export function TransactionSuccessScreen({
   recipient,
   transactionLabel = 'Transaction',
   transactionHash,
+  successChimeKey,
   explorerUrl,
   additionalTransactions = [],
   gasFee,
@@ -61,6 +135,9 @@ export function TransactionSuccessScreen({
   onPrimary,
 }: TransactionSuccessScreenProps) {
   const shouldReduceMotion = useReducedMotion();
+  useEffect(() => {
+    if (successChimeKey) playSuccessChime(successChimeKey);
+  }, [successChimeKey]);
   const formattedTime = new Date(completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const transactions = [{ label: transactionLabel, transactionHash, explorerUrl }, ...additionalTransactions];
 

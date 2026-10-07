@@ -7,21 +7,24 @@ import type { ArcSwapSymbol } from '../types/swap';
 
 export function useArcSwapQuote({
   provider,
+  providerConnector,
   tokenIn,
   tokenOut,
   amountIn,
   slippageBps,
 }: {
   provider?: EIP1193Provider;
+  providerConnector?: NonNullable<ReturnType<typeof useAccount>['connector']>;
   tokenIn: ArcSwapSymbol;
   tokenOut: ArcSwapSymbol;
   amountIn: string;
   slippageBps: number;
 }) {
-  const { address, chainId } = useAccount();
-  const enabled = Boolean(provider && address && chainId === 5042002 && amountIn && tokenIn !== tokenOut);
+  const { address, chainId, connector } = useAccount();
+  const isProviderForCurrentConnector = Boolean(provider && connector && providerConnector === connector);
+  const enabled = Boolean(isProviderForCurrentConnector && address && chainId === 5042002 && amountIn && tokenIn !== tokenOut);
   const query = useQuery({
-    queryKey: ['arc-swap-quote', address, tokenIn, tokenOut, amountIn, slippageBps],
+    queryKey: ['arc-swap-quote', connector?.uid, address, tokenIn, tokenOut, amountIn, slippageBps],
     queryFn: () => estimateArcSwap({
       provider: provider as EIP1193Provider,
       walletAddress: address as `0x${string}`,
@@ -31,6 +34,11 @@ export function useArcSwapQuote({
       slippageBps,
     }),
     enabled,
+    retry: (failureCount, error) => {
+      const quoteError = error as Error & { code?: number };
+      const isUnsupportedRoute = quoteError.name === 'INPUT_UNSUPPORTED_ROUTE' || quoteError.code === 1003;
+      return !isUnsupportedRoute && quoteError.code !== 7001 && failureCount < 3;
+    },
     staleTime: 15_000,
     refetchOnWindowFocus: false,
   });
@@ -40,6 +48,7 @@ export function useArcSwapQuote({
     isLoading: query.isLoading,
     isFetching: query.isFetching,
     isError: query.isError,
+    isSuccess: query.isSuccess,
     error: query.error,
     refetch: query.refetch,
   };
@@ -67,6 +76,7 @@ export function useArcSwapExecution() {
     slippageBps,
     quoteAmountIn,
     quoteExpiresAt,
+    quoteIsCurrent,
   }: {
     provider?: EIP1193Provider;
     tokenIn: ArcSwapSymbol;
@@ -75,6 +85,7 @@ export function useArcSwapExecution() {
     slippageBps: number;
     quoteAmountIn: string;
     quoteExpiresAt: number;
+    quoteIsCurrent: boolean;
   }) => {
     if (inFlight.current || state === 'pending') return;
     if (!provider || !address || chainId !== 5042002) {
@@ -82,7 +93,7 @@ export function useArcSwapExecution() {
       setState('failed');
       return;
     }
-    if (!amountIn || amountIn !== quoteAmountIn || Date.now() >= quoteExpiresAt) {
+    if (!quoteIsCurrent || !amountIn || amountIn !== quoteAmountIn || Date.now() >= quoteExpiresAt) {
       setError(new Error('Swap quote expired. Request a fresh quote'));
       setState('failed');
       return;

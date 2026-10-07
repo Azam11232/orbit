@@ -50,8 +50,7 @@ export function shouldReadAppSourceBalance(input: { forwardingEnabled: boolean; 
 }
 
 export function canShowBridgeSuccess(input: { status: BridgeExecutionStatus; sourceHash?: Hash; destinationHash?: Hash; destinationVerified: boolean }) {
-  const hasDestinationHash = Boolean(input.destinationHash && input.destinationHash.toLowerCase() !== input.sourceHash?.toLowerCase());
-  return input.status === 'completed' && Boolean(input.sourceHash && (hasDestinationHash || input.destinationVerified));
+  return input.status === 'completed' && Boolean(input.sourceHash && input.destinationVerified);
 }
 
 export function getRequiredBridgeChainId(input: { status: BridgeExecutionStatus; sourceChainId: number; destinationChainId: number; forwarding?: boolean }) {
@@ -160,7 +159,6 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
       while (!cancelled && Date.now() - startedAt < FORWARDING_POLL_TIMEOUT_MS) {
         try {
           const provider = await connector.getProvider();
-          const fastArcSepoliaForwarding = isFastArcSepoliaForwarding(activeQuote.fromChain.id, activeQuote.toChain.id);
           const forwardingPollRetryDelay = getForwardingPollRetryDelay(activeQuote.fromChain.id, activeQuote.toChain.id);
           const forwarding = await pollCircleForwardingStatus({
             provider: provider as EIP1193Provider,
@@ -168,7 +166,7 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
             sourceHash,
             recipient: address,
             timing: forwardingTimingRef.current,
-            pollingConfig: fastArcSepoliaForwarding ? { maxRetries: 1, retryDelay: forwardingPollRetryDelay } : undefined,
+            pollingConfig: isFastArcSepoliaForwarding(activeQuote.fromChain.id, activeQuote.toChain.id) ? { maxRetries: 1, retryDelay: forwardingPollRetryDelay } : undefined,
           });
           if (forwarding) markArcForwardingTiming(forwardingTimingRef.current, 'Circle status response received');
           if (forwarding?.forwardTxHash) markArcForwardingTiming(forwardingTimingRef.current, 'destination hash received');
@@ -182,29 +180,27 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
           const authoritativeForwardingSuccess = isAuthoritativeForwardingSuccess(forwarding ?? { forwardState: undefined, forwardTxHash: destinationHash });
           if ((forwarding && outcome === 'completed' && authoritativeForwardingSuccess) || Boolean(destinationHash && destinationHash.length > 2)) {
             const confirmedHash = forwarding?.forwardTxHash as Hash | undefined ?? destinationHash;
-            if (fastArcSepoliaForwarding) {
-              if (!confirmedHash || !destinationClient) {
-                await new Promise<void>((resolve) => window.setTimeout(resolve, FORWARDING_RECONCILIATION_INTERVAL_MS));
-                continue;
-              }
-              markArcForwardingTiming(forwardingTimingRef.current, 'destination receipt wait started');
-              const receipt = await timeArcForwardingAwait(forwardingTimingRef.current, 'destination receipt wait', () => destinationClient.waitForTransactionReceipt({ hash: confirmedHash, pollingInterval: FORWARDING_RECONCILIATION_INTERVAL_MS }));
-              markArcForwardingTiming(forwardingTimingRef.current, 'destination receipt confirmed');
-              const destination = getOrbitNetwork(activeQuote.toChain.id);
-              if (!destination || !verifyDestinationReceipt({
-                receiptStatus: receipt.status,
-                receiptTo: receipt.to,
-                expectedMessageTransmitter: destination.messageTransmitterV2,
-                expectedToken: destination.usdc,
-                recipient: address,
-                expectedAmount: activeQuote.toAmount ?? activeQuote.fromAmount,
-                requireExactAmount: false,
-                logs: receipt.logs,
-              })) {
-                setStatus('error');
-                setError(new Error('Circle forwarding destination receipt did not verify the expected USDC transfer'));
-                return;
-              }
+            if (!confirmedHash || !destinationClient) {
+              await new Promise<void>((resolve) => window.setTimeout(resolve, FORWARDING_RECONCILIATION_INTERVAL_MS));
+              continue;
+            }
+            markArcForwardingTiming(forwardingTimingRef.current, 'destination receipt wait started');
+            const receipt = await timeArcForwardingAwait(forwardingTimingRef.current, 'destination receipt wait', () => destinationClient.waitForTransactionReceipt({ hash: confirmedHash, pollingInterval: FORWARDING_RECONCILIATION_INTERVAL_MS }));
+            markArcForwardingTiming(forwardingTimingRef.current, 'destination receipt confirmed');
+            const destination = getOrbitNetwork(activeQuote.toChain.id);
+            if (!destination || !verifyDestinationReceipt({
+              receiptStatus: receipt.status,
+              receiptTo: receipt.to,
+              expectedMessageTransmitter: destination.messageTransmitterV2,
+              expectedToken: destination.usdc,
+              recipient: address,
+              expectedAmount: activeQuote.toAmount ?? activeQuote.fromAmount,
+              requireExactAmount: false,
+              logs: receipt.logs,
+            })) {
+              setStatus('error');
+              setError(new Error('Circle forwarding destination receipt did not verify the expected USDC transfer'));
+              return;
             }
             forwardingCompletedRef.current = true;
             setDestinationHash(confirmedHash);
@@ -355,31 +351,30 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
           return forwarded.sourceHash;
         }
         setDestinationHash(forwarded.destinationHash);
+        if (!forwarded.destinationHash) return forwarded.sourceHash;
         setStatus('verification-pending');
         const authoritativeForwardingSuccess = forwarded.forwarding ? isAuthoritativeForwardingSuccess(forwarded.forwarding) : Boolean(forwarded.destinationHash);
         if (!authoritativeForwardingSuccess) throw new Error('Circle forwarding completed without an authoritative destination result');
-        if (isFastArcSepoliaForwarding(quote.fromChain.id, quote.toChain.id)) {
-          if (!forwarded.destinationHash || !destinationClient) throw new Error('Circle forwarding confirmation did not include a verifiable destination transaction');
-          const confirmedDestinationHash = forwarded.destinationHash;
-          markArcForwardingTiming(timing, 'destination receipt wait started');
-          const destinationReceipt = await timeArcForwardingAwait(timing, 'destination receipt wait', () => Promise.race([
-            destinationClient.waitForTransactionReceipt({ hash: confirmedDestinationHash, pollingInterval: FORWARDING_RECONCILIATION_INTERVAL_MS }),
-            new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Destination transaction confirmation timed out')), RECEIPT_TIMEOUT_MS)),
-          ]));
-          markArcForwardingTiming(timing, 'destination receipt confirmed');
-          const destination = getOrbitNetwork(quote.toChain.id);
-          const receiptVerified = Boolean(destination && verifyDestinationReceipt({
-            receiptStatus: destinationReceipt.status,
-            receiptTo: destinationReceipt.to,
-            expectedMessageTransmitter: destination.messageTransmitterV2,
-            expectedToken: destination.usdc,
-            recipient: address,
-            expectedAmount: forwarded.destinationAmount,
-            requireExactAmount: false,
-            logs: destinationReceipt.logs,
-          }));
-          if (!receiptVerified) throw new Error('Circle forwarding destination receipt did not verify the expected USDC transfer');
-        }
+        if (!destinationClient) throw new Error('Destination RPC is unavailable for Circle forwarding verification');
+        const confirmedDestinationHash = forwarded.destinationHash;
+        markArcForwardingTiming(timing, 'destination receipt wait started');
+        const destinationReceipt = await timeArcForwardingAwait(timing, 'destination receipt wait', () => Promise.race([
+          destinationClient.waitForTransactionReceipt({ hash: confirmedDestinationHash, pollingInterval: FORWARDING_RECONCILIATION_INTERVAL_MS }),
+          new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Destination transaction confirmation timed out')), RECEIPT_TIMEOUT_MS)),
+        ]));
+        markArcForwardingTiming(timing, 'destination receipt confirmed');
+        const destination = getOrbitNetwork(quote.toChain.id);
+        const receiptVerified = Boolean(destination && verifyDestinationReceipt({
+          receiptStatus: destinationReceipt.status,
+          receiptTo: destinationReceipt.to,
+          expectedMessageTransmitter: destination.messageTransmitterV2,
+          expectedToken: destination.usdc,
+          recipient: address,
+          expectedAmount: forwarded.destinationAmount,
+          requireExactAmount: false,
+          logs: destinationReceipt.logs,
+        }));
+        if (!receiptVerified) throw new Error('Circle forwarding destination receipt did not verify the expected USDC transfer');
         forwardingCompletedRef.current = true;
         setDestinationVerified(true);
         queryClient.setQueryData<BridgeStatus>(['bridge-status', quote.id, forwarded.sourceHash.toString()], {
@@ -478,6 +473,7 @@ export function useBridgeExecution(quote: BridgeQuote | undefined) {
         setError(nextError);
         return undefined;
       }
+      setDestinationVerified(true);
 
       if (sourceHash) {
         queryClient.setQueryData<BridgeStatus>(['bridge-status', quote.id, sourceHash.toString()], (current) => current ? ({

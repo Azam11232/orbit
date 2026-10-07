@@ -7,6 +7,7 @@ import { ARC_EURC, ARC_USDC, ARC_SWAP_ASSETS, type BaseAssetConfig } from '../da
 import { useTokenBalance } from '../hooks/useTokenBalance';
 import { useArcSwapExecution, useArcSwapQuote } from '../hooks/useArcSwap';
 import { explorerTxUrl } from '../services/transactions';
+import { getCurrentArcSwapQuote, isArcSwapQuoteReviewable } from '../services/swap/quoteState';
 import type { ArcSwapSymbol } from '../types/swap';
 import { Button, Card, Label, TokenIcon } from './ui';
 import { TransactionSuccessScreen } from './TransactionSuccessScreen';
@@ -18,11 +19,48 @@ function assetFor(symbol: ArcSwapSymbol): BaseAssetConfig & { address: `0x${stri
   return symbol === 'USDC' ? ARC_USDC : ARC_EURC;
 }
 
+function isUnsupportedRouteError(error: unknown): boolean {
+  const pending: unknown[] = [error];
+  const visited = new Set<object>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === 'string') {
+      if (current.includes('331001') || /no route available/i.test(current)) return true;
+      continue;
+    }
+    if (!current || typeof current !== 'object' || visited.has(current)) continue;
+
+    visited.add(current);
+    const errorDetails = current as Record<string, unknown>;
+    const name = errorDetails.name ?? (current instanceof Error ? current.name : undefined);
+    const code = errorDetails.code;
+
+    if (
+      name === 'INPUT_UNSUPPORTED_ROUTE'
+      || code === 1003
+      || code === '1003'
+      || code === 331001
+      || code === '331001'
+    ) {
+      return true;
+    }
+
+    pending.push(errorDetails.message, errorDetails.cause, ...Object.values(errorDetails));
+    if (current instanceof Error) pending.push(current.message);
+  }
+
+  return false;
+}
+
 export function ArcSwapPage() {
   const { address, chainId, connector, isConnected } = useAccount();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
   const queryClient = useQueryClient();
-  const [provider, setProvider] = useState<EIP1193Provider>();
+  const [providerState, setProviderState] = useState<{
+    connector: NonNullable<typeof connector>;
+    provider: EIP1193Provider;
+  }>();
   const [tokenIn, setTokenIn] = useState<ArcSwapSymbol>('USDC');
   const [tokenOut, setTokenOut] = useState<ArcSwapSymbol>('EURC');
   const [amount, setAmount] = useState('');
@@ -36,17 +74,24 @@ export function ArcSwapPage() {
 
   useEffect(() => {
     let active = true;
+    setProviderState(undefined);
     if (!connector) {
-      setProvider(undefined);
-      return undefined;
+      return () => { active = false; };
     }
     void connector.getProvider().then((nextProvider) => {
-      if (active) setProvider(nextProvider as EIP1193Provider);
+      if (active && nextProvider) {
+        setProviderState({ connector, provider: nextProvider as EIP1193Provider });
+      }
     }).catch(() => {
-      if (active) setProvider(undefined);
+      if (active) setProviderState(undefined);
     });
     return () => { active = false; };
   }, [connector]);
+
+  const providerForCurrentConnector = providerState?.connector === connector
+    ? providerState
+    : undefined;
+  const provider = providerForCurrentConnector?.provider;
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -74,12 +119,14 @@ export function ArcSwapPage() {
         ? `Insufficient ${tokenIn} balance.`
         : null;
   const amountForQuote = !amountError && rawAmount !== null ? amount : '';
-  const quoteQuery = useArcSwapQuote({ provider, tokenIn, tokenOut, amountIn: amountForQuote, slippageBps });
+  const quoteQuery = useArcSwapQuote({ provider, providerConnector: providerForCurrentConnector?.connector, tokenIn, tokenOut, amountIn: amountForQuote, slippageBps });
   useEffect(() => {
     if (quoteQuery.quote) setQuoteUpdatedAt(Date.now());
   }, [quoteQuery.quote]);
+  const isNoRouteError = isUnsupportedRouteError(quoteQuery.error);
+  const availableQuote = getCurrentArcSwapQuote(quoteQuery, isNoRouteError);
   const quoteExpiresAt = quoteUpdatedAt + QUOTE_MAX_AGE_MS;
-  const quoteFresh = Boolean(quoteQuery.quote && quoteUpdatedAt > 0 && now < quoteExpiresAt);
+  const quoteFresh = Boolean(availableQuote && quoteUpdatedAt > 0 && now < quoteExpiresAt);
   const execution = useArcSwapExecution();
   const resetExecution = execution.reset;
   useEffect(() => {
@@ -94,7 +141,7 @@ export function ArcSwapPage() {
     setShowReview(false);
     setValidationError(null);
   }, [tokenIn, tokenOut, amount, resetExecution]);
-  const canReview = Boolean(isConnected && chainId === ARC_CHAIN_ID && provider && rawAmount && rawAmount > 0n && !amountError && quoteQuery.quote && quoteFresh);
+  const canReview = Boolean(isConnected && chainId === ARC_CHAIN_ID && provider && rawAmount && rawAmount > 0n && !amountError && isArcSwapQuoteReviewable(quoteQuery, isNoRouteError, quoteFresh));
 
   const changeDirection = () => {
     setTokenIn(tokenOut);
@@ -105,7 +152,7 @@ export function ArcSwapPage() {
   };
 
   const execute = () => {
-    if (!quoteQuery.quote || !quoteFresh || !amountForQuote) {
+    if (isNoRouteError || quoteQuery.isError || quoteQuery.isFetching || !quoteQuery.isSuccess || !availableQuote || !quoteFresh || !amountForQuote) {
       setValidationError('Swap quote expired. Request a fresh quote.');
       return;
     }
@@ -116,8 +163,9 @@ export function ArcSwapPage() {
       tokenOut,
       amountIn: amountForQuote,
       slippageBps,
-      quoteAmountIn: quoteQuery.quote.amountIn,
+      quoteAmountIn: availableQuote.amountIn,
       quoteExpiresAt,
+      quoteIsCurrent: !quoteQuery.isError && !quoteQuery.isFetching && quoteQuery.isSuccess && Boolean(availableQuote),
     }).then(() => {
       void Promise.all([inputBalance.refetch(), outputBalance.refetch()]);
       void queryClient.invalidateQueries({ queryKey: ['balance'] });
@@ -131,25 +179,34 @@ export function ArcSwapPage() {
     setValidationError(null);
   };
 
-  const statusText = validationError
-    ?? execution.error?.message
-    ?? amountError
-    ?? (chainId !== ARC_CHAIN_ID && isConnected ? 'Switch to Arc Testnet before swapping.' : null)
-    ?? (quoteQuery.isError ? `No route available on Arc Testnet for this pair right now.` : null)
-    ?? (!quoteQuery.quote && amountForQuote ? 'Requesting a live Arc Testnet quote...' : null)
-    ?? (quoteQuery.quote && !quoteFresh ? 'Swap quote expired. Request a fresh quote.' : null);
+  const quoteErrorText = isNoRouteError
+    ? 'No swap route is currently available for this pair on Arc Testnet. Please try again later.'
+    : quoteQuery.isError
+    ? 'Unable to get a swap quote right now. Please try again.'
+    : null;
 
-  if (execution.state === 'confirmed' && execution.transactionHash && quoteQuery.quote) {
+  const statusText = isNoRouteError
+    ? quoteErrorText
+    : validationError
+      ?? execution.error?.message
+      ?? amountError
+      ?? (chainId !== ARC_CHAIN_ID && isConnected ? 'Switch to Arc Testnet before swapping.' : null)
+      ?? quoteErrorText
+      ?? (!availableQuote && amountForQuote ? 'Requesting a live Arc Testnet quote...' : null)
+      ?? (availableQuote && !quoteFresh ? 'Swap quote expired. Request a fresh quote.' : null);
+
+  if (execution.state === 'confirmed' && execution.transactionHash && availableQuote) {
     return (
       <TransactionSuccessScreen
         title="Swap Successful!"
         description="Your token swap was successfully confirmed on Arc Testnet."
         amountLabel="Amount sold"
-        amount={quoteQuery.quote.amountIn}
+        amount={availableQuote.amountIn}
         token={inputAsset}
-        secondaryAmount={{ label: 'Amount received', amount: quoteQuery.quote.estimatedOutput.amount, token: outputAsset }}
+        secondaryAmount={{ label: 'Amount received', amount: availableQuote.estimatedOutput.amount, token: outputAsset }}
         networks={[{ label: 'Network', network: { id: ARC_CHAIN_ID, name: 'Arc Testnet' } }]}
         transactionHash={execution.transactionHash}
+        successChimeKey={`swap:${execution.transactionHash}`}
         explorerUrl={explorerTxUrl(execution.transactionHash, ARC_CHAIN_ID)}
         gasFee="Unavailable"
         completedAt={completedAt ?? Date.now()}
@@ -227,18 +284,18 @@ export function ArcSwapPage() {
           </label>
 
           <div className="mt-5 space-y-3 rounded-xl border border-white/10 bg-white/[.03] p-4 text-xs">
-            <div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-200">{quoteQuery.isLoading ? 'Loading...' : quoteQuery.quote?.estimatedOutput.amount ?? 'Unavailable'} {tokenOut}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-200">{quoteQuery.quote?.stopLimit.amount ?? 'Unavailable'} {tokenOut}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Fees</span><span className="font-mono text-slate-200">{quoteQuery.quote?.fees?.length ? quoteQuery.quote.fees.map((fee) => `${fee.amount} ${fee.token}`).join(', ') : 'Not provided by route'}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-200">{isNoRouteError ? 'Unavailable' : quoteQuery.isLoading ? 'Loading...' : availableQuote?.estimatedOutput.amount ?? 'Unavailable'} {tokenOut}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-200">{availableQuote?.stopLimit.amount ?? 'Unavailable'} {tokenOut}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Fees</span><span className="font-mono text-slate-200">{isNoRouteError ? 'Unavailable' : availableQuote?.fees?.length ? availableQuote.fees.map((fee) => `${fee.amount} ${fee.token}`).join(', ') : 'Not provided by route'}</span></div>
             <div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={slippageBps} onChange={(event) => setSlippageBps(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={10}>0.1%</option><option value={50}>0.5%</option><option value={100}>1%</option></select></div>
             <div className="flex justify-between"><span className="text-slate-500">Quote expires</span><span className="font-mono text-slate-200">{quoteFresh ? `${Math.ceil((quoteExpiresAt - now) / 1000)}s` : 'Unavailable'}</span></div>
           </div>
 
-          {statusText && <p className={`mt-4 text-xs ${quoteQuery.isError || execution.error || validationError || amountError ? 'text-rose-300' : 'text-slate-400'}`}>{statusText}</p>}
+          {statusText && <p className={`mt-4 text-xs ${isNoRouteError || quoteQuery.isError || execution.error || validationError || amountError ? 'text-rose-300' : 'text-slate-400'}`}>{statusText}</p>}
           <Button className="mt-5 w-full" onClick={() => setShowReview(true)} disabled={!canReview || execution.state === 'pending'} icon>{execution.state === 'pending' ? 'Swap pending...' : execution.state === 'confirmed' ? 'Swap confirmed' : 'Review Swap'}</Button>
-          {showReview && quoteQuery.quote && quoteFresh && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><Label>Final confirmation</Label><div className="mt-3 space-y-2"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{tokenIn} → {tokenOut}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{quoteQuery.quote.stopLimit.amount} {tokenOut}</span></div></div><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowReview(false)}>Cancel</Button><Button className="flex-1" onClick={execute} disabled={execution.state === 'pending'}>Confirm Swap</Button></div></div>}
+          {showReview && availableQuote && quoteFresh && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><Label>Final confirmation</Label><div className="mt-3 space-y-2"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{tokenIn} → {tokenOut}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{availableQuote.stopLimit.amount} {tokenOut}</span></div></div><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowReview(false)}>Cancel</Button><Button className="flex-1" onClick={execute} disabled={isNoRouteError || execution.state === 'pending'}>Confirm Swap</Button></div></div>}
           {execution.transactionHash && <p className="mt-3 text-xs text-emerald-300">Transaction: <a className="underline" href={explorerTxUrl(execution.transactionHash, ARC_CHAIN_ID)} target="_blank" rel="noopener noreferrer">{execution.transactionHash.slice(0, 10)}...{execution.transactionHash.slice(-8)}</a></p>}
-          {execution.state === 'failed' && <Button variant="secondary" className="mt-3 w-full" onClick={() => { setShowReview(false); void quoteQuery.refetch(); }}><RefreshCw size={14} />Request fresh quote</Button>}
+          {(execution.state === 'failed' || isNoRouteError) && <Button variant="secondary" className="mt-3 w-full" onClick={() => { setShowReview(false); void quoteQuery.refetch(); }}><RefreshCw size={14} />Request fresh quote</Button>}
           <p className="mt-5 text-[10px] leading-4 text-slate-500">Circle Swap supports USDC, EURC, and cirBTC on Arc Testnet. cirBTC remains hidden until its current official Arc Testnet contract address is verified by ORBIT.</p>
         </Card>
       ))}

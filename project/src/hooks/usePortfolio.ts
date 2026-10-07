@@ -37,8 +37,8 @@ export interface PortfolioAllocationSignal {
   symbol: string;
   name: string;
   color: string;
-  valueUsd: number;
-  allocationPercent: number;
+  valueUsd: number | null;
+  allocationPercent: number | null;
   balance: string;
   raw: bigint;
 }
@@ -72,15 +72,16 @@ export interface TransactionInsight {
 }
 
 export interface PortfolioAnalytics {
-  totalValueUsd: number;
+  totalValueUsd: number | null;
   zeroBalance: boolean;
+  valuationUnavailable: boolean;
   allocation: PortfolioAllocationSignal[];
   topAsset: PortfolioAllocationSignal | null;
-  stablecoinExposurePercent: number;
-  ethExposurePercent: number;
-  btcExposurePercent: number;
-  volatileExposurePercent: number;
-  concentrationPercent: number;
+  stablecoinExposurePercent: number | null;
+  ethExposurePercent: number | null;
+  btcExposurePercent: number | null;
+  volatileExposurePercent: number | null;
+  concentrationPercent: number | null;
   riskSignals: PortfolioRiskSignal[];
   performance: PortfolioPerformanceSignal;
   history: PortfolioHistoryState;
@@ -102,81 +103,122 @@ export function isPortfolioReadEnabled(
   return hasAddress && isConnected && chainId === tokenChainId;
 }
 
+export function getPortfolioAssetValue(
+  formattedBalance: string,
+  rawBalance: bigint,
+  priceUsd: number | null,
+  priceQueryFailed: boolean,
+): number | null {
+  if (rawBalance === 0n) return 0;
+  if (priceQueryFailed || priceUsd === null || !Number.isFinite(priceUsd)) return null;
+  const numericBalance = Number(formattedBalance);
+  return Number.isFinite(numericBalance) ? numericBalance * priceUsd : null;
+}
+
+export function getPortfolioAssetCountState(
+  isLoading: boolean,
+  isUnavailable: boolean,
+  count: number,
+): { value: string; label: 'NOT ASSESSED' | 'LOADING' | 'ASSETS' } {
+  if (isUnavailable) return { value: '—', label: 'NOT ASSESSED' };
+  if (isLoading) return { value: '…', label: 'LOADING' };
+  return { value: String(count), label: 'ASSETS' };
+}
+
+export function getPortfolioUsdStatusLabel(isDisconnected: boolean, isWrongNetwork: boolean): string {
+  if (isDisconnected) return 'wallet not connected';
+  if (isWrongNetwork) return 'not assessed';
+  return 'live';
+}
+
 export function getPortfolioAnalytics(
   assets: PortfolioAsset[],
   transactions: ChainTransaction[] = [],
   networkLabel = 'Arc Testnet',
 ): PortfolioAnalytics {
-  const totalValueUsd = assets.reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0);
+  const valuationUnavailable = assets.some((asset) =>
+    asset.raw > 0n && (asset.valueUsd === null || !Number.isFinite(asset.valueUsd)),
+  );
+  const totalValueUsd = valuationUnavailable
+    ? null
+    : assets.reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0);
   const allocation = assets
     .map((asset) => ({
       symbol: asset.symbol,
       name: asset.name,
       color: asset.color,
-      valueUsd: asset.valueUsd ?? 0,
-      allocationPercent: totalValueUsd > 0 && asset.valueUsd !== null ? (asset.valueUsd / totalValueUsd) * 100 : 0,
+      valueUsd: asset.raw === 0n ? 0 : asset.valueUsd,
+      allocationPercent: valuationUnavailable
+        ? null
+        : totalValueUsd !== null && totalValueUsd > 0 && asset.valueUsd !== null
+          ? (asset.valueUsd / totalValueUsd) * 100
+          : 0,
       balance: asset.formatted,
       raw: asset.raw,
     }))
-    .sort((left, right) => right.valueUsd - left.valueUsd);
+    .sort((left, right) => (right.valueUsd ?? -1) - (left.valueUsd ?? -1));
 
   const zeroBalance = allocation.every((asset) => asset.raw === 0n);
-  const topAsset = allocation.find((asset) => asset.valueUsd > 0) ?? null;
-  const stablecoinExposurePercent = totalValueUsd > 0
+  const topAsset = valuationUnavailable ? null : allocation.find((asset) => (asset.valueUsd ?? 0) > 0) ?? null;
+  const stablecoinExposurePercent = !valuationUnavailable && totalValueUsd !== null && totalValueUsd > 0
     ? allocation
         .filter((asset) => asset.symbol === 'USDC')
-        .reduce((sum, asset) => sum + asset.valueUsd, 0) / totalValueUsd * 100
-    : 0;
-  const ethExposurePercent = totalValueUsd > 0
+        .reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0) / totalValueUsd * 100
+    : valuationUnavailable ? null : 0;
+  const ethExposurePercent = !valuationUnavailable && totalValueUsd !== null && totalValueUsd > 0
     ? allocation
         .filter((asset) => asset.symbol === 'ETH')
-        .reduce((sum, asset) => sum + asset.valueUsd, 0) / totalValueUsd * 100
-    : 0;
-  const btcExposurePercent = totalValueUsd > 0
+        .reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0) / totalValueUsd * 100
+    : valuationUnavailable ? null : 0;
+  const btcExposurePercent = !valuationUnavailable && totalValueUsd !== null && totalValueUsd > 0
     ? allocation
         .filter((asset) => asset.symbol === 'cbBTC')
-        .reduce((sum, asset) => sum + asset.valueUsd, 0) / totalValueUsd * 100
-    : 0;
-  const volatileExposurePercent = totalValueUsd > 0
-    ? (ethExposurePercent + btcExposurePercent)
-    : 0;
+        .reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0) / totalValueUsd * 100
+    : valuationUnavailable ? null : 0;
+  const volatileExposurePercent = valuationUnavailable
+    ? null
+    : (ethExposurePercent ?? 0) + (btcExposurePercent ?? 0);
 
   const riskSignals: PortfolioRiskSignal[] = [];
 
-  if (zeroBalance) {
-    riskSignals.push({
-      label: 'Zero-balance portfolio',
-      detail: `No supported asset balance is currently detected on ${networkLabel} for this wallet.`,
-      value: 0,
-      tone: 'neutral',
-    });
-  } else {
-    const largest = topAsset ?? { symbol: 'N/A', valueUsd: 0, allocationPercent: 0 };
-    riskSignals.push({
-      label: 'Largest position',
-      detail: `${largest.symbol} represents ${largest.allocationPercent.toFixed(1)}% of the portfolio value.`,
-      value: largest.allocationPercent,
-      tone: largest.allocationPercent > 60 ? 'warning' : 'neutral',
-    });
-    riskSignals.push({
-      label: 'Stablecoin exposure',
-      detail: `${stablecoinExposurePercent.toFixed(1)}% of the portfolio is held as stable value.`,
-      value: stablecoinExposurePercent,
-      tone: 'neutral',
-    });
-    riskSignals.push({
-      label: 'Volatile asset exposure',
-      detail: `${volatileExposurePercent.toFixed(1)}% is in ETH and cbBTC, which are more price-sensitive than stablecoins.`,
-      value: volatileExposurePercent,
-      tone: volatileExposurePercent > 75 ? 'warning' : 'neutral',
-    });
+  if (!valuationUnavailable) {
+    if (zeroBalance) {
+      riskSignals.push({
+        label: 'Zero-balance portfolio',
+        detail: `No supported asset balance is currently detected on ${networkLabel} for this wallet.`,
+        value: 0,
+        tone: 'neutral',
+      });
+    } else {
+      const largest = topAsset ?? { symbol: 'N/A', valueUsd: 0, allocationPercent: 0 };
+      riskSignals.push({
+        label: 'Largest position',
+        detail: `${largest.symbol} represents ${largest.allocationPercent?.toFixed(1) ?? 'N/A'}% of the portfolio value.`,
+        value: largest.allocationPercent ?? 0,
+        tone: (largest.allocationPercent ?? 0) > 60 ? 'warning' : 'neutral',
+      });
+      riskSignals.push({
+        label: 'Stablecoin exposure',
+        detail: `${stablecoinExposurePercent?.toFixed(1) ?? 'N/A'}% of the portfolio is held as stable value.`,
+        value: stablecoinExposurePercent ?? 0,
+        tone: 'neutral',
+      });
+      riskSignals.push({
+        label: 'Volatile asset exposure',
+        detail: `${volatileExposurePercent?.toFixed(1) ?? 'N/A'}% is in ETH and cbBTC, which are more price-sensitive than stablecoins.`,
+        value: volatileExposurePercent ?? 0,
+        tone: (volatileExposurePercent ?? 0) > 75 ? 'warning' : 'neutral',
+      });
+    }
   }
 
   const performance: PortfolioPerformanceSignal = {
-    available: true,
+    available: !valuationUnavailable,
     label: 'Current portfolio value',
     valueUsd: totalValueUsd,
-    note: `Live value from current ${networkLabel} balances and spot prices. Historical P&L is unavailable because ORBIT does not currently have a historical price or cost-basis record for this wallet.`,
+    note: valuationUnavailable
+      ? 'Current portfolio value is unavailable because a funded asset does not have a usable current price.'
+      : `Live value from current ${networkLabel} balances and spot prices. Historical P&L is unavailable because ORBIT does not currently have a historical price or cost-basis record for this wallet.`,
     approximate: false,
   };
 
@@ -217,13 +259,14 @@ export function getPortfolioAnalytics(
   return {
     totalValueUsd,
     zeroBalance,
+    valuationUnavailable,
     allocation,
     topAsset,
     stablecoinExposurePercent,
     ethExposurePercent,
     btcExposurePercent,
     volatileExposurePercent,
-    concentrationPercent: topAsset ? topAsset.allocationPercent : 0,
+    concentrationPercent: valuationUnavailable ? null : topAsset?.allocationPercent ?? 0,
     riskSignals,
     performance,
     history,
@@ -251,17 +294,13 @@ export function usePortfolio(): PortfolioData {
     isLoading: tokenResults[i].isLoading,
     isError: tokenResults[i].isError,
     isNative: false,
-    priceUsd: prices.prices[t.symbol] ?? null,
+    priceUsd: prices.isError ? null : prices.prices[t.symbol] ?? null,
     valueUsd: null,
     allocationPercent: 0,
   }));
 
   const assets = (isArc ? tokenAssets : []).map((asset) => {
-    const numericBalance = Number(asset.formatted);
-    const valueUsd = Number.isFinite(numericBalance) && asset.priceUsd !== null && Number.isFinite(asset.priceUsd)
-      ? numericBalance * asset.priceUsd
-      : null;
-
+    const valueUsd = getPortfolioAssetValue(asset.formatted, asset.raw, asset.priceUsd, prices.isError);
     return {
       ...asset,
       valueUsd,
@@ -270,6 +309,7 @@ export function usePortfolio(): PortfolioData {
 
   const validValueAssets = assets.filter((asset) => asset.valueUsd !== null && Number.isFinite(asset.valueUsd));
   const totalValueUsd = validValueAssets.reduce((sum, asset) => sum + (asset.valueUsd ?? 0), 0);
+  const hasAnyPriceIssue = assets.some((asset) => asset.raw > 0n && asset.valueUsd === null);
   const assetsWithAllocation = assets.map((asset) => ({
     ...asset,
     allocationPercent: totalValueUsd > 0 && asset.valueUsd !== null && Number.isFinite(asset.valueUsd)
@@ -280,7 +320,6 @@ export function usePortfolio(): PortfolioData {
   const connectedAssets = assets.filter((asset) => asset.raw > 0n).length;
   const anyLoading = assets.some((asset) => asset.isLoading) || prices.isLoading;
   const hasAnyBalanceData = assets.some((asset) => asset.raw > 0n);
-  const hasAnyPriceIssue = assets.some((asset) => asset.raw > 0n && asset.priceUsd === null);
   const hasAnyOnchainError = tokenResults.some((result) => result.isError);
 
   return {
@@ -290,7 +329,7 @@ export function usePortfolio(): PortfolioData {
     connectedAssets,
     isLoading: anyLoading,
     isError: !isDisconnected && !isWrongNetwork && !anyLoading && !hasAnyBalanceData && hasAnyOnchainError,
-    hasUnavailablePrices: !isDisconnected && !isWrongNetwork && !anyLoading && hasAnyPriceIssue,
+    hasUnavailablePrices: !isDisconnected && !isWrongNetwork && hasAnyPriceIssue,
     isDisconnected,
     isWrongNetwork,
     refetch: async () => {

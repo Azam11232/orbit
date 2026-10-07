@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ARC_PRIMARY_NETWORK, ORBIT_NETWORKS, getOrbitNetwork } from '../data/networks';
-import { createGatewayTransferSpec, gatewayNetworks, parseGatewayAmount, sumGatewayBalances } from './gateway';
+import { createGatewayTransferSpec, fetchGatewayBalances, gatewayNetworks, parseGatewayAmount, sumGatewayBalances } from './gateway';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('Circle Gateway registry and accounting', () => {
   it('marks the verified EVM testnets as Gateway-supported', () => {
@@ -14,6 +18,24 @@ describe('Circle Gateway registry and accounting', () => {
     expect(parseGatewayAmount('1.000001')).toBe(1_000_001n);
     expect(parseGatewayAmount('9007199254.740993')).toBe(9_007_199_254_740_993n);
     expect(sumGatewayBalances([{ domain: 26, raw: 400_000_000n, formatted: '400' }, { domain: 6, raw: 300_000_000n, formatted: '300' }])).toBe(700_000_000n);
+  });
+
+  it('accepts a successfully returned zero balance', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ balances: [{ domain: 26, balance: '0' }] }),
+    }));
+    await expect(fetchGatewayBalances('0x0000000000000000000000000000000000000001'))
+      .resolves.toEqual([{ domain: 26, raw: 0n, formatted: '0' }]);
+  });
+
+  it('rejects malformed balance entries rather than returning a partial total', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ balances: [{ domain: 26, balance: '1' }, { domain: 6, balance: 'not-a-number' }] }),
+    }));
+    await expect(fetchGatewayBalances('0x0000000000000000000000000000000000000001'))
+      .rejects.toThrow('invalid balance amount');
   });
 
   it('builds a verified source/destination transfer spec', () => {

@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAccount, usePublicClient, useSendTransaction as useWagmiSendTransaction, useWriteContract } from 'wagmi';
 import { arcTestnet } from 'wagmi/chains';
-import { encodeFunctionData, erc20Abi, isAddress, type Address, type Hash } from 'viem';
+import { encodeFunctionData, erc20Abi, isAddress, parseUnits, type Address, type Hash } from 'viem';
 import { ARC_USDC } from '../data/tokens';
 import type { BaseAssetConfig } from '../data/tokens';
 
@@ -67,20 +67,16 @@ export function validateSendRequest({
   }
   let rawAmount: bigint;
   try {
-    rawAmount = BigInt(0);
-    rawAmount = importParseUnits(amount || '0', decimals);
+    const normalizedAmount = amount || '0';
+    const amountParts = normalizedAmount.trim().match(/^(\d+)(?:\.(\d*))?$/);
+    if (!amountParts || (amountParts[2]?.length ?? 0) > decimals) throw new Error('Invalid amount');
+    rawAmount = parseUnits(normalizedAmount, decimals);
   } catch {
     return `Enter a valid amount with up to ${decimals} decimals.`;
   }
   if (rawAmount <= 0n) return 'Amount must be greater than zero.';
   if (rawAmount > balance) return 'Insufficient token balance.';
   return null;
-}
-
-function importParseUnits(value: string, decimals: number): bigint {
-  const [whole = '', fraction = ''] = value.trim().split('.');
-  if (!/^\d+$/.test(whole) || !/^\d*$/.test(fraction) || fraction.length > decimals) throw new Error('Invalid amount');
-  return BigInt(whole || '0') * 10n ** BigInt(decimals) + BigInt((fraction + '0'.repeat(decimals)).slice(0, decimals) || '0');
 }
 
 export function isUserRejectedError(error: unknown): boolean {

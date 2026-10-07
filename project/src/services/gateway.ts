@@ -89,12 +89,17 @@ export async function fetchGatewayBalances(address: Address): Promise<GatewayBal
   });
   if (!response.ok) throw new Error(`Gateway balance request failed (${response.status})`);
   const json = await response.json() as GatewayBalanceResponse;
-  return (json.balances ?? []).flatMap((balance) => {
-    if (typeof balance.domain !== 'number' || typeof balance.balance !== 'string') return [];
+  if (!Array.isArray(json.balances)) {
+    throw new Error('Gateway balance response did not include a balances array');
+  }
+  return json.balances.map((balance) => {
+    if (!balance || typeof balance.domain !== 'number' || typeof balance.balance !== 'string') {
+      throw new Error('Gateway balance response contains an invalid balance entry');
+    }
     try {
-      return [{ domain: balance.domain, raw: parseGatewayAmount(balance.balance), formatted: balance.balance }];
+      return { domain: balance.domain, raw: parseGatewayAmount(balance.balance), formatted: balance.balance };
     } catch {
-      return [];
+      throw new Error('Gateway balance response contains an invalid balance amount');
     }
   });
 }

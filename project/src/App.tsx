@@ -12,10 +12,10 @@ import {
 } from "wagmi";
 import { arcTestnet, base } from "wagmi/chains";
 import { formatEther, formatUnits, isAddress, parseUnits, type Address, type Hash } from "viem";
-import { getPortfolioAnalytics, usePortfolio } from "./hooks/usePortfolio";
+import { getPortfolioAnalytics, getPortfolioAssetCountState, getPortfolioUsdStatusLabel, usePortfolio } from "./hooks/usePortfolio";
 import { useApprovals } from "./hooks/useApprovals";
 import { useRevokeApproval } from "./hooks/useRevokeApproval";
-import { useSendTransaction } from "./hooks/useSendTransaction";
+import { useSendTransaction, validateSendRequest } from "./hooks/useSendTransaction";
 import { useTokenBalance } from "./hooks/useTokenBalance";
 import { useSwapQuote } from "./hooks/useSwapQuote";
 import { useSwapApproval } from "./hooks/useSwapApproval";
@@ -57,6 +57,7 @@ import {
   LayoutDashboard,
   LockKeyhole,
   Menu,
+  Moon,
   MoreHorizontal,
   Network,
   Radar,
@@ -66,6 +67,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Sun,
   TrendingUp,
   Wallet,
   X,
@@ -103,6 +105,8 @@ type Page =
   | "receive"
   | "arc-pay"
   | "about";
+
+type OrbitTheme = "dark" | "light";
 
 function Space({ children }: { children: ReactNode }) {
   return (
@@ -269,8 +273,8 @@ function WalletButton({ className = "" }: { className?: string }) {
       </Button>
 
       {walletPickerOpen && createPortal(
-        <div className="fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm" onClick={() => setWalletPickerOpen(false)}>
-          <div className="grid w-full max-w-4xl overflow-hidden rounded-[2rem] border border-slate-700/80 bg-slate-950/95 shadow-[0_30px_100px_rgba(2,6,23,0.72)] lg:grid-cols-[1.05fr_0.95fr]" onClick={(event) => event.stopPropagation()}>
+        <div className="orbit-wallet-picker-overlay fixed inset-0 z-[3000] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm" onClick={() => setWalletPickerOpen(false)}>
+          <div className="orbit-wallet-picker-dialog grid w-full max-w-4xl overflow-hidden rounded-[2rem] border border-slate-700/80 bg-slate-950/95 shadow-[0_30px_100px_rgba(2,6,23,0.72)] lg:grid-cols-[1.05fr_0.95fr]" onClick={(event) => event.stopPropagation()}>
             <section className="p-6 sm:p-8">
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -380,13 +384,16 @@ export function WalletBalanceStat() {
   );
 }
 
-function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (page: Page) => void }) {
+function Landing({ onLaunch, onNavigate, theme, onThemeChange }: { onLaunch: () => void; onNavigate: (page: Page) => void; theme: OrbitTheme; onThemeChange: (theme: OrbitTheme) => void }) {
   return (
     <Space>
       <header className="relative z-20 mx-auto max-w-7xl px-6 py-7">
-        <div className="flex w-full items-center justify-between gap-6">
+        <div className="flex w-full items-center gap-4 md:gap-6">
           <Logo />
           <nav className="hidden items-center justify-center gap-8 text-sm text-slate-300 md:flex md:flex-1">
+            <a className="transition hover:text-white" href="#platform">
+              Features
+            </a>
             <button className="transition hover:text-white" onClick={() => { onLaunch(); onNavigate("security"); }}>
               Security
             </button>
@@ -394,6 +401,14 @@ function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (
               About
             </button>
           </nav>
+          <div role="group" aria-label="Color theme" className="orbit-theme-toggle ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border p-1 shadow-sm transition-colors md:ml-0">
+            <button type="button" aria-label="Light mode" aria-pressed={theme === "light"} onClick={() => onThemeChange("light")} className={`orbit-theme-toggle__option flex h-7 w-7 items-center justify-center rounded-full transition-colors ${theme === "light" ? "is-active is-light-active" : ""}`}>
+              <Sun size={14} aria-hidden="true" />
+            </button>
+            <button type="button" aria-label="Dark mode" aria-pressed={theme === "dark"} onClick={() => onThemeChange("dark")} className={`orbit-theme-toggle__option flex h-7 w-7 items-center justify-center rounded-full transition-colors ${theme === "dark" ? "is-active" : ""}`}>
+              <Moon size={14} aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </header>
       <main className="relative z-10">
@@ -413,23 +428,10 @@ function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (
                 ONCHAIN INTELLIGENCE ONLINE
               </Pill>
             </motion.div>
-            <h1 className="mt-7 max-w-xl text-5xl font-extrabold leading-[0.98] tracking-[-.06em] text-white sm:text-6xl lg:text-[5rem]">
-              <motion.span
-                initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}
-                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                transition={{ duration: 0.7, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
-                className="block"
-              >
-                Control Your
-              </motion.span>
-              <motion.span
-                initial={{ opacity: 0, y: 24, filter: "blur(10px)" }}
-                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                transition={{ duration: 0.8, delay: 0.38, ease: [0.22, 1, 0.36, 1] }}
-                className="hero-gradient-text mt-2 block"
-              >
-                Onchain Universe.
-              </motion.span>
+            <h1 aria-label="Control Your Onchain Universe." className="mt-7 max-w-xl text-5xl font-extrabold leading-[0.98] tracking-[-.06em] text-white sm:text-6xl lg:text-[5rem]">
+              <span aria-hidden="true" className="hero-reveal-line hero-reveal-line--first" data-text="Control Your">Control Your</span>
+              <span aria-hidden="true" className="hero-reveal-line hero-reveal-line--second" data-text="Onchain">Onchain</span>
+              <span aria-hidden="true" className="hero-reveal-line hero-reveal-line--third" data-text="Universe.">Universe.</span>
             </h1>
             <motion.p
               initial={{ opacity: 0, y: 18 }}
@@ -494,34 +496,40 @@ function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (
                 "Understand your onchain world.",
                 LayoutDashboard,
                 "cyan",
+                "portfolio",
               ],
               [
                 "MOVE",
-                "Bridge and transfer Arc USDC.",
+                "Move assets across your wallet.",
                 ArrowLeftRight,
                 "violet",
+                "bridge",
               ],
               [
                 "PROTECT",
                 "Monitor approvals and wallet security.",
                 ShieldCheck,
                 "green",
+                "security",
               ],
               [
-                "DISCOVER",
-                "Explore opportunities across Web3.",
+                "CONTROL",
+                "Manage your wallet from one command center.",
                 Compass,
                 "amber",
+                "unified-balance",
               ],
-            ].map(([title, text, Icon, color], i) => (
-              <motion.div
+            ].map(([title, text, Icon, color, destination], i) => (
+              <motion.button
+                type="button"
+                onClick={() => { onLaunch(); onNavigate(destination as Page); }}
                 key={title as string}
                 initial={{ opacity: 0, y: 26 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, amount: 0.3 }}
                 transition={{ duration: 0.6, delay: i * 0.08, ease: [0.22, 1, 0.36, 1] }}
                 whileHover={{ y: -6, scale: 1.01 }}
-                className="glass group rounded-2xl p-6 transition-all duration-300"
+                className="glass group block w-full rounded-2xl p-6 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70"
               >
                 <div
                   className={`mb-12 flex h-10 w-10 items-center justify-center rounded-xl ${color === "cyan" ? "bg-cyan-400/10 text-cyan-300 shadow-[0_0_30px_rgba(34,211,238,0.16)]" : color === "violet" ? "bg-violet-400/10 text-violet-300 shadow-[0_0_30px_rgba(168,85,247,0.16)]" : color === "green" ? "bg-emerald-400/10 text-emerald-300 shadow-[0_0_30px_rgba(52,211,153,0.16)]" : "bg-amber-400/10 text-amber-300 shadow-[0_0_30px_rgba(251,191,36,0.14)]"}`}
@@ -536,11 +544,41 @@ function Landing({ onLaunch, onNavigate }: { onLaunch: () => void; onNavigate: (
                   size={17}
                   className="mt-5 text-slate-600 transition duration-300 group-hover:translate-x-1 group-hover:text-cyan-300"
                 />
-              </motion.div>
+              </motion.button>
             ))}
           </div>
         </section>
       </main>
+      <footer className="relative z-10 border-t border-white/[.08] bg-slate-950/35 backdrop-blur-sm">
+        <div className="mx-auto max-w-7xl px-6 py-9 sm:py-10">
+          <div className="grid gap-8 border-b border-white/[.08] pb-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] lg:items-start lg:gap-10">
+            <div>
+              <Logo />
+              <p className="mt-4 text-sm font-medium text-slate-300">Web3 Onchain Command Center</p>
+              <p className="mt-1 text-sm text-slate-500">Understand. Move. Stay in control.</p>
+            </div>
+            <nav aria-label="Footer navigation" className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+              <a href="#platform" className="w-fit rounded-sm text-sm text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70">Features</a>
+              <button type="button" onClick={() => { onLaunch(); onNavigate("portfolio"); }} className="w-fit rounded-sm text-left text-sm text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70">Portfolio</button>
+              <button type="button" onClick={() => { onLaunch(); onNavigate("activity"); }} className="w-fit rounded-sm text-left text-sm text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70">Activity</button>
+              <button type="button" onClick={() => { onLaunch(); onNavigate("bridge"); }} className="w-fit rounded-sm text-left text-sm text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70">Bridge</button>
+              <button type="button" onClick={() => { onLaunch(); onNavigate("swap"); }} className="w-fit rounded-sm text-left text-sm text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70">Swap</button>
+              <button type="button" onClick={() => { onLaunch(); onNavigate("security"); }} className="w-fit rounded-sm text-left text-sm text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70">Security</button>
+            </nav>
+            <div className="flex flex-col gap-2 lg:items-end">
+              <span className="inline-flex items-center gap-2 rounded-full border border-amber-200/15 bg-amber-200/[.04] px-3 py-1.5 font-mono text-[10px] font-semibold tracking-[.14em] text-amber-100/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-200/80" />
+                TESTNET ONLY
+              </span>
+              <p className="text-sm text-slate-500">Built for supported EVM testnets.</p>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 pt-5 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>© 2026 ORBIT</span>
+            <span>Built for the onchain era.</span>
+          </div>
+        </div>
+      </footer>
     </Space>
   );
 }
@@ -625,6 +663,7 @@ const navGroups = [
   {
     title: "EXPLORE",
     items: [
+      ["discover", "Discover", Compass],
       ["about", "About", BookOpen],
     ],
   },
@@ -717,6 +756,17 @@ function Sidebar({
                   <>
                     <p className="break-all font-mono text-[11px] text-slate-200">{address}</p>
                     <p className="text-[11px] text-slate-400">{activeNetwork?.name ?? `Chain ${chainId}`} connected</p>
+                    <button
+                      type="button"
+                      className="w-full rounded-xl bg-slate-900 px-3 py-2 text-left font-medium text-white hover:bg-slate-800"
+                      onClick={() => {
+                        setPage("settings");
+                        setWalletMenuOpen(false);
+                        setOpen(false);
+                      }}
+                    >
+                      Go to wallet settings
+                    </button>
                     <button
                       type="button"
                       className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-left font-medium text-slate-100 hover:bg-slate-700"
@@ -916,7 +966,7 @@ const networkOptions = [
   { id: arcTestnet.id, name: "Arc Testnet", label: "NETWORK", shortName: "Arc" },
 ] as const;
 
-function Topbar({ onMenu }: { onMenu: () => void }) {
+function Topbar({ onMenu, page }: { onMenu: () => void; page: Page }) {
   const { chainId, isConnected } = useAccount();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [networkMenuOpen, setNetworkMenuOpen] = useState(false);
@@ -990,7 +1040,7 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
           <div className="hidden items-center gap-2 text-xs text-slate-400 sm:flex">
             <span className="font-semibold text-slate-200">Command Center</span>
             <ChevronRight size={13} className="text-slate-500" />
-            <span className="font-semibold text-white">Overview</span>
+            <span className="font-semibold text-white">{page === "about" ? "About" : "Overview"}</span>
           </div>
           <div className="sm:hidden">
             <Logo compact />
@@ -1363,6 +1413,7 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
 function StatCards() {
   const { address, isConnected, chainId } = useAccount();
   const portfolio = usePortfolio();
+  const securityAssessed = isConnected && Boolean(address);
   const isArcTestnet = chainId === arcTestnet.id;
   const approvalsQuery = useApprovals();
   const transactionsQuery = useTransactions(address, isConnected && chainId === arcTestnet.id && Boolean(address), chainId);
@@ -1417,6 +1468,15 @@ function StatCards() {
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
                   Live Arc ERC-20 balance appears here
+                </p>
+              </>
+            ) : portfolio.isWrongNetwork ? (
+              <>
+                <p className="orbit-balance-amount mt-5 text-2xl font-extrabold tracking-[-0.06em]">
+                  Unavailable
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  Switch to Arc Testnet to view this balance
                 </p>
               </>
             ) : displayAsset?.isLoading ? (
@@ -1548,14 +1608,24 @@ function StatCards() {
             </span>
           </div>
           <div className="orbit-security-score-readout">
-            <strong className="orbit-security-score-value">{report.score}</strong>
-            <span className="orbit-security-score-denominator">/ 100</span>
+            {securityAssessed ? (
+              <>
+                <strong className="orbit-security-score-value">{report.score}</strong>
+                <span className="orbit-security-score-denominator">/ 100</span>
+              </>
+            ) : (
+              <strong className="orbit-security-score-value">Not assessed</strong>
+            )}
           </div>
           <span className="orbit-security-system-divider" aria-hidden="true" />
           <div className="orbit-security-status">
-            <span className="orbit-security-status-pill"><Pill color={scoreColor}>{scoreColor === "green" ? "Protected" : scoreColor === "amber" ? "Watch" : "High risk"}</Pill></span>
+            <span className="orbit-security-status-pill"><Pill color={securityAssessed ? scoreColor : "purple"}>{securityAssessed ? scoreColor === "green" ? "Protected" : scoreColor === "amber" ? "Watch" : "High risk" : "Not assessed"}</Pill></span>
             <p className="orbit-security-alert-copy">
-              {report.approvalAlerts.length > 0 ? `${report.approvalAlerts.length} alert${report.approvalAlerts.length === 1 ? "" : "s"} detected` : "No material alerts"}
+              {!securityAssessed
+                ? "Connect a wallet to assess security"
+                : report.approvalAlerts.length > 0
+                  ? `${report.approvalAlerts.length} alert${report.approvalAlerts.length === 1 ? "" : "s"} detected`
+                  : "No material alerts"}
             </p>
           </div>
         </div>
@@ -1779,6 +1849,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
     chainId,
     walletAddress: address,
   });
+  const securityAssessed = isConnected && Boolean(address);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
@@ -1810,7 +1881,13 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           : portfolio.hasUnavailablePrices
             ? 'Partial pricing data is unavailable for some holdings'
             : 'No wallet balances are currently detected';
-  const lastSync = portfolio.isLoading ? "UPDATING" : portfolio.isError ? "DEGRADED" : "LIVE";
+  const lastSync = portfolio.isDisconnected
+    ? "WALLET NOT CONNECTED"
+    : portfolio.isLoading
+      ? "UPDATING"
+      : portfolio.isError
+        ? "DEGRADED"
+        : "LIVE";
 
   return (
     <div className="orbit-home">
@@ -1838,7 +1915,11 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           </motion.div>
           <div className="orbit-sync-status rounded-full border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 shadow-[0_0_24px_rgba(34,211,238,0.12)]">
             <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-300">
-              Last sync <span className="text-sky-200">{lastSync}</span>
+              {portfolio.isDisconnected ? (
+                <span className="text-slate-400">{lastSync}</span>
+              ) : (
+                <>Last sync <span className="text-sky-200">{lastSync}</span></>
+              )}
             </p>
           </div>
         </div>
@@ -1873,7 +1954,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
             </div>
             <div className="flex items-center justify-between gap-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Portfolio value</p>
-              <span className="orbit-live-badge"><Pill color="green">{lastSync}</Pill></span>
+              <span className="orbit-live-badge"><Pill color={portfolio.isDisconnected ? "purple" : "green"}>{lastSync}</Pill></span>
             </div>
             <div className="mt-4 flex items-end justify-between gap-4">
               <div>
@@ -1886,14 +1967,20 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           <div className="orbit-security-summary rounded-3xl border border-slate-200 bg-slate-900 p-5 text-white shadow-[0_18px_40px_rgba(15,23,42,0.10)]">
             <div className="flex items-center justify-between">
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Security status</p>
-              <span className={`orbit-security-state rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] ${security.score >= 85 ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : security.score >= 60 ? 'border-amber-400/40 bg-amber-500/10 text-amber-200' : 'border-rose-400/40 bg-rose-500/10 text-rose-200'}`}>
-                {security.score >= 85 ? 'Protected' : security.score >= 60 ? 'Watch' : 'High risk'}
+              <span className={`orbit-security-state rounded-full border px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] ${!securityAssessed ? 'border-slate-400/30 bg-slate-500/10 text-slate-300' : security.score >= 85 ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200' : security.score >= 60 ? 'border-amber-400/40 bg-amber-500/10 text-amber-200' : 'border-rose-400/40 bg-rose-500/10 text-rose-200'}`}>
+                {!securityAssessed ? 'Not assessed' : security.score >= 85 ? 'Protected' : security.score >= 60 ? 'Watch' : 'High risk'}
               </span>
             </div>
             <div className="mt-4 flex items-end justify-between gap-4">
               <div>
-                <p className="orbit-security-score text-4xl font-extrabold tracking-[-0.08em]">{security.score}</p>
-                <p className="text-xs text-slate-300">/ 100 wallet score</p>
+                {securityAssessed ? (
+                  <>
+                    <p className="orbit-security-score text-4xl font-extrabold tracking-[-0.08em]">{security.score}</p>
+                    <p className="text-xs text-slate-300">/ 100 wallet score</p>
+                  </>
+                ) : (
+                  <p className="orbit-security-score text-2xl font-bold">Not assessed</p>
+                )}
               </div>
               <div className="orbit-security-mark flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 ring-1 ring-white/10">
                 <ShieldCheck size={20} className="text-sky-300" />
@@ -1925,13 +2012,13 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                         ? 'Wallet on unsupported network'
                         : portfolio.hasUnavailablePrices
                           ? 'Live pricing unavailable'
-                          : 'Current Base value'}
+                          : 'Current Arc Testnet value'}
                   </span>
                 </div>
               </div>
               <div className="flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-900/80 p-1.5">
-                <span className="rounded-md bg-cyan-300/15 px-2 py-1 font-mono text-[9px] font-bold tracking-[0.16em] text-cyan-200">
-                  LIVE
+                <span className={`rounded-md px-2 py-1 font-mono text-[9px] font-bold tracking-[0.16em] ${portfolio.isDisconnected ? 'bg-slate-500/10 text-slate-400' : 'bg-cyan-300/15 text-cyan-200'}`}>
+                  {portfolio.isDisconnected ? 'WALLET NOT CONNECTED' : 'LIVE'}
                 </span>
               </div>
             </div>
@@ -1958,7 +2045,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
       </div>
 
       <div className="orbit-signal-grid grid gap-4 md:grid-cols-3">
-        {[{ label: 'Security overview', value: security.score, meta: `${approvalCount} alert${approvalCount === 1 ? '' : 's'} need review`, tone: security.score >= 85 ? 'green' : security.score >= 60 ? 'amber' : 'red', badge: security.severity }, { label: 'Opportunity feed', value: discover.data?.opportunities.length ?? 0, meta: discover.isLoading ? 'Refreshing public market data...' : discover.isError ? 'Discover feed unavailable' : 'Public yield opportunities loaded', tone: 'cyan', badge: 'LIVE' }, { label: 'Watchlist', value: watchlist.items.length, meta: watchlist.items.length > 0 ? 'Saved and ready for quick review' : 'No items saved yet', tone: 'purple', badge: 'TRACKED' }].map((tile, index) => (
+        {[{ label: 'Security overview', value: securityAssessed ? security.score : 'Not assessed', meta: securityAssessed ? `${approvalCount} alert${approvalCount === 1 ? '' : 's'} need review` : 'Connect a wallet to assess security', tone: securityAssessed ? security.score >= 85 ? 'green' : security.score >= 60 ? 'amber' : 'red' : 'purple', badge: securityAssessed ? security.severity : 'NOT ASSESSED' }, { label: 'Opportunity feed', value: discover.data?.opportunities.length ?? 0, meta: discover.isLoading ? 'Refreshing public market data...' : discover.isError ? 'Discover feed unavailable' : 'Public yield opportunities loaded', tone: 'cyan', badge: 'LIVE' }, { label: 'Watchlist', value: watchlist.items.length, meta: watchlist.items.length > 0 ? 'Saved and ready for quick review' : 'No items saved yet', tone: 'purple', badge: 'TRACKED' }].map((tile, index) => (
           <motion.div key={tile.label} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, delay: 0.08 + index * 0.04 }}>
             <Card className="orbit-signal-card p-5">
               <div className="flex items-start justify-between gap-3">
@@ -1988,7 +2075,21 @@ function Portfolio() {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const portfolioNetwork = !address ? 'wallet disconnected' : isArcTestnet ? 'Arc Testnet' : 'unsupported network';
   const transactionsQuery = useTransactions(address, isArcTestnet && Boolean(address), chainId);
-  const analytics = getPortfolioAnalytics(portfolio.assets, transactionsQuery.transactions, portfolioNetwork);
+  const hasBalanceReadError = portfolio.isError || portfolio.assets.some((asset) => asset.isError);
+  const portfolioUnavailable = portfolio.isDisconnected || portfolio.isWrongNetwork || hasBalanceReadError;
+  const unavailableLabel = hasBalanceReadError ? 'Unavailable' : 'Not assessed';
+  const analytics = getPortfolioAnalytics(
+    portfolioUnavailable ? [] : portfolio.assets,
+    transactionsQuery.transactions,
+    portfolioNetwork,
+  );
+  const secondaryValue = (value: string) =>
+    portfolioUnavailable ? unavailableLabel : analytics.valuationUnavailable ? 'Unavailable' : value;
+  const assetCountState = getPortfolioAssetCountState(
+    portfolio.assets.some((asset) => asset.isLoading),
+    portfolioUnavailable,
+    portfolio.connectedAssets,
+  );
 
   const formatUsd = (value: number | null, fallback = 'N/A') =>
     value === null || !Number.isFinite(value) ? fallback : `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -2000,17 +2101,23 @@ function Portfolio() {
       ? 'Loading...'
       : portfolio.isWrongNetwork
         ? 'Switch to Arc Testnet'
-        : portfolio.isError
+        : portfolio.isError || hasBalanceReadError
           ? 'Balance unavailable'
-        : hasLivePortfolioValue
-          ? formatUsd(portfolio.totalValueUsd, '$0.00')
-          : portfolio.hasUnavailablePrices
-            ? 'Price data unavailable'
+        : portfolio.hasUnavailablePrices
+          ? 'Price data unavailable'
+          : hasLivePortfolioValue
+            ? formatUsd(portfolio.totalValueUsd, '$0.00')
             : 'No balances';
 
   const allocationSegments = analytics.allocation
-    .filter((asset: { valueUsd: number; allocationPercent: number }) => asset.valueUsd > 0 && asset.allocationPercent > 0)
-    .map((asset: { color: string; allocationPercent: number; valueUsd: number }) => `${asset.color} ${asset.allocationPercent}%`)
+    .filter((asset) =>
+      !analytics.valuationUnavailable &&
+      asset.valueUsd !== null &&
+      asset.valueUsd > 0 &&
+      asset.allocationPercent !== null &&
+      asset.allocationPercent > 0,
+    )
+    .map((asset) => `${asset.color} ${asset.allocationPercent}%`)
     .join(', ');
 
   return (
@@ -2064,10 +2171,10 @@ function Portfolio() {
       {portfolio.hasUnavailablePrices && !portfolio.isLoading && (
         <Card className="flex items-center gap-3 p-4 text-sm text-amber-300">
           <CircleDollarSign size={16} />
-          Some asset prices are unavailable. Values shown below may be incomplete.
+          Current USD valuation is unavailable because a funded asset has no usable price.
         </Card>
       )}
-      {portfolio.isError && !portfolio.isLoading && !portfolio.isDisconnected && !portfolio.isWrongNetwork && (
+      {(portfolio.isError || hasBalanceReadError) && !portfolio.isLoading && !portfolio.isDisconnected && !portfolio.isWrongNetwork && (
         <Card className="flex items-center gap-3 p-4 text-sm text-rose-200">
           <ShieldCheck size={16} />
           The live {portfolioNetwork} balance could not be read. Try refreshing.
@@ -2079,7 +2186,7 @@ function Portfolio() {
           Arc activity is temporarily unavailable. Your live balance remains available; try refreshing to load activity again.
         </Card>
       )}
-      {analytics.zeroBalance && !portfolio.isDisconnected && !portfolio.isWrongNetwork && !portfolio.isLoading && !portfolio.isError && (
+      {analytics.zeroBalance && !portfolioUnavailable && !portfolio.isLoading && !portfolio.isError && (
         <Card className="flex items-center gap-3 p-4 text-sm text-slate-300">
           <Wallet size={16} className="text-cyan-300" />
           No supported asset balance is currently detected on {portfolioNetwork} for this wallet.
@@ -2092,7 +2199,9 @@ function Portfolio() {
               <Label>Total net worth</Label>
               <p className="mt-3 text-4xl font-extrabold tracking-[-0.06em]">{value}</p>
               <p className="mt-2 text-xs text-slate-500">
-                USD value <span className="text-cyan-300">live</span>
+                USD value <span className="text-cyan-300">
+                  {getPortfolioUsdStatusLabel(portfolio.isDisconnected, portfolio.isWrongNetwork)}
+                </span>
               </p>
             </div>
             <div
@@ -2101,18 +2210,18 @@ function Portfolio() {
             >
               <div className="flex h-[74%] w-[74%] items-center justify-center rounded-full bg-[#101725] text-center">
                 <span className="font-mono text-[10px] text-slate-500">
-                  {portfolio.connectedAssets}
+                  {assetCountState.value}
                   <br />
-                  ASSETS
+                  {assetCountState.label}
                 </span>
               </div>
             </div>
           </div>
           <div className="mt-5 flex flex-wrap gap-3 text-xs">
             {[
-              ['Largest position', analytics.topAsset ? `${analytics.topAsset.symbol} • ${analytics.topAsset.allocationPercent.toFixed(1)}%` : 'N/A'],
-              ['Volatile exposure', `${analytics.volatileExposurePercent.toFixed(1)}%`],
-              ['Stablecoin', `${analytics.stablecoinExposurePercent.toFixed(1)}%`],
+              ['Largest position', secondaryValue(analytics.topAsset ? `${analytics.topAsset.symbol} • ${analytics.topAsset.allocationPercent?.toFixed(1) ?? 'Unavailable'}%` : 'N/A')],
+              ['Volatile exposure', secondaryValue(analytics.volatileExposurePercent === null ? 'Unavailable' : `${analytics.volatileExposurePercent.toFixed(1)}%`)],
+              ['Stablecoin', secondaryValue(analytics.stablecoinExposurePercent === null ? 'Unavailable' : `${analytics.stablecoinExposurePercent.toFixed(1)}%`)],
             ].map(([label, valueText]) => (
               <div key={label} className="data-card rounded-xl px-3 py-2">
                 <span className="text-slate-500">{label}</span>
@@ -2141,13 +2250,13 @@ function Portfolio() {
                     {a.symbol}
                   </span>
                   <span className="font-mono text-slate-400">
-                    {a.isLoading ? '...' : a.valueUsd === null ? 'N/A' : `${a.allocationPercent.toFixed(1)}%`}
+                    {portfolioUnavailable ? unavailableLabel : analytics.valuationUnavailable ? 'Unavailable' : a.isLoading ? '...' : `${a.allocationPercent.toFixed(1)}%`}
                   </span>
                 </div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-900/80">
                   <div
                     className="h-full rounded-full"
-                    style={{ width: `${Math.max(4, a.allocationPercent)}%`, background: a.color }}
+                    style={{ width: `${portfolioUnavailable || analytics.valuationUnavailable ? 0 : Math.max(4, a.allocationPercent)}%`, background: a.color }}
                   />
                 </div>
               </div>
@@ -2161,10 +2270,10 @@ function Portfolio() {
           <h2 className="mt-2 text-xl font-bold">Portfolio analytics</h2>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
             {[
-              ['Current value', formatUsd(portfolio.totalValueUsd, 'N/A')],
-              ['Top allocation', analytics.topAsset ? `${analytics.topAsset.allocationPercent.toFixed(1)}%` : '0.0%'],
-              ['USDC exposure', `${analytics.stablecoinExposurePercent.toFixed(1)}%`],
-              ['Volatile exposure', `${analytics.volatileExposurePercent.toFixed(1)}%`],
+              ['Current value', secondaryValue(formatUsd(portfolio.totalValueUsd, 'N/A'))],
+              ['Top allocation', secondaryValue(analytics.topAsset ? `${analytics.topAsset.allocationPercent?.toFixed(1) ?? 'Unavailable'}%` : '0.0%')],
+              ['USDC exposure', secondaryValue(analytics.stablecoinExposurePercent === null ? 'Unavailable' : `${analytics.stablecoinExposurePercent.toFixed(1)}%`)],
+              ['Volatile exposure', secondaryValue(analytics.volatileExposurePercent === null ? 'Unavailable' : `${analytics.volatileExposurePercent.toFixed(1)}%`)],
             ].map(([label, metric]) => (
               <div key={label} className="data-card rounded-xl p-3">
                 <p className="font-mono text-[9px] uppercase tracking-[0.15em] text-slate-500">{label}</p>
@@ -2174,14 +2283,32 @@ function Portfolio() {
           </div>
           <div className="mt-5 rounded-2xl border border-amber-300/15 bg-amber-300/[.05] p-4 text-sm text-amber-100">
             <p className="font-semibold">Performance methodology</p>
-            <p className="mt-1 text-amber-100/80">{analytics.performance.note}</p>
+            <p className="mt-1 text-amber-100/80">
+              {portfolioUnavailable
+                ? portfolio.isDisconnected
+                  ? 'Connect your wallet to assess current portfolio value and performance.'
+                  : portfolio.isWrongNetwork
+                    ? 'Switch to Arc Testnet to assess your portfolio.'
+                    : 'The latest balance read failed; current portfolio value is unavailable until a successful refresh.'
+                : analytics.performance.note}
+            </p>
           </div>
         </Card>
         <Card className="p-5">
           <Label>Risk / exposure</Label>
           <h2 className="mt-2 text-xl font-bold">Portfolio signals</h2>
           <div className="mt-5 space-y-3">
-            {analytics.riskSignals.length === 0 ? (
+            {portfolioUnavailable ? (
+              <p className="text-sm text-slate-400">
+                {portfolio.isDisconnected
+                  ? 'Connect your wallet to assess portfolio risk.'
+                  : portfolio.isWrongNetwork
+                    ? 'Switch to Arc Testnet to assess portfolio risk.'
+                    : 'Portfolio risk is unavailable because the latest balance read failed.'}
+              </p>
+            ) : analytics.valuationUnavailable ? (
+              <p className="text-sm text-slate-400">Portfolio risk is unavailable because current asset pricing is incomplete.</p>
+            ) : analytics.riskSignals.length === 0 ? (
               <p className="text-sm text-slate-400">No live risk signals available.</p>
             ) : (
               analytics.riskSignals.map((signal: { label: string; value: number; tone: string; detail: string }) => (
@@ -2208,7 +2335,7 @@ function Portfolio() {
             <Label>Portfolio history</Label>
             <h2 className="mt-2 text-xl font-bold">Recent portfolio signals</h2>
           </div>
-          <button className="rounded-lg border border-white/10 p-2 text-slate-400" aria-label="Open asset filters">
+          <button type="button" disabled title="Asset filtering is unavailable" className="cursor-not-allowed rounded-lg border border-white/10 p-2 text-slate-500 opacity-50" aria-label="Open asset filters">
             <SlidersHorizontal size={16} />
           </button>
         </div>
@@ -2253,7 +2380,7 @@ function Portfolio() {
             <Label>Holdings</Label>
             <h2 className="mt-2 text-xl font-bold">All assets</h2>
           </div>
-          <button className="rounded-lg border border-white/10 p-2 text-slate-400" aria-label="Filter holdings">
+          <button type="button" disabled title="Holdings filtering is unavailable" className="cursor-not-allowed rounded-lg border border-white/10 p-2 text-slate-500 opacity-50" aria-label="Filter holdings">
             <SlidersHorizontal size={16} />
           </button>
         </div>
@@ -2281,10 +2408,12 @@ function Portfolio() {
                     </div>
                   </td>
                   <td className="px-5 py-4 font-mono text-slate-300">
-                    {a.isLoading ? (
-                      <span className="inline-block h-4 w-16 animate-pulse rounded bg-white/10" />
+                    {portfolio.isDisconnected || portfolio.isWrongNetwork ? (
+                      'Not assessed'
                     ) : a.isError ? (
                       'Unavailable'
+                    ) : a.isLoading ? (
+                      <span className="inline-block h-4 w-16 animate-pulse rounded bg-white/10" />
                     ) : a.raw > 0n ? (
                       a.formatted
                     ) : (
@@ -2292,10 +2421,10 @@ function Portfolio() {
                     )}
                   </td>
                   <td className="px-5 py-4 font-mono font-semibold text-slate-300">
-                    {a.isLoading ? '...' : a.valueUsd === null ? 'N/A' : formatUsd(a.valueUsd, 'N/A')}
+                    {portfolioUnavailable ? unavailableLabel : analytics.valuationUnavailable ? 'Unavailable' : a.isLoading ? '...' : a.valueUsd === null ? 'N/A' : formatUsd(a.valueUsd, 'N/A')}
                   </td>
                   <td className="px-5 py-4 font-mono text-slate-500">
-                    {a.isLoading ? '...' : a.valueUsd === null ? 'N/A' : `${a.allocationPercent.toFixed(1)}%`}
+                    {portfolioUnavailable ? unavailableLabel : analytics.valuationUnavailable ? 'Unavailable' : a.isLoading ? '...' : `${a.allocationPercent.toFixed(1)}%`}
                   </td>
                   <td className="px-5 py-4 text-right">
                     <MoreHorizontal size={16} className="text-slate-500" />
@@ -2354,7 +2483,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
         label="Protect / Security Center"
         title="Your wallet, protected."
         action={
-          <Button variant="secondary" onClick={() => { void approvalsQuery.refetch(); void transactionsQuery.refetch(); }} disabled={isLoading}>
+          <Button variant="secondary" onClick={() => { void approvalsQuery.refetch(); void transactionsQuery.refetch(); }} disabled={!isConnected || isLoading}>
             <RefreshCw size={15} className={isLoading ? 'animate-spin' : ''} />
             {isLoading ? 'Checking wallet...' : 'Refresh'}
           </Button>
@@ -2408,16 +2537,20 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
               <div
                 className="relative flex h-36 w-36 items-center justify-center rounded-full"
                 style={{
-                  background: `conic-gradient(${scoreColor === 'green' ? '#34d399' : scoreColor === 'amber' ? '#fbbf24' : '#f87171'} 0 ${report.score}%, #182932 ${report.score}% 100%)`,
+                  background: isConnected
+                    ? `conic-gradient(${scoreColor === 'green' ? '#34d399' : scoreColor === 'amber' ? '#fbbf24' : '#f87171'} 0 ${report.score}%, #182932 ${report.score}% 100%)`
+                    : '#182932',
                 }}
               >
                 <div className="flex h-[124px] w-[124px] flex-col items-center justify-center rounded-full bg-[#101725]">
-                  <span className="text-4xl font-extrabold">{report.score}</span>
-                  <span className="font-mono text-[9px] text-slate-500">OUT OF 100</span>
+                  <span className="text-4xl font-extrabold">{isConnected ? report.score : '—'}</span>
+                  <span className="font-mono text-[9px] text-slate-500">{isConnected ? 'OUT OF 100' : 'NOT ASSESSED'}</span>
                 </div>
               </div>
               <div>
-                <Pill color={scoreColor === 'green' ? 'green' : scoreColor === 'amber' ? 'amber' : 'red'}>{report.severity} risk</Pill>
+                {isConnected
+                  ? <Pill color={scoreColor === 'green' ? 'green' : scoreColor === 'amber' ? 'amber' : 'red'}>{report.severity} risk</Pill>
+                  : <Pill color="purple">Not assessed</Pill>}
                 <h2 className="mt-3 text-2xl font-bold">{walletStatus}</h2>
                 <p className="mt-2 max-w-lg text-sm leading-6 text-slate-400">{report.summary}</p>
                 <p className="mt-4 font-mono text-[10px] text-slate-500">WALLET STATUS <span className="text-emerald-300">{walletStatus}</span></p>
@@ -2475,9 +2608,15 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
                   <Label>Approval risk</Label>
                   <h2 className="mt-2 text-xl font-bold">Token approvals</h2>
                 </div>
-                <Pill color={report.approvalAlerts.length > 0 ? 'amber' : 'green'}>{report.approvalAlerts.length} alert{report.approvalAlerts.length === 1 ? '' : 's'}</Pill>
+                <Pill color={approvalsQuery.data === undefined ? 'purple' : report.approvalAlerts.length > 0 ? 'amber' : 'green'}>
+                  {approvalsQuery.data === undefined ? 'Not scanned' : `${report.approvalAlerts.length} alert${report.approvalAlerts.length === 1 ? '' : 's'}`}
+                </Pill>
               </div>
-              {report.approvalAlerts.length === 0 ? (
+              {approvalsQuery.isFetching ? (
+                <p className="text-sm text-slate-400">Scanning configured Arc token approvals...</p>
+              ) : approvalsQuery.data === undefined ? (
+                <p className="text-sm text-slate-400">Run a security scan to check your approvals.</p>
+              ) : report.approvalAlerts.length === 0 ? (
                 <p className="text-sm text-slate-400">No risky approvals were detected for the configured Arc token set.</p>
               ) : (
                 <div className="space-y-3">
@@ -2558,7 +2697,7 @@ function Approvals() {
         label="Protect / Approvals & Revoke"
         title="Take back control."
         action={
-          <Button variant="secondary" onClick={approvalsQuery.refetch} disabled={approvalsQuery.isFetching || status === "pending"}>
+          <Button variant="secondary" onClick={approvalsQuery.refetch} disabled={!isConnected || approvalsQuery.isFetching || status === "pending"}>
             <RefreshCw size={15} />
             {approvalsQuery.isFetching ? "Scanning..." : "Refresh scan"}
           </Button>
@@ -2569,10 +2708,20 @@ function Approvals() {
           <div>
             <Label>Approval scanner</Label>
             <p className="mt-2 text-sm text-slate-400">
-              {approvals.length} detected approvals for configured Arc tokens.
+              {!isConnected
+                ? "Connect your wallet to scan approvals."
+                : approvalsQuery.isFetching
+                  ? "Scanning configured Arc token approvals..."
+                  : approvalsQuery.isError
+                    ? "Approval scan unavailable."
+                    : approvalsQuery.data === undefined
+                      ? "Run a scan to check your approvals."
+                      : `${approvals.length} detected approvals for configured Arc tokens.`}
             </p>
           </div>
-          <Pill color="amber">{approvals.filter((approval) => approval.risk === "High" || approval.risk === "Medium").length} ACTIONS NEEDED</Pill>
+          {approvalsQuery.data !== undefined && !approvalsQuery.isError && (
+            <Pill color="amber">{approvals.filter((approval) => approval.risk === "High" || approval.risk === "Medium").length} ACTIONS NEEDED</Pill>
+          )}
         </div>
         {status === "success" && transactionHash && (
           <p className="border-b border-white/[.06] px-5 py-3 text-xs text-emerald-300">
@@ -2584,12 +2733,14 @@ function Approvals() {
           <p className="p-12 text-center text-xs text-slate-500">Connect your wallet to scan token approvals.</p>
         ) : chainId !== arcTestnet.id ? (
           <p className="p-12 text-center text-xs text-amber-300">Switch to Arc Testnet to view Arc approvals.</p>
-        ) : approvalsQuery.isLoading ? (
-          <p className="p-12 text-center text-xs text-slate-500">Loading Arc approval availability...</p>
+        ) : approvalsQuery.isFetching ? (
+          <p className="p-12 text-center text-xs text-slate-500">Scanning Arc token approvals...</p>
         ) : approvalsQuery.isError ? (
           <p className="p-12 text-center text-xs text-rose-300">Unable to scan approvals. Try refreshing.</p>
+        ) : approvalsQuery.data === undefined ? (
+          <p className="p-12 text-center text-xs text-slate-400">Run a scan to check your approvals.</p>
         ) : approvals.length === 0 ? (
-          <p className="p-12 text-center text-xs text-slate-400">Arc approval scanning is not available yet.</p>
+          <p className="p-12 text-center text-xs text-slate-400">No approvals found.</p>
         ) : <div className="overflow-x-auto">
           <table className="w-full min-w-[700px] text-left">
             <thead className="border-b border-white/[.06] font-mono text-[9px] uppercase tracking-widest text-slate-600">
@@ -2883,6 +3034,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                     ]}
                     transactionLabel="Source transaction"
                     transactionHash={bridgeExecution.sourceHash}
+                    successChimeKey={`bridge:${bridgeExecution.sourceHash}`}
                     explorerUrl={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash)}
                     additionalTransactions={[{
                       label: "Destination transaction",
@@ -3155,6 +3307,13 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
   const isPaymentRequestSend = Boolean(paymentRequest);
   const balanceRaw = balance.raw;
   const isBusy = status === "preparing" || status === "confirmation" || status === "pending";
+  const isSendInputInvalid = validateSendRequest({
+    address,
+    recipient,
+    amount,
+    balance: balanceRaw,
+    decimals: asset.decimals,
+  }) !== null;
   useEffect(() => {
     if (status === "confirmed" && transactionHash) setCompletedAt((current) => current ?? Date.now());
     else setCompletedAt(null);
@@ -3233,7 +3392,7 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <PageTitle label="Move / Send" title="Send assets securely." />
-      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send Arc Testnet USDC.</p><WalletButton className="mt-7" /></Card> : !isArcTestnet ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send uses the official Arc Testnet USDC contract and your connected wallet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send / Arc Testnet</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><div><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Official Arc ERC-20</span></div></div><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend || balance.isLoading || balance.isError} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balance.isLoading ? "..." : balance.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} USDC`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} USDC</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} native USDC` : "Estimated during preparation"}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p></div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || balance.isLoading || balance.isError} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
+      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send Arc Testnet USDC.</p><WalletButton className="mt-7" /></Card> : !isArcTestnet ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send uses the official Arc Testnet USDC contract and your connected wallet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send / Arc Testnet</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><div><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Official Arc ERC-20</span></div></div><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend || balance.isLoading || balance.isError} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balance.isLoading ? "..." : balance.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} USDC`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} USDC</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} native USDC` : "Estimated during preparation"}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p></div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || balance.isLoading || balance.isError || isSendInputInvalid} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
     </div>
   );
 }
@@ -3616,7 +3775,7 @@ declare const __APP_VERSION__: string;
 function SettingsPage() {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
-  const { settings, setDensity, setRefreshMode, hasStorage } = useOrbitSettings();
+  const { settings, setDensity, setExplorer, setRefreshMode, hasStorage } = useOrbitSettings();
   const watchlist = useWatchlist();
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearMessage, setClearMessage] = useState<string | null>(null);
@@ -3639,7 +3798,7 @@ function SettingsPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className={settings.density === 'compact' ? 'space-y-3' : 'space-y-6'}>
       <PageTitle
         label="ORBIT / Settings"
         title="Configuration center."
@@ -3655,22 +3814,22 @@ function SettingsPage() {
         }
       />
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={settings.density === 'compact' ? 'grid gap-3 lg:grid-cols-2' : 'grid gap-4 lg:grid-cols-2'}>
         <Card className="p-5" glow>
           <Label>Wallet & network</Label>
-          <div className="mt-4 space-y-4 text-sm">
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+          <div className={settings.density === 'compact' ? 'mt-3 space-y-3 text-sm' : 'mt-4 space-y-4 text-sm'}>
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet</p>
               <p className="mt-2 font-semibold text-slate-200">{isConnected && address ? shortAddr(address) : 'Wallet disconnected'}</p>
             </div>
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Current network</p>
               <div className="mt-2 flex items-center justify-between gap-3">
                 <p className="font-semibold text-slate-200">{walletStateLabel}</p>
                 <Pill color={networkStatusPill === 'green' ? 'green' : 'amber'}>{!isConnected ? 'Disconnected' : !activeChain ? 'Unsupported' : 'Connected'}</Pill>
               </div>
             </div>
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet security</p>
               <p className="mt-2 text-slate-300">ORBIT reads wallet state, network status, and transaction history with your explicit wallet approval. ORBIT does not store private keys or seed phrases.</p>
             </div>
@@ -3679,8 +3838,8 @@ function SettingsPage() {
 
         <Card className="p-5" glow>
           <Label>Supported networks</Label>
-          <div className="mt-4 space-y-4 text-sm">
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+          <div className={settings.density === 'compact' ? 'mt-3 space-y-3 text-sm' : 'mt-4 space-y-4 text-sm'}>
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Wallet chains</p>
               <div className="mt-2 flex flex-wrap gap-2">
                 {supportedChains.map((chain) => (
@@ -3688,7 +3847,7 @@ function SettingsPage() {
                 ))}
               </div>
             </div>
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Arc core network</p>
               <p className="mt-2 text-slate-200">Arc Testnet · Chain ID 5042002 · Native gas USDC</p>
               <p className="mt-1 break-all text-xs text-slate-500">RPC https://rpc.testnet.arc.network · Explorer https://testnet.arcscan.app</p>
@@ -3697,16 +3856,18 @@ function SettingsPage() {
         </Card>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={settings.density === 'compact' ? 'grid gap-3 lg:grid-cols-2' : 'grid gap-4 lg:grid-cols-2'}>
         <Card className="p-5" glow>
           <Label>Explorer & refresh</Label>
-          <div className="mt-4 space-y-4">
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+          <div className={settings.density === 'compact' ? 'mt-3 space-y-3' : 'mt-4 space-y-4'}>
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="mb-2 text-xs font-semibold text-slate-400">Explorer</p>
               <div className="flex gap-2">
                 <button
-                  onClick={() => undefined}
-                  className="flex-1 rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-sm font-bold text-cyan-200"
+                  type="button"
+                  aria-pressed={settings.explorer === 'arcscan'}
+                  onClick={() => setExplorer('arcscan')}
+                  className={`flex-1 rounded-xl border px-3 py-2 text-sm font-bold ${settings.explorer === 'arcscan' ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-200' : 'border-white/10 bg-[#101725] text-slate-300'}`}
                 >
                   ArcScan
                 </button>
@@ -3714,12 +3875,14 @@ function SettingsPage() {
               <p className="mt-2 text-[11px] text-slate-500">Arc activity and transaction links use the official ArcScan explorer.</p>
             </div>
 
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="mb-2 text-xs font-semibold text-slate-400">Refresh behavior</p>
               <div className="grid gap-2 sm:grid-cols-3">
                 {(['manual', 'balanced', 'live'] as const).map((mode) => (
                   <button
                     key={mode}
+                    type="button"
+                    aria-pressed={settings.refreshMode === mode}
                     onClick={() => setRefreshMode(mode)}
                     className={`rounded-xl border px-3 py-2 text-xs font-bold uppercase tracking-[.14em] ${settings.refreshMode === mode ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-200' : 'border-white/10 bg-[#101725] text-slate-300'}`}
                   >
@@ -3734,17 +3897,21 @@ function SettingsPage() {
 
         <Card className="p-5" glow>
           <Label>Display & local preferences</Label>
-          <div className="mt-4 space-y-4">
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+          <div className={settings.density === 'compact' ? 'mt-3 space-y-3' : 'mt-4 space-y-4'}>
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="mb-2 text-xs font-semibold text-slate-400">Information density</p>
               <div className="grid gap-2 sm:grid-cols-2">
                 <button
+                  type="button"
+                  aria-pressed={settings.density === 'comfortable'}
                   onClick={() => setDensity('comfortable')}
                   className={`rounded-xl border px-3 py-2 text-sm font-bold ${settings.density === 'comfortable' ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-200' : 'border-white/10 bg-[#101725] text-slate-300'}`}
                 >
                   Comfortable
                 </button>
                 <button
+                  type="button"
+                  aria-pressed={settings.density === 'compact'}
                   onClick={() => setDensity('compact')}
                   className={`rounded-xl border px-3 py-2 text-sm font-bold ${settings.density === 'compact' ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-200' : 'border-white/10 bg-[#101725] text-slate-300'}`}
                 >
@@ -3754,7 +3921,7 @@ function SettingsPage() {
               <p className="mt-2 text-[11px] text-slate-500">Density affects ORBIT’s supported layout spacing and content density while keeping the same underlying data and actions.</p>
             </div>
 
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="mb-2 text-xs font-semibold text-slate-400">Persistence</p>
               <p className="text-sm text-slate-300">Explorer, refresh behavior, and density are persisted in browser local storage only.</p>
               <p className="mt-2 text-[11px] text-slate-500">{hasStorage ? 'Browser storage is available for persisted preferences.' : 'Local storage is unavailable in this environment, so these settings are temporary.'}</p>
@@ -3763,16 +3930,16 @@ function SettingsPage() {
         </Card>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={settings.density === 'compact' ? 'grid gap-3 lg:grid-cols-2' : 'grid gap-4 lg:grid-cols-2'}>
         <Card className="p-5" glow>
           <Label>Watchlist data</Label>
-          <div className="mt-4 space-y-4">
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+          <div className={settings.density === 'compact' ? 'mt-3 space-y-3' : 'mt-4 space-y-4'}>
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Storage mode</p>
               <p className="mt-2 text-slate-200">Local browser persistence only</p>
               <p className="mt-1 text-xs text-slate-500">Watchlist entries are stored locally in this browser. They are not wallet-owned, blockchain data, or synced to another device unless a separate sync system is added.</p>
             </div>
-            <div className="rounded-xl border border-rose-300/20 bg-rose-300/[.05] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-rose-300/20 bg-rose-300/[.05] p-2' : 'rounded-xl border border-rose-300/20 bg-rose-300/[.05] p-3'}>
               <p className="mb-2 text-xs font-semibold text-rose-200">Clear local watchlist?</p>
               <p className="mb-3 text-xs text-rose-100/80">This removes all locally stored watchlist entries from this browser.</p>
               <div className="flex gap-2">
@@ -3798,20 +3965,20 @@ function SettingsPage() {
 
         <Card className="p-5" glow>
           <Label>App information</Label>
-          <div className="mt-4 space-y-3 text-sm">
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+          <div className={settings.density === 'compact' ? 'mt-3 space-y-2 text-sm' : 'mt-4 space-y-3 text-sm'}>
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Network in use</p>
               <p className="mt-2 text-slate-200">{walletStateLabel}</p>
             </div>
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Supported chain</p>
               <p className="mt-2 text-slate-200">Arc Testnet</p>
             </div>
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">App version</p>
               <p className="mt-2 text-slate-200">{__APP_VERSION__}</p>
             </div>
-            <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+            <div className={settings.density === 'compact' ? 'rounded-xl border border-white/10 bg-white/[.02] p-2' : 'rounded-xl border border-white/10 bg-white/[.02] p-3'}>
               <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Data-provider architecture</p>
               <p className="mt-2 text-slate-200">ArcScan activity provider and official Arc RPC</p>
             </div>
@@ -3862,8 +4029,6 @@ function ActivityPage() {
   const isBase = chainId === base.id;
   const isSupportedNetwork = isArcTestnet || isBase;
   const activityNetwork = isArcTestnet ? 'Arc Testnet' : isBase ? 'Base' : 'supported network';
-  const { transactions, isLoading, isError, refetch, isFetching } =
-    useTransactions(address, isConnected && isSupportedNetwork, chainId);
   const [selectedCategory, setSelectedCategory] = useState<
     'all' | 'Send' | 'Receive' | 'Swap' | 'Approval' | 'Contract Interaction' | 'Other'
   >('all');
@@ -3872,6 +4037,8 @@ function ActivityPage() {
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [showAllTransactions, setShowAllTransactions] = useState(false);
+  const { transactions, isLoading, isError, refetch, isFetching } =
+    useTransactions(address, isConnected && isSupportedNetwork, chainId, showAllTransactions);
 
   const wrongNetwork = isConnected && !isSupportedNetwork;
 
@@ -4241,7 +4408,7 @@ function ActivityPage() {
                           <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
                             <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Time</p>
                             <p className="mt-2 text-sm font-semibold text-slate-200">
-                              {selectedTx.timestamp ? formatTransactionDate(selectedTx.timestamp) : 'Pending'}
+                              {formatTransactionDate(selectedTx.timestamp)}
                             </p>
                           </div>
                         </div>
@@ -4409,7 +4576,7 @@ function Dashboard({
       <div className="relative z-10 flex h-screen overflow-hidden">
         <Sidebar page={page} setPage={setPage} open={open} setOpen={setOpen} />
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <Topbar onMenu={() => setOpen(true)} />
+          <Topbar onMenu={() => setOpen(true)} page={page} />
           <main className="flex-1 overflow-y-auto px-5 py-8 lg:px-8">
             <AnimatePresence mode="wait">
               <motion.div
@@ -4449,21 +4616,21 @@ function AboutPage() {
         <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-400">About ORBIT</p>
-            <h2 className="mt-3 text-3xl font-extrabold tracking-[-0.05em] text-white">A focused command center for your Arc wallet.</h2>
+            <h2 className="mt-3 text-3xl font-extrabold tracking-[-0.05em] text-white">A focused command center for your onchain wallet.</h2>
             <p className="mt-4 text-base leading-7 text-slate-300">
-              ORBIT brings together the essentials of a modern onchain portfolio: portfolio value, wallet activity, approvals, discovery, and security signals in one place. It is designed to help you understand what is happening across your wallet without adding unnecessary noise or fake data.
+              ORBIT brings together the essentials of a modern onchain portfolio: portfolio value, wallet activity, approvals, transfers, swaps, and security signals in one place.
             </p>
             <p className="mt-4 text-base leading-7 text-slate-300">
-              The app reads live public data and wallet state where available and keeps the experience focused on real Arc activity, real risk awareness, and practical controls without requiring a separate backend or paid data layer.
+              It is built to help you understand your wallet state and onchain activity across supported testnets, with a focused interface and practical controls.
             </p>
           </div>
           <div className="rounded-3xl border border-slate-700 bg-slate-950/60 p-5 shadow-[0_18px_40px_rgba(2,6,23,0.28)]">
             <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-slate-400">What it helps with</p>
             <ul className="mt-4 space-y-3 text-sm text-slate-300">
-              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Track portfolio and wallet state on Arc Testnet</li>
-              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Review recent onchain activity and failed transactions</li>
-              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Audit approval risk and wallet security posture</li>
-              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Explore opportunities and keep key assets on a watchlist</li>
+              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Track portfolio and wallet balances</li>
+              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Review recent onchain activity</li>
+              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Send, receive, bridge, and swap supported assets</li>
+              <li className="flex gap-3"><span className="mt-1 h-2 w-2 rounded-full bg-cyan-500" />Review approvals and wallet security signals</li>
             </ul>
           </div>
         </div>
@@ -4474,12 +4641,28 @@ function AboutPage() {
 
 function App() {
   const [launched, setLaunched] = useState(false);
+  const [theme, setTheme] = useState<OrbitTheme>(() => {
+    if (typeof window === "undefined") return "dark";
+    try {
+      return window.localStorage.getItem("orbit-theme") === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  });
   const [page, setPage] = useState<Page>(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('arcPay') ? 'arc-pay' : 'home');
   const [paymentRequest, setPaymentRequest] = useState<ArcPaymentRequest | null>(null);
+  useEffect(() => {
+    document.documentElement.dataset.orbitTheme = theme;
+    try {
+      window.localStorage.setItem("orbit-theme", theme);
+    } catch {
+      // Storage may be unavailable in protected browsing or constrained environments.
+    }
+  }, [theme]);
   return launched ? (
     <Dashboard page={page} setPage={setPage} paymentRequest={paymentRequest} setPaymentRequest={setPaymentRequest} />
   ) : (
-    <Landing onLaunch={() => { setPage(page === 'arc-pay' ? 'arc-pay' : "home"); setLaunched(true); }} onNavigate={setPage} />
+    <Landing onLaunch={() => { setPage(page === 'arc-pay' ? 'arc-pay' : "home"); setLaunched(true); }} onNavigate={setPage} theme={theme} onThemeChange={setTheme} />
   );
 }
 export default App;

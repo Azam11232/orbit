@@ -72,8 +72,9 @@ export function useGateway(sourceId: number, destinationId: number) {
   const [depositHash, setDepositHash] = useState<Hex>();
   const [mintHash, setMintHash] = useState<Hex>();
   const [error, setError] = useState<Error | null>(null);
-  const sourceGatewayBalance = balancesQuery.data?.find((balance) => balance.domain === source?.cctpDomain)?.raw ?? 0n;
-  const totalGatewayBalance = sumGatewayBalances(balancesQuery.data ?? []);
+  const gatewayBalances = balancesQuery.isError ? [] : balancesQuery.data ?? [];
+  const sourceGatewayBalance = gatewayBalances.find((balance) => balance.domain === source?.cctpDomain)?.raw ?? 0n;
+  const totalGatewayBalance = sumGatewayBalances(gatewayBalances);
   const busy = depositState === 'approval' || depositState === 'deposit' || depositState === 'pending' || spendState === 'signing' || spendState === 'minting' || spendState === 'pending';
 
   const deposit = async (amount: string) => {
@@ -136,11 +137,26 @@ export function useGateway(sourceId: number, destinationId: number) {
   return {
     gatewayNetworks,
     sourceBalance: sourceBalance.data ?? 0n,
-    sourceBalanceFormatted: formatUnits(sourceBalance.data ?? 0n, 6),
-    walletBalances: gatewayNetworks.map((network, index) => ({ network, raw: walletBalancesQuery.data?.[index]?.result ?? 0n })),
+    sourceBalanceDisplay: sourceBalance.isFetching
+      ? 'Loading...'
+      : sourceBalance.isError || sourceBalance.data === undefined
+        ? 'Unavailable'
+        : `${formatUnits(sourceBalance.data, 6)} USDC`,
+    walletBalances: gatewayNetworks.map((network, index) => {
+      const result = walletBalancesQuery.data?.[index];
+      return {
+        network,
+        raw: result?.status === 'success' ? result.result : undefined,
+        isLoading: walletBalancesQuery.isFetching,
+        isError: result?.status === 'failure' || walletBalancesQuery.isError || (!walletBalancesQuery.isFetching && !result),
+      };
+    }),
     sourceGatewayBalance,
     totalGatewayBalance,
-    gatewayBalances: balancesQuery.data ?? [],
+    gatewayBalances,
+    hasGatewayBalanceData: gatewayBalances.length > 0,
+    isGatewayBalanceLoading: balancesQuery.isLoading,
+    isGatewayBalanceError: balancesQuery.isError,
     isBalanceLoading: balancesQuery.isLoading || sourceBalance.isLoading,
     isBalanceError: balancesQuery.isError || sourceBalance.isError,
     isWrongSourceNetwork: Boolean(isConnected && chainId !== sourceId),

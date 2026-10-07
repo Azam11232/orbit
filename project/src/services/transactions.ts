@@ -49,6 +49,7 @@ export interface TransactionQuery {
   address: Address;
   chainId: number;
   limit?: number;
+  fetchAllPages?: boolean;
 }
 
 export interface TransactionProvider {
@@ -299,6 +300,7 @@ interface BlockscoutAddressRef {
 interface BlockscoutTokenTransferRaw {
   transaction_hash?: string;
   hash?: string;
+  log_index?: number | string;
   amount?: string | number;
   value?: string | number;
   decimals?: string | number;
@@ -336,6 +338,82 @@ interface BlockscoutTxItem {
   status?: string | number | null;
   result?: string | null;
   token_transfers?: BlockscoutTokenTransferRaw[];
+}
+
+type ArcScanPageParams = Record<string, string | number>;
+
+interface ArcScanPage<T> {
+  items?: T[];
+  next_page_params?: ArcScanPageParams | null;
+}
+
+async function fetchArcScanItems<T>(
+  address: string,
+  resource: 'transactions' | 'token-transfers',
+  itemsCount: number,
+  shouldStop?: (items: T[]) => boolean,
+): Promise<T[]> {
+  const items: T[] = [];
+  const visitedCursors = new Set<string>();
+  let nextPageParams: ArcScanPageParams | null | undefined;
+
+  do {
+    const params = new URLSearchParams({ items_count: String(itemsCount) });
+    if (nextPageParams) {
+      for (const [key, value] of Object.entries(nextPageParams)) {
+        params.set(key, String(value));
+      }
+    }
+
+    const cursor = params.toString();
+    if (visitedCursors.has(cursor)) {
+      throw new Error('ArcScan returned a repeated pagination cursor');
+    }
+    visitedCursors.add(cursor);
+
+    const page = await fetchJson<ArcScanPage<T>>(
+      `${ARCSCAN_PROXY_BASE_URL}/addresses/${address}/${resource}?${cursor}`,
+    );
+    if (!Array.isArray(page.items)) {
+      throw new Error('ArcScan returned an invalid activity response');
+    }
+    items.push(...page.items);
+
+    if (shouldStop?.(items)) return items;
+
+    nextPageParams = page.next_page_params;
+    if (nextPageParams !== null && nextPageParams !== undefined) {
+      if (
+        typeof nextPageParams !== 'object' ||
+        Array.isArray(nextPageParams) ||
+        Object.keys(nextPageParams).length === 0 ||
+        Object.values(nextPageParams).some((value) =>
+          (typeof value !== 'string' && typeof value !== 'number') ||
+          (typeof value === 'number' && !Number.isFinite(value)),
+        )
+      ) {
+        throw new Error('ArcScan returned invalid pagination parameters');
+      }
+    }
+  } while (nextPageParams);
+
+  return items;
+}
+
+function getArcTransferKey(transfer: BlockscoutTokenTransferRaw): string {
+  const hash = String(transfer.transaction_hash ?? transfer.hash ?? '').toLowerCase();
+  if (transfer.log_index !== undefined) {
+    return `${hash}:${transfer.log_index}`;
+  }
+
+  return [
+    hash,
+    normalizeAddress(getAddressValue(transfer.from)),
+    normalizeAddress(getAddressValue(transfer.to)),
+    normalizeAddress(String(transfer.token?.address_hash ?? transfer.token?.address ?? transfer.contract_address ?? '')),
+    String(transfer.total?.value ?? transfer.amount ?? transfer.value ?? ''),
+    String(transfer.total?.decimals ?? transfer.decimals ?? transfer.token?.decimals ?? ''),
+  ].join(':');
 }
 
 function normalizeBlockNumber(value: unknown): number | null {
@@ -430,21 +508,39 @@ function normalizeArcTransaction(
   };
 }
 
-async function fetchArcTransactions(address: string, limit: number): Promise<ChainTransaction[]> {
+async function fetchArcTransactions(address: string, limit: number, fetchAllPages: boolean): Promise<ChainTransaction[]> {
   const itemsCount = Math.max(limit, 20);
-  const transactionsUrl = `${ARCSCAN_PROXY_BASE_URL}/addresses/${address}/transactions?items_count=${itemsCount}`;
-  const transfersUrl = `${ARCSCAN_PROXY_BASE_URL}/addresses/${address}/token-transfers?items_count=${itemsCount}`;
-  const [{ items: transactionItems }, { items: transferItems }] = await Promise.all([
-    fetchJson<{ items?: BlockscoutTxItem[] }>(transactionsUrl),
-    fetchJson<{ items?: BlockscoutTokenTransferRaw[] }>(transfersUrl),
+  const [allTransactionItems, allTransferItems] = await Promise.all([
+    fetchArcScanItems<BlockscoutTxItem>(
+      address,
+      'transactions',
+      itemsCount,
+      fetchAllPages ? undefined : () => true,
+    ),
+    fetchArcScanItems<BlockscoutTokenTransferRaw>(
+      address,
+      'token-transfers',
+      itemsCount,
+      fetchAllPages ? undefined : () => true,
+    ),
   ]);
 
-  if (!Array.isArray(transactionItems) || !Array.isArray(transferItems)) {
-    throw new Error('ArcScan returned an invalid activity response');
+  const transactionItemsByHash = new Map<string, BlockscoutTxItem>();
+  for (const transaction of allTransactionItems) {
+    if (transaction.hash) {
+      const key = String(transaction.hash).toLowerCase();
+      if (!transactionItemsByHash.has(key)) transactionItemsByHash.set(key, transaction);
+    }
+  }
+
+  const transferItemsByKey = new Map<string, BlockscoutTokenTransferRaw>();
+  for (const transfer of allTransferItems) {
+    const key = getArcTransferKey(transfer);
+    if (!transferItemsByKey.has(key)) transferItemsByKey.set(key, transfer);
   }
 
   const transferMap = new Map<string, TokenTransfer[]>();
-  for (const rawTransfer of transferItems) {
+  for (const rawTransfer of transferItemsByKey.values()) {
     const transfer = normalizeBlockscoutTokenTransfer(rawTransfer, address);
     if (!transfer || normalizeAddress(transfer.contractAddress) !== normalizeAddress(ARC_USDC_ADDRESS)) continue;
     const key = transfer.hash.toLowerCase();
@@ -458,37 +554,34 @@ async function fetchArcTransactions(address: string, limit: number): Promise<Cha
     transferMap.set(key, bucket);
   }
 
-  const transactionItemsByHash = new Map(
-    transactionItems
-      .filter((transaction) => Boolean(transaction.hash))
-      .map((transaction) => [String(transaction.hash).toLowerCase(), transaction]),
-  );
   const unmatchedTransferHashes = [...transferMap.keys()]
     .filter((hash) => !transactionItemsByHash.has(hash));
-  const senderTransactionItems = new Map<string, Promise<BlockscoutTxItem[]>>();
-
-  const fetchSenderTransactions = (sender: string): Promise<BlockscoutTxItem[]> => {
+  const senderTargets = new Map<string, { address: string; hashes: Set<string> }>();
+  for (const hash of unmatchedTransferHashes) {
+    const sender = transferMap.get(hash)?.[0]?.from;
+    if (!sender || !/^0x[a-fA-F0-9]{40}$/.test(sender)) continue;
     const normalizedSender = normalizeAddress(sender);
-    const existingRequest = senderTransactionItems.get(normalizedSender);
-    if (existingRequest) return existingRequest;
+    const target = senderTargets.get(normalizedSender) ?? { address: sender, hashes: new Set<string>() };
+    target.hashes.add(hash);
+    senderTargets.set(normalizedSender, target);
+  }
 
-    const request = fetchJson<{ items?: BlockscoutTxItem[] }>(
-      `${ARCSCAN_PROXY_BASE_URL}/addresses/${sender}/transactions?items_count=${itemsCount}`,
-    ).then(({ items }) => Array.isArray(items) ? items : []);
-    senderTransactionItems.set(normalizedSender, request);
-    return request;
-  };
+  const recoveredTransactions = await Promise.all([...senderTargets.values()].map(({ address: sender, hashes }) =>
+    fetchArcScanItems<BlockscoutTxItem>(
+      sender,
+      'transactions',
+      itemsCount,
+      (items) => !fetchAllPages || [...hashes].every((hash) =>
+        items.some((transaction) => String(transaction.hash ?? '').toLowerCase() === hash),
+      ),
+    ),
+  ));
 
-  const recoveredTransactions = await Promise.all(unmatchedTransferHashes.map(async (hash) => {
-    const transfer = transferMap.get(hash)?.[0];
-    if (!transfer?.from || !/^0x[a-fA-F0-9]{40}$/.test(transfer.from)) return null;
-    const matchingTransaction = (await fetchSenderTransactions(transfer.from))
-      .find((transaction) => String(transaction.hash ?? '').toLowerCase() === hash);
-    return matchingTransaction ? [hash, matchingTransaction] as const : null;
-  }));
-
-  for (const recoveredTransaction of recoveredTransactions) {
-    if (recoveredTransaction) transactionItemsByHash.set(...recoveredTransaction);
+  for (const transaction of recoveredTransactions.flat()) {
+    const hash = String(transaction.hash ?? '').toLowerCase();
+    if (senderTargets.size > 0 && unmatchedTransferHashes.includes(hash) && !transactionItemsByHash.has(hash)) {
+      transactionItemsByHash.set(hash, transaction);
+    }
   }
 
   return [...transactionItemsByHash.values()]
@@ -679,16 +772,17 @@ export function createArcProvider(): TransactionProvider {
   return {
     async fetchTransactions(query: TransactionQuery): Promise<ChainTransaction[]> {
       const { address, limit = 20 } = query;
+      const fetchAllPages = query.fetchAllPages ?? false;
       if (query.chainId !== arcTestnet.id) {
         throw new Error('Arc provider requires Arc Testnet');
       }
-      const cacheKey = `${address.toLowerCase()}:${limit}`;
+      const cacheKey = `${address.toLowerCase()}:${limit}:${fetchAllPages}`;
       const cached = arcTxRequestCache.get(cacheKey);
       if (cached) return cached;
 
       const request = (async (): Promise<ChainTransaction[]> => {
         await throttleTransactionRequests();
-        return fetchArcTransactions(address, limit);
+        return fetchArcTransactions(address, limit, fetchAllPages);
       })();
 
       arcTxRequestCache.set(cacheKey, request);

@@ -31,7 +31,7 @@ function readSettings(): OrbitSettings {
     return {
       density: parsed.density === 'compact' ? 'compact' : 'comfortable',
       refreshMode: parsed.refreshMode === 'manual' || parsed.refreshMode === 'live' ? parsed.refreshMode : 'balanced',
-      explorer: 'arcscan',
+      explorer: parsed.explorer === 'arcscan' ? parsed.explorer : DEFAULT_SETTINGS.explorer,
     };
   } catch {
     return DEFAULT_SETTINGS;

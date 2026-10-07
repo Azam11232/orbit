@@ -36,6 +36,11 @@ export function UnifiedBalancePage() {
     ?? (sourceNetworkMismatch ? `Switch wallet to ${source.name} before signing.` : null)
     ?? (gateway.depositState === 'confirmed' ? 'Gateway deposit confirmed. Circle balance availability follows Gateway finality.' : null)
     ?? (gateway.spendState === 'confirmed' ? 'Gateway spend confirmed on the destination chain.' : null);
+  const gatewayBalanceValue = gateway.isGatewayBalanceLoading
+    ? 'Loading...'
+    : gateway.isGatewayBalanceError || !gateway.hasGatewayBalanceData
+      ? 'Unavailable'
+      : `${amountLabel(gateway.totalGatewayBalance)} USDC`;
 
   if (!isConnected || !address) {
     return (
@@ -58,16 +63,16 @@ export function UnifiedBalancePage() {
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <Label>Total unified USDC</Label>
-            <h2 className="mt-2 text-3xl font-extrabold text-white">{gateway.isBalanceLoading ? 'Loading...' : `${amountLabel(gateway.totalGatewayBalance)} USDC`}</h2>
+            <h2 className="mt-2 text-3xl font-extrabold text-white">{gatewayBalanceValue}</h2>
             <p className="mt-1 text-xs text-slate-500">Circle Gateway available balance across verified supported networks.</p>
           </div>
           <Button variant="secondary" onClick={() => void gateway.refresh()} disabled={gateway.isBalanceLoading}><RefreshCw size={15} className={gateway.isBalanceLoading ? 'animate-spin' : ''} /> Refresh</Button>
         </div>
         {gateway.isBalanceError && <p className="mt-4 text-sm text-rose-200">Gateway balance unavailable. Retry when the Circle Gateway API is reachable.</p>}
         <div className="mt-6 grid gap-3 sm:grid-cols-3">
-          <BalanceTile label="Available" value={gateway.isBalanceLoading ? 'Loading...' : `${amountLabel(gateway.totalGatewayBalance)} USDC`} detail="Circle Gateway API" />
+          <BalanceTile label="Available" value={gatewayBalanceValue} detail="Circle Gateway API" />
           <BalanceTile label="Pending" value="Unavailable" detail="Not returned by the verified browser balance endpoint" />
-          <BalanceTile label="Gateway balance" value={gateway.isBalanceLoading ? 'Loading...' : `${amountLabel(gateway.totalGatewayBalance)} USDC`} detail="Not added to wallet balances" />
+          <BalanceTile label="Gateway balance" value={gatewayBalanceValue} detail="Not added to wallet balances" />
         </div>
       </Card>
 
@@ -76,7 +81,7 @@ export function UnifiedBalancePage() {
           <div className="flex items-center gap-3"><div className="rounded-xl bg-cyan-300/10 p-3 text-cyan-200"><ArrowDownToLine size={19} /></div><div><Label>Fund Gateway</Label><h2 className="mt-1 text-xl font-bold text-white">Deposit USDC</h2></div></div>
           <p className="mt-3 text-sm leading-6 text-slate-400">Move wallet USDC into your Circle Gateway balance. This is separate from CCTP Bridge.</p>
           <NetworkSelect label="Source network" value={sourceId} onChange={(value) => { setSourceId(value); setDepositAmount(''); }} options={gatewayNetworks} />
-          <div className="mt-4 flex items-center justify-between text-xs"><span className="text-slate-500">Wallet USDC on {source.name}</span><span className="font-mono text-slate-200">{gateway.sourceBalanceFormatted} USDC</span></div>
+          <div className="mt-4 flex items-center justify-between text-xs"><span className="text-slate-500">Wallet USDC on {source.name}</span><span className="font-mono text-slate-200">{gateway.sourceBalanceDisplay}</span></div>
           <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={depositAmount} onChange={(event) => setDepositAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-xl font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div>
           {sourceNetworkMismatch && <NetworkGuard network={source.name} onSwitch={() => switchChain({ chainId: sourceId })} disabled={isSwitching} />}
           <Button className="mt-4 w-full" onClick={() => void gateway.deposit(depositAmount)} disabled={gateway.busy || sourceNetworkMismatch || !depositAmount}>{gateway.depositState === 'approval' ? 'Approve USDC...' : gateway.depositState === 'deposit' ? 'Confirm Gateway deposit...' : gateway.depositState === 'pending' ? 'Deposit pending...' : gateway.depositState === 'confirmed' ? 'Deposit confirmed' : 'Review deposit'}</Button>
@@ -98,8 +103,8 @@ export function UnifiedBalancePage() {
 
       <Card className="p-5">
         <div className="flex items-center justify-between gap-3"><div><Label>Balance sources</Label><h2 className="mt-1 text-lg font-bold text-white">Wallet balances</h2></div><span className="text-xs text-slate-500">EVM USDC, 6 decimals</span></div>
-        <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{gateway.walletBalances.map(({ network, raw }) => <div key={network.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[.03] p-3"><span className="flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={network.id} className="h-5 w-5" /><span className="truncate">{network.name}</span></span><span className="font-mono text-xs text-slate-300">{amountLabel(raw)} USDC</span></div>)}</div>
-        <div className="mt-6 border-t border-white/10 pt-5"><div className="flex items-center justify-between gap-3"><div><Label>Circle Gateway balance</Label><h2 className="mt-1 text-lg font-bold text-white">Available by source</h2></div><span className="text-xs text-slate-500">Not wallet balances</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{gateway.gatewayBalances.map((balance) => { const network = gatewayNetworkForDomain(balance.domain); return network ? <div key={balance.domain} className="flex items-center justify-between rounded-xl border border-cyan-300/10 bg-cyan-300/[.04] p-3"><span className="flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={network.id} className="h-5 w-5" /><span className="truncate">{network.name}</span></span><span className="font-mono text-xs text-cyan-100">{balance.formatted} USDC</span></div> : null; })}</div>{!gateway.isBalanceLoading && gateway.gatewayBalances.length === 0 && <p className="mt-3 text-xs text-slate-500">No confirmed Gateway balance was returned for this wallet.</p>}</div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{gateway.walletBalances.map(({ network, raw, isLoading, isError }) => <div key={network.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[.03] p-3"><span className="flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={network.id} className="h-5 w-5" /><span className="truncate">{network.name}</span></span><span className="font-mono text-xs text-slate-300">{isLoading ? 'Loading...' : isError || raw === undefined ? 'Unavailable' : `${amountLabel(raw)} USDC`}</span></div>)}</div>
+        <div className="mt-6 border-t border-white/10 pt-5"><div className="flex items-center justify-between gap-3"><div><Label>Circle Gateway balance</Label><h2 className="mt-1 text-lg font-bold text-white">Available by source</h2></div><span className="text-xs text-slate-500">Not wallet balances</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{gateway.gatewayBalances.map((balance) => { const network = gatewayNetworkForDomain(balance.domain); return network ? <div key={balance.domain} className="flex items-center justify-between rounded-xl border border-cyan-300/10 bg-cyan-300/[.04] p-3"><span className="flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={network.id} className="h-5 w-5" /><span className="truncate">{network.name}</span></span><span className="font-mono text-xs text-cyan-100">{balance.formatted} USDC</span></div> : null; })}</div>{!gateway.isGatewayBalanceLoading && !gateway.isGatewayBalanceError && !gateway.hasGatewayBalanceData && <p className="mt-3 text-xs text-slate-500">No confirmed Gateway balance was returned for this wallet.</p>}</div>
       </Card>
       {operationMessage && <p className={`text-xs ${gateway.error ? 'text-rose-300' : 'text-cyan-200'}`}>{operationMessage}</p>}
     </div>

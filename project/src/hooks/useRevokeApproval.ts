@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi';
 import { arcTestnet } from 'wagmi/chains';
 import { erc20Abi, type Hash } from 'viem';
-import type { TokenApproval } from '../services/security';
+import type { ApprovalScanResult, TokenApproval } from '../services/security';
 
 export type RevokeStatus = 'idle' | 'pending' | 'success' | 'error';
 
@@ -58,6 +58,9 @@ export function useRevokeApproval(): UseRevokeApprovalResult {
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
       if (receipt.status !== 'success') throw new Error('Approval revoke transaction reverted');
       setStatus('success');
+      queryClient.setQueryData<ApprovalScanResult>(['approvals', address, arcTestnet.id], (current) => current
+        ? { ...current, approvals: current.approvals.filter((entry) => entry.id !== approval.id) }
+        : current);
       await queryClient.invalidateQueries({ queryKey: ['approvals', address, arcTestnet.id] });
     } catch (caughtError) {
       setStatus('error');
