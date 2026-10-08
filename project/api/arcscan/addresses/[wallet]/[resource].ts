@@ -35,6 +35,10 @@ function isValidPaginationQuery(searchParams: URLSearchParams, resource: string)
   let valid = true;
 
   searchParams.forEach((value, key) => {
+    if (key === 'wallet' || key === 'resource') {
+      return;
+    }
+
     if (
       !allowedParams.has(key) ||
       seenParams.has(key) ||
@@ -70,30 +74,14 @@ export default async function handler(request: VercelRequest, response: VercelRe
       : request.query?.resource === undefined
         ? pathResource
         : undefined;
-  const sendInvalidRequestDiagnostic = (
-    validationFailure: 'path/resource validation' | 'pagination validation',
-  ): void => {
-    response.status(400).json({
-      validationFailure,
-      requestUrl: request.url ?? '/',
-      method: request.method ?? null,
-      queryWallet: request.query?.wallet ?? null,
-      queryResource: request.query?.resource ?? null,
-      pathName: requestUrl.pathname,
-      pathParts,
-      parsedPathAddress: pathAddress ?? null,
-      parsedPathResource: pathResource ?? null,
-      searchParams: Array.from(requestUrl.searchParams.entries()),
-    });
-  };
 
   if (!address || !WALLET_ADDRESS_PATTERN.test(address) || !resource || !ALLOWED_RESOURCES.has(resource)) {
-    sendInvalidRequestDiagnostic('path/resource validation');
+    response.status(400).json({ error: 'Invalid ArcScan transaction request' });
     return;
   }
 
   if (!isValidPaginationQuery(requestUrl.searchParams, resource)) {
-    sendInvalidRequestDiagnostic('pagination validation');
+    response.status(400).json({ error: 'Invalid ArcScan transaction request' });
     return;
   }
 
