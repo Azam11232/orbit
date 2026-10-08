@@ -15,6 +15,10 @@ const PAGE_PARAM_PATTERNS: Record<string, RegExp> = {
 interface VercelRequest {
   method?: string;
   url?: string;
+  query?: {
+    wallet?: string | string[];
+    resource?: string | string[];
+  };
 }
 
 interface VercelResponse {
@@ -52,16 +56,44 @@ export default async function handler(request: VercelRequest, response: VercelRe
 
   const requestUrl = new URL(request.url ?? '/', 'https://orbit.local');
   const pathParts = requestUrl.pathname.split('/').filter(Boolean);
-  const address = pathParts[pathParts.length - 2];
-  const resource = pathParts[pathParts.length - 1];
+  const pathAddress = pathParts[pathParts.length - 2];
+  const pathResource = pathParts[pathParts.length - 1];
+  const address =
+    typeof request.query?.wallet === 'string'
+      ? request.query.wallet
+      : request.query?.wallet === undefined
+        ? pathAddress
+        : undefined;
+  const resource =
+    typeof request.query?.resource === 'string'
+      ? request.query.resource
+      : request.query?.resource === undefined
+        ? pathResource
+        : undefined;
+  const sendInvalidRequestDiagnostic = (
+    validationFailure: 'path/resource validation' | 'pagination validation',
+  ): void => {
+    response.status(400).json({
+      validationFailure,
+      requestUrl: request.url ?? '/',
+      method: request.method ?? null,
+      queryWallet: request.query?.wallet ?? null,
+      queryResource: request.query?.resource ?? null,
+      pathName: requestUrl.pathname,
+      pathParts,
+      parsedPathAddress: pathAddress ?? null,
+      parsedPathResource: pathResource ?? null,
+      searchParams: Array.from(requestUrl.searchParams.entries()),
+    });
+  };
 
   if (!address || !WALLET_ADDRESS_PATTERN.test(address) || !resource || !ALLOWED_RESOURCES.has(resource)) {
-    response.status(400).json({ error: 'Invalid ArcScan transaction request' });
+    sendInvalidRequestDiagnostic('path/resource validation');
     return;
   }
 
   if (!isValidPaginationQuery(requestUrl.searchParams, resource)) {
-    response.status(400).json({ error: 'Invalid ArcScan transaction request' });
+    sendInvalidRequestDiagnostic('pagination validation');
     return;
   }
 
