@@ -86,7 +86,11 @@ export default async function handler(request: VercelRequest, response: VercelRe
   }
 
   const upstreamParams = new URLSearchParams();
-  requestUrl.searchParams.forEach((value, key) => upstreamParams.set(key, value));
+  requestUrl.searchParams.forEach((value, key) => {
+    if (key !== 'wallet' && key !== 'resource') {
+      upstreamParams.set(key, value);
+    }
+  });
   const upstreamUrl = `${ARC_SCAN_API_BASE_URL}/addresses/${address}/${resource}?${upstreamParams}`;
 
   try {
