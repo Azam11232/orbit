@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   useAccount,
   useBalance,
@@ -626,7 +626,7 @@ function OrbitalVisual() {
           <div className="orbit-core-shell__ring orbit-core-shell__ring-b" />
           <div className="orbit-core-shell__ring orbit-core-shell__ring-c" />
           <div className="orbit-core-mark">
-            <OrbitBrand variant="light" className="h-20 w-auto max-w-[10rem] drop-shadow-[0_0_22px_rgba(96,165,250,0.45)]" />
+            <OrbitBrand variant="light" className="h-20 w-auto max-w-[10rem] drop-shadow-[0_0_22px_rgba(16,61,50,0.18)]" />
           </div>
         </div>
       </div>
@@ -1136,7 +1136,35 @@ export function NetworkIcon({ chainId, className = "" }: { chainId: number; clas
   return <ChainLogo chainId={chainId} className={`h-4 w-4 ${className}`} />;
 }
 
+function LiveBalanceValue({ children, valueKey }: { children: ReactNode; valueKey: number | string }) {
+  const reduceMotion = useReducedMotion();
+  const previousValue = useRef(valueKey);
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  useEffect(() => {
+    if (previousValue.current === valueKey) {
+      return;
+    }
+
+    previousValue.current = valueKey;
+    if (reduceMotion) {
+      return;
+    }
+
+    setIsUpdating(true);
+    const timeout = window.setTimeout(() => setIsUpdating(false), 780);
+    return () => window.clearTimeout(timeout);
+  }, [reduceMotion, valueKey]);
+
+  return (
+    <span className={`orbit-live-balance-value${isUpdating ? " orbit-live-balance-value--updating" : ""}`}>
+      {children}
+    </span>
+  );
+}
+
 function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
+  const reduceMotion = useReducedMotion();
   const { address, chainId } = useAccount();
   const historyStorageKey = address
     ? `orbit-portfolio-balance-history:${chainId ?? 'unknown'}:${address.toLowerCase()}`
@@ -1251,7 +1279,7 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
 
   if (portfolio.hasUnavailablePrices) {
     return (
-      <div className="flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
+      <div className="orbit-chart-empty flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
         Historical market data unavailable. Live portfolio value remains available.
       </div>
     );
@@ -1260,7 +1288,7 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
   const currentPortfolioValue = Number.isFinite(portfolio.totalValueUsd) ? portfolio.totalValueUsd : 0;
   if (!Number.isFinite(currentPortfolioValue) || currentPortfolioValue <= 0) {
     return (
-      <div className="flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
+      <div className="orbit-chart-empty flex min-h-[180px] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-center text-sm text-slate-400">
         No wallet balance available for a portfolio chart.
       </div>
     );
@@ -1326,23 +1354,28 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
 
   return (
     <div className="space-y-4 pt-2">
-      <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-slate-400">
+      <div className="orbit-chart-label-row flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-slate-400">
         <span>Portfolio value</span>
         <span>{`$${currentPortfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</span>
       </div>
 
-      <div className="orbit-chart-surface relative overflow-hidden rounded-2xl border border-slate-800 p-3">
-        <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(to_top,rgba(148,163,184,0.08)_1px,transparent_1px)] [background-size:28px_28px]" />
+      <motion.div
+        className="orbit-chart-surface relative overflow-hidden rounded-2xl border border-slate-800 p-3"
+        initial={reduceMotion ? false : { opacity: 0, y: 5 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.38, ease: "easeOut" }}
+      >
+        <div className="orbit-chart-grid-wash absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(to_top,rgba(148,163,184,0.08)_1px,transparent_1px)] [background-size:28px_28px]" />
 
         <div className="relative z-10">
-          <div className="mb-2 flex items-center justify-between text-[10px] text-slate-400">
+          <div className="orbit-chart-timestamp mb-2 flex items-center justify-between text-[10px] text-slate-400">
             <span>{points.length > 1 ? 'Balance history' : 'Current balance'}</span>
             <span>{currentLabel} · {currentTime}</span>
           </div>
 
           <svg
             viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-            className="h-64 w-full"
+            className="orbit-chart-plot h-64 w-full"
             role="img"
             aria-label="Wallet balance chart"
             onMouseMove={handleChartMouseMove}
@@ -1362,8 +1395,26 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
 
             {points.length > 1 && (
               <>
-                <path className="orbit-chart-area" d={areaPath} fill="url(#orbit-portfolio-area)" />
-                <path className="orbit-chart-line" d={linePath} fill="none" stroke="#a4c3aa" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                <motion.path
+                  className="orbit-chart-area"
+                  d={areaPath}
+                  fill="url(#orbit-portfolio-area)"
+                  initial={reduceMotion ? false : { opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.5, ease: "easeOut" }}
+                />
+                <motion.path
+                  className="orbit-chart-line"
+                  d={linePath}
+                  fill="none"
+                  stroke="#a4c3aa"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  initial={reduceMotion ? false : { pathLength: 0 }}
+                  animate={{ pathLength: 1 }}
+                  transition={{ duration: 0.75, ease: "easeOut" }}
+                />
               </>
             )}
 
@@ -1382,7 +1433,14 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
             ))}
 
             {latestPoint && (
-              <text className="orbit-chart-now-label" x={latestPoint.x} y={Math.max(topPad + 12, latestPoint.y - 16)} textAnchor="middle">Now</text>
+              <text
+                className="orbit-chart-now-label"
+                x={latestPoint.x > svgWidth * 0.75 ? latestPoint.x - 7 : latestPoint.x}
+                y={Math.max(topPad + 12, latestPoint.y - 16)}
+                textAnchor={latestPoint.x > svgWidth * 0.75 ? "end" : "middle"}
+              >
+                Now
+              </text>
             )}
           </svg>
 
@@ -1406,11 +1464,12 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
             {points.length > 1 ? 'Real wallet snapshots collected from the live portfolio value.' : 'Collecting balance history...'}
           </p>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
 function StatCards() {
+  const reduceMotion = useReducedMotion();
   const { address, isConnected, chainId } = useAccount();
   const portfolio = usePortfolio();
   const securityAssessed = isConnected && Boolean(address);
@@ -1487,7 +1546,13 @@ function StatCards() {
             ) : (
               <>
                 <p className="orbit-balance-amount mt-5 text-3xl font-extrabold tracking-[-0.06em]">
-                  <span className="orbit-balance-number">{displayAsset?.isError ? "Unavailable" : displayAsset?.formatted ?? "0"}</span>
+                  <span className="orbit-balance-number">
+                    {displayAsset?.isError
+                      ? "Unavailable"
+                      : displayAsset
+                        ? <LiveBalanceValue valueKey={`${displayAsset.symbol}:${displayAsset.raw.toString()}`}>{displayAsset.formatted ?? "0"}</LiveBalanceValue>
+                        : "0"}
+                  </span>
                   <span className="orbit-balance-currency text-xl text-slate-500">{isArcTestnet ? "USDC" : "ETH"}</span>
                 </p>
                 <p className="orbit-balance-live mt-2 text-xs font-semibold text-cyan-300">
@@ -1603,19 +1668,30 @@ function StatCards() {
         </div>
         <div className="orbit-security-system">
           <div className="orbit-security-integrity" aria-hidden="true">
-            <span className="orbit-security-integrity-inner">
-              <ShieldCheck className="orbit-security-center-shield" size={19} />
+            <svg className="orbit-security-score-ring" viewBox="0 0 104 104">
+              <circle className="orbit-security-score-ring__track" cx="52" cy="52" r="45" pathLength="100" />
+              <motion.circle
+                className="orbit-security-score-ring__progress"
+                cx="52"
+                cy="52"
+                r="45"
+                pathLength="100"
+                initial={{ strokeDashoffset: 100 }}
+                animate={{ strokeDashoffset: securityAssessed ? 100 - report.score : 100 }}
+                transition={{ duration: reduceMotion ? 0 : 0.9, ease: "easeOut" }}
+                transform="rotate(-90 52 52)"
+              />
+            </svg>
+            <span className="orbit-security-score-readout">
+              {securityAssessed ? (
+                <>
+                  <strong className="orbit-security-score-value">{report.score}</strong>
+                  <span className="orbit-security-score-denominator">/ 100</span>
+                </>
+              ) : (
+                <strong className="orbit-security-score-value">—</strong>
+              )}
             </span>
-          </div>
-          <div className="orbit-security-score-readout">
-            {securityAssessed ? (
-              <>
-                <strong className="orbit-security-score-value">{report.score}</strong>
-                <span className="orbit-security-score-denominator">/ 100</span>
-              </>
-            ) : (
-              <strong className="orbit-security-score-value">Not assessed</strong>
-            )}
           </div>
           <span className="orbit-security-system-divider" aria-hidden="true" />
           <div className="orbit-security-status">
@@ -1634,6 +1710,7 @@ function StatCards() {
   );
 }
 function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
+  const reduceMotion = useReducedMotion();
   const items = [
     ["Send", "Transfer to any wallet", Send, "send"],
     ["Receive", "Fund your wallet", ArrowDownLeft, "receive"],
@@ -1644,7 +1721,7 @@ function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
   return (
     <motion.div
       className="orbit-actions"
-      initial={{ opacity: 0, y: 12 }}
+      initial={reduceMotion ? false : { opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.28, ease: "easeOut" }}
     >
@@ -1657,13 +1734,14 @@ function QuickActions({ setPage }: { setPage: (p: Page) => void }) {
       <div className="orbit-action-grid grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         {items.map(([name, desc, Icon, id], index) => (
           <motion.button
-            initial={{ opacity: 0, y: 8 }}
+            initial={reduceMotion ? false : { opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.04, duration: 0.18, ease: "easeOut" }}
-            whileHover={{ y: -2, scale: 1.005 }}
+            whileHover={reduceMotion ? undefined : { y: -2 }}
+            whileTap={reduceMotion ? undefined : { scale: 0.985 }}
             onClick={() => setPage(id as Page)}
             key={name as string}
-            className="orbit-quick-action group rounded-2xl border border-slate-700/80 bg-slate-900/80 p-4 text-left shadow-[0_18px_40px_rgba(2,6,23,0.22)] transition-all duration-200 hover:border-sky-400/40 hover:bg-slate-900"
+            className={`orbit-quick-action orbit-quick-action--${id as string} group rounded-2xl border border-slate-700/80 bg-slate-900/80 p-4 text-left shadow-[0_18px_40px_rgba(2,6,23,0.22)] transition-all duration-200 hover:border-sky-400/40 hover:bg-slate-900`}
           >
             <div className="orbit-quick-action__icon mb-7 flex h-11 w-11 items-center justify-center rounded-2xl border border-sky-400/20 bg-gradient-to-br from-sky-500/12 to-violet-500/10 text-slate-100 shadow-[0_0_18px_rgba(125,211,252,0.12)] transition duration-200 group-hover:-translate-y-0.5 group-hover:border-sky-300/40 group-hover:bg-sky-500/10 group-hover:text-sky-200">
               <Icon size={17} />
@@ -1834,6 +1912,7 @@ function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
   );
 }
 function Home({ setPage }: { setPage: (p: Page) => void }) {
+  const reduceMotion = useReducedMotion();
   const portfolio = usePortfolio();
   const { address, isConnected, chainId } = useAccount();
   const approvalsQuery = useApprovals();
@@ -1855,6 +1934,12 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const networkLabel = supportedChains.find((item) => item.id === chainId)?.name ?? "Current network";
   const hasRealPortfolioValue = Number.isFinite(portfolio.totalValueUsd) && portfolio.totalValueUsd > 0;
+  const shouldAnimatePortfolioValue = !portfolio.isDisconnected
+    && !portfolio.isWrongNetwork
+    && !portfolio.isLoading
+    && !portfolio.isError
+    && !portfolio.hasUnavailablePrices
+    && Number.isFinite(portfolio.totalValueUsd);
   const value = portfolio.isDisconnected
     ? "Connect wallet"
     : portfolio.isWrongNetwork
@@ -1892,7 +1977,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
   return (
     <div className="orbit-home">
       <motion.div
-        initial={{ opacity: 0, y: 10 }}
+        initial={reduceMotion ? false : { opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, ease: 'easeOut' }}
         className="orbit-home-hero page-shell relative overflow-hidden rounded-[28px] p-6 sm:p-8 lg:p-10"
@@ -1903,9 +1988,9 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           <div className="absolute right-10 top-20 h-56 w-56 rounded-full border border-violet-400/20 bg-violet-500/10 blur-3xl" />
           <div className="absolute bottom-8 left-1/2 h-72 w-72 -translate-x-1/2 rounded-full border border-cyan-300/10" />
         </div>
-        <div className="relative z-10 flex flex-wrap items-end justify-between gap-5">
+        <div className="orbit-home-hero__top relative z-10 flex flex-wrap items-end justify-between gap-5">
           <motion.div
-            initial={{ opacity: 0, y: 12 }}
+            initial={reduceMotion ? false : { opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.45, ease: 'easeOut' }}
           >
@@ -1924,42 +2009,50 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           </div>
         </div>
 
-        <div className="relative z-10 mt-8 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
+        <div className="orbit-home-hero__body relative z-10 mt-8 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
           <div className="orbit-primary-metric rounded-3xl border border-slate-700/80 bg-slate-900/70 p-6 shadow-[0_22px_50px_rgba(2,6,23,0.45)] backdrop-blur-sm">
             <div className="orbit-value-field" aria-hidden="true">
               <svg viewBox="0 0 260 210" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <g className="orbit-value-field__grid">
+                  <path d="M18 40H242M18 76H242M18 112H242M18 148H242M42 22V184M78 22V184M114 22V184M150 22V184M186 22V184M222 22V184" />
+                </g>
                 <g className="orbit-value-field__fixed">
-                  <circle cx="130" cy="105" r="82" stroke="rgba(195,214,198,.22)" />
-                  <circle cx="130" cy="105" r="59" stroke="rgba(155,186,163,.18)" stroke-dasharray="2 7" />
-                  <ellipse cx="130" cy="105" rx="111" ry="48" transform="rotate(-28 130 105)" stroke="rgba(139,159,197,.24)" />
-                  <path d="M22 127C58 88 92 77 123 98C153 118 181 133 237 76" stroke="rgba(169,193,174,.28)" />
-                  <circle cx="130" cy="105" r="30" fill="rgba(170,196,175,.035)" stroke="rgba(184,211,190,.28)" />
-                  <circle cx="130" cy="105" r="5" fill="rgba(202,224,205,.82)" />
-                  <circle cx="130" cy="105" r="10" stroke="rgba(167,202,174,.32)" />
-                  <circle cx="42" cy="125" r="3" fill="rgba(153,187,162,.8)" />
-                  <circle cx="225" cy="82" r="3.5" fill="rgba(166,183,218,.78)" />
-                  <circle cx="174" cy="40" r="2.5" fill="rgba(212,192,155,.76)" />
-                  <circle cx="83" cy="172" r="2" fill="rgba(175,200,181,.68)" />
+                  <ellipse cx="130" cy="105" rx="111" ry="48" transform="rotate(-28 130 105)" />
+                  <circle cx="130" cy="105" r="82" />
+                  <circle cx="130" cy="105" r="59" strokeDasharray="2 7" />
+                  <circle cx="130" cy="105" r="43" className="orbit-value-field__coin" />
+                  <circle cx="130" cy="105" r="35" className="orbit-value-field__coin-inner" />
+                  <text x="130" y="119" textAnchor="middle" className="orbit-value-field__coin-mark">$</text>
+                  <circle cx="42" cy="125" r="3" className="orbit-value-field__point" />
+                  <circle cx="225" cy="82" r="3.5" className="orbit-value-field__point" />
+                  <circle cx="174" cy="40" r="2.5" className="orbit-value-field__point" />
+                  <circle cx="83" cy="172" r="2" className="orbit-value-field__point" />
                 </g>
                 <g className="orbit-value-field__moving">
-                  <circle cx="130" cy="105" r="96" stroke="rgba(146,184,156,.32)" stroke-dasharray="32 145 18 410" />
-                  <circle cx="130" cy="9" r="2.5" fill="rgba(194,222,198,.9)" />
+                  <circle cx="130" cy="105" r="96" strokeDasharray="32 145 18 410" />
+                  <circle cx="130" cy="9" r="2.5" className="orbit-value-field__point" />
                 </g>
                 <g className="orbit-value-field__counter">
-                  <circle cx="130" cy="105" r="69" stroke="rgba(139,157,204,.2)" stroke-dasharray="1 10" />
-                  <circle cx="62" cy="93" r="2.2" fill="rgba(167,181,224,.82)" />
+                  <circle cx="130" cy="105" r="69" strokeDasharray="1 10" />
+                  <circle cx="62" cy="93" r="2.2" className="orbit-value-field__point" />
                 </g>
-                <path className="orbit-value-field__light" d="M28 139C66 105 99 91 130 105C160 119 191 131 232 74" pathLength="1" />
               </svg>
             </div>
-            <div className="flex items-center justify-between gap-3">
+            <div className="orbit-primary-metric__header flex items-center justify-between gap-3">
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Portfolio value</p>
-              <span className="orbit-live-badge"><Pill color={portfolio.isDisconnected ? "purple" : "green"}>{lastSync}</Pill></span>
+              {!portfolio.isDisconnected && (
+                <span className="orbit-live-badge"><Pill color="green">{lastSync}</Pill></span>
+              )}
             </div>
-            <div className="mt-4 flex items-end justify-between gap-4">
-              <div>
-                <p className="orbit-primary-value text-4xl font-extrabold tracking-[-0.08em] text-white md:text-5xl">{value}</p>
+            <div className="orbit-primary-metric__values mt-4">
+              <div className="orbit-primary-metric__copy">
+                <p className="orbit-primary-value text-4xl font-extrabold tracking-[-0.08em] text-white md:text-5xl">
+                  {shouldAnimatePortfolioValue ? <LiveBalanceValue valueKey={portfolio.totalValueUsd}>{value}</LiveBalanceValue> : value}
+                </p>
                 <p className="mt-2 text-sm text-slate-300">{valueDetail}</p>
+                {portfolio.isDisconnected && (
+                  <WalletButton className="orbit-home-connect" />
+                )}
               </div>
             </div>
           </div>
@@ -1983,6 +2076,20 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                 )}
               </div>
               <div className="orbit-security-mark flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 ring-1 ring-white/10">
+                <svg className="orbit-security-score-ring" viewBox="0 0 104 104" aria-hidden="true">
+                  <circle className="orbit-security-score-ring__track" cx="52" cy="52" r="45" pathLength="100" />
+                  <motion.circle
+                    className="orbit-security-score-ring__progress"
+                    cx="52"
+                    cy="52"
+                    r="45"
+                    pathLength="100"
+                    initial={{ strokeDashoffset: 100 }}
+                    animate={{ strokeDashoffset: securityAssessed ? 100 - security.score : 100 }}
+                    transition={{ duration: reduceMotion ? 0 : 0.9, ease: "easeOut" }}
+                    transform="rotate(-90 52 52)"
+                  />
+                </svg>
                 <ShieldCheck size={20} className="text-sky-300" />
               </div>
             </div>
@@ -2003,9 +2110,11 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <Label>Portfolio snapshot</Label>
-                <div className="mt-3 flex items-baseline gap-3">
-                  <h2 className="text-2xl font-extrabold tracking-[-0.06em] md:text-3xl">{value}</h2>
-                  <span className="text-xs font-medium text-slate-500">
+                <div className="orbit-chart-value-row mt-3 flex items-baseline gap-3">
+                  <h2 className="orbit-chart-current-value text-2xl font-extrabold tracking-[-0.06em] md:text-3xl">
+                    {shouldAnimatePortfolioValue ? <LiveBalanceValue valueKey={portfolio.totalValueUsd}>{value}</LiveBalanceValue> : value}
+                  </h2>
+                  <span className="orbit-chart-value-context text-xs font-medium text-slate-500">
                     {portfolio.isDisconnected
                       ? 'Awaiting wallet'
                       : portfolio.isWrongNetwork
@@ -2016,7 +2125,7 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
                   </span>
                 </div>
               </div>
-              <div className="flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-900/80 p-1.5">
+              <div className="orbit-chart-status flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-900/80 p-1.5">
                 <span className={`rounded-md px-2 py-1 font-mono text-[9px] font-bold tracking-[0.16em] ${portfolio.isDisconnected ? 'bg-slate-500/10 text-slate-400' : 'bg-cyan-300/15 text-cyan-200'}`}>
                   {portfolio.isDisconnected ? 'WALLET NOT CONNECTED' : 'LIVE'}
                 </span>
@@ -2045,24 +2154,76 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
       </div>
 
       <div className="orbit-signal-grid grid gap-4 md:grid-cols-3">
-        {[{ label: 'Security overview', value: securityAssessed ? security.score : 'Not assessed', meta: securityAssessed ? `${approvalCount} alert${approvalCount === 1 ? '' : 's'} need review` : 'Connect a wallet to assess security', tone: securityAssessed ? security.score >= 85 ? 'green' : security.score >= 60 ? 'amber' : 'red' : 'purple', badge: securityAssessed ? security.severity : 'NOT ASSESSED' }, { label: 'Opportunity feed', value: discover.data?.opportunities.length ?? 0, meta: discover.isLoading ? 'Refreshing public market data...' : discover.isError ? 'Discover feed unavailable' : 'Public yield opportunities loaded', tone: 'cyan', badge: 'LIVE' }, { label: 'Watchlist', value: watchlist.items.length, meta: watchlist.items.length > 0 ? 'Saved and ready for quick review' : 'No items saved yet', tone: 'purple', badge: 'TRACKED' }].map((tile, index) => (
-          <motion.div key={tile.label} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, delay: 0.08 + index * 0.04 }}>
-            <Card className="orbit-signal-card p-5">
-              <div className="flex items-start justify-between gap-3">
+        {[
+          {
+            label: 'Security overview',
+            value: securityAssessed ? security.score : 'Not assessed',
+            metricLabel: 'wallet score',
+            meta: securityAssessed ? `${approvalCount} alert${approvalCount === 1 ? '' : 's'} need review` : 'Connect a wallet to assess security',
+            tone: securityAssessed ? security.score >= 85 ? 'green' : security.score >= 60 ? 'amber' : 'red' : 'purple',
+            badge: securityAssessed ? security.severity : 'NOT ASSESSED',
+            preview: null as string[] | null,
+            emptyMessage: null as string | null,
+          },
+          {
+            label: 'Opportunity feed',
+            value: discover.data?.opportunities.length ?? 0,
+            metricLabel: 'live Arc opportunities',
+            meta: discover.isLoading ? 'Refreshing public market data...' : discover.isError ? 'Discover feed unavailable' : 'Public yield opportunities loaded',
+            tone: 'cyan',
+            badge: 'LIVE',
+            preview: discover.data?.opportunities.slice(0, 2).map((opportunity) => `${opportunity.name} · ${opportunity.symbol}`) ?? [],
+            emptyMessage: discover.isLoading ? 'Loading live opportunities' : discover.isError ? 'Live opportunities unavailable' : 'No eligible opportunities currently available',
+          },
+          {
+            label: 'Watchlist',
+            value: watchlist.items.length,
+            metricLabel: 'tracked items',
+            meta: watchlist.items.length > 0 ? 'Saved and ready for quick review' : 'No items saved yet',
+            tone: 'purple',
+            badge: 'TRACKED',
+            preview: watchlist.items.slice(0, 2).map((item) => {
+              if (item.kind === 'asset') {
+                return `${item.id === ARC_USDC.symbol ? ARC_USDC.name : item.id} · ${item.id}`;
+              }
+              const opportunity = discover.data?.opportunities.find((candidate) => candidate.id === item.id);
+              return opportunity ? `${opportunity.name} · ${opportunity.symbol}` : item.id;
+            }),
+            emptyMessage: watchlist.items.length > 0 ? null : 'Add assets or protocols to track them here',
+          },
+        ].map((tile, index) => (
+          <motion.div
+            key={tile.label}
+            initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.28, delay: reduceMotion ? 0 : 0.06 + index * 0.05, ease: 'easeOut' }}
+          >
+            <Card className={`orbit-signal-card orbit-signal-card--${tile.label === 'Security overview' ? 'security' : tile.label === 'Opportunity feed' ? 'opportunities' : 'watchlist'} p-5`}>
+              <div className="orbit-signal-card__header flex items-start justify-between gap-3">
                 <div>
                   <Label>{tile.label}</Label>
                   <div className="mt-3">
                     <p className="text-2xl font-extrabold tracking-[-0.06em]">{tile.value}</p>
-                    <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{tile.label === 'Opportunity feed' ? 'live Arc opportunities' : tile.label === 'Watchlist' ? 'tracked items' : 'wallet score'}</p>
+                    <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{tile.metricLabel}</p>
                   </div>
                 </div>
                 <Pill color={tile.tone as 'green' | 'amber' | 'red' | 'cyan' | 'purple'}>{tile.badge}</Pill>
               </div>
-              <p className="mt-4 text-xs text-slate-400">{tile.meta}</p>
+              {tile.preview && tile.preview.length > 0 ? (
+                <ul className="orbit-signal-card__preview" aria-label={`${tile.label} items`}>
+                  {tile.preview.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              ) : tile.emptyMessage ? (
+                <p className="orbit-signal-card__empty">{tile.emptyMessage}</p>
+              ) : null}
+              {(tile.label === 'Security overview' || (tile.preview?.length ?? 0) > 0) && (
+                <p className="orbit-signal-card__meta">{tile.meta}</p>
+              )}
             </Card>
           </motion.div>
         ))}
       </div>
+
     </div>
   );
 }
@@ -3464,7 +3625,7 @@ function BridgeNetworkPicker({
             setOpen((current) => !current);
           }
         }}
-        className="orbit-bridge-network-picker__trigger flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#101725] px-3 py-2.5 text-left text-sm font-bold text-white outline-none transition hover:border-cyan-300/30 focus-visible:border-cyan-300/50 focus-visible:ring-2 focus-visible:ring-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+        className="orbit-bridge-network-picker__trigger flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#101725] px-3 py-2.5 text-left text-sm font-bold text-white outline-none transition hover:border-cyan-300/30 disabled:cursor-not-allowed disabled:opacity-60"
       >
         <span className="flex min-w-0 items-center gap-2">
           <ChainLogo chainId={selected?.id ?? value} className="h-5 w-5 shrink-0" />
