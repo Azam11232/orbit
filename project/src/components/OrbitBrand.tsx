@@ -9,7 +9,7 @@ export function OrbitBrand({
   compact = false,
   variant = "light",
 }: OrbitBrandProps) {
-  const textColor = variant === "dark" ? "#020817" : "#F8FAFC";
+  const textColor = variant === "dark" ? "#080B0A" : "#F3F0E8";
 
   if (compact) {
     return (
@@ -29,9 +29,9 @@ export function OrbitBrand({
             y2="56"
             gradientUnits="userSpaceOnUse"
           >
-            <stop offset="0" stopColor="#8B5CF6" />
-            <stop offset="0.5" stopColor="#6366F1" />
-            <stop offset="1" stopColor="#22D3EE" />
+            <stop offset="0" stopColor="#103D32" />
+            <stop offset="0.5" stopColor="#C6A76A" />
+            <stop offset="1" stopColor="#103D32" />
           </linearGradient>
         </defs>
 
@@ -72,7 +72,7 @@ export function OrbitBrand({
             cx="15"
             cy="42"
             r="4"
-            fill="#22D3EE"
+            fill="#C6A76A"
             stroke="none"
           />
         </g>
@@ -97,10 +97,10 @@ export function OrbitBrand({
           y2="72"
           gradientUnits="userSpaceOnUse"
         >
-          <stop offset="0" stopColor="#A855F7" />
-          <stop offset="0.42" stopColor="#8B5CF6" />
-          <stop offset="0.72" stopColor="#6366F1" />
-          <stop offset="1" stopColor="#22D3EE" />
+          <stop offset="0" stopColor="#103D32" />
+          <stop offset="0.42" stopColor="#C6A76A" />
+          <stop offset="0.72" stopColor="#C6A76A" />
+          <stop offset="1" stopColor="#103D32" />
         </linearGradient>
       </defs>
 
@@ -132,7 +132,7 @@ export function OrbitBrand({
             cx="52"
             cy="21"
             r="4.5"
-            fill="#A855F7"
+            fill="#C6A76A"
             stroke="none"
           />
 
@@ -140,7 +140,7 @@ export function OrbitBrand({
             cx="12"
             cy="43"
             r="4.5"
-            fill="#22D3EE"
+            fill="#103D32"
             stroke="none"
           />
         </g>
