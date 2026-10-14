@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useAccount, usePublicClient } from 'wagmi';
-import { arcTestnet } from 'wagmi/chains';
-import { createApprovalProvider, type ApprovalScanResult } from '../services/security';
+import { ARC_TESTNET } from '../data/networks';
+import { createApprovalProvider, isSameSecurityContext, type ApprovalScanResult } from '../services/security';
 
 const providerCache = new WeakMap<object, ReturnType<typeof createApprovalProvider>>();
 
@@ -22,22 +22,29 @@ export interface UseApprovalsResult {
   refetch: () => void;
 }
 
-export function useApprovals(): UseApprovalsResult {
-  const { address } = useAccount();
-  const publicClient = usePublicClient({ chainId: arcTestnet.id });
+export function useApprovals(scanOnMount = false): UseApprovalsResult {
+  const { address, chainId, isConnected } = useAccount();
+  const publicClient = usePublicClient({ chainId: ARC_TESTNET.id });
   const query = useQuery({
-    queryKey: ['approvals', address, arcTestnet.id],
+    queryKey: ['approvals', address?.toLowerCase(), chainId],
     queryFn: () => {
-      if (!address || !publicClient) throw new Error('Arc Testnet RPC is unavailable');
+      if (!address || chainId !== ARC_TESTNET.id || !publicClient) {
+        throw new Error('Connect a wallet on Arc Testnet to scan approvals');
+      }
       return getProvider(publicClient).scan(address);
     },
-    enabled: false,
-    staleTime: 60_000,
+    enabled: scanOnMount && isConnected && Boolean(address) && chainId === ARC_TESTNET.id,
+    staleTime: 0,
     refetchOnWindowFocus: false,
+    retry: false,
   });
+  const data = !query.isFetching && !query.isError && query.data && isSameSecurityContext(
+    { address: query.data.walletAddress, chainId: query.data.chainId },
+    { address, chainId },
+  ) ? query.data : undefined;
 
   return {
-    data: query.data,
+    data,
     isLoading: query.isLoading,
     isFetching: query.isFetching,
     isError: query.isError,

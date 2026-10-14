@@ -26,6 +26,14 @@ export interface BridgeQuoteRequest {
   slippage: number;
 }
 
+export interface BridgeGasEstimate {
+  step: string;
+  chainId: number;
+  tokenSymbol: string;
+  decimals: number;
+  amount: bigint;
+}
+
 export interface BridgeQuote {
   id: string;
   provider: string;
@@ -33,6 +41,7 @@ export interface BridgeQuote {
   toChain: BridgeChain;
   fromToken: BridgeToken;
   toToken: BridgeToken;
+  recipientAddress?: Address;
   fromAmount: bigint;
   toAmount: bigint | null;
   toAmountMin: bigint | null;
@@ -45,8 +54,14 @@ export interface BridgeQuote {
   minimumTransferAmount?: bigint | null;
   feeError?: string;
   selectedRoute?: 'forwarding' | 'cctp';
+  routeComparison?: {
+    forwardingFeeAmount: bigint | null;
+    standardCctpFeeAmount: bigint | null;
+    recommendedRoute: 'forwarding' | 'cctp';
+  };
   gasAmount: bigint | null;
   gasCosts: string[];
+  gasEstimates?: BridgeGasEstimate[];
   executionDurationSeconds: number | null;
   transactionTarget: Address | null;
   transactionData: Hex | null;

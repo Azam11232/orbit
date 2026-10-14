@@ -8,8 +8,8 @@ const packageJson = JSON.parse(readFileSync(new URL('./package.json', import.met
 };
 
 const ARC_SCAN_PROXY_PREFIX = '/api/arcscan';
-const ARC_SCAN_API_BASE_URL = 'https://testnet.arcscan.app/api/v2';
-const ARC_SCAN_ADDRESS_PATH = /^\/api\/arcscan\/addresses\/(0x[a-fA-F0-9]{40})\/(transactions|token-transfers)$/;
+const ARC_SCAN_API_BASE_URL = 'https://explorer.testnet.arc.io/api/v2';
+const ARC_SCAN_ADDRESS_PATH = /^\/api\/arcscan\/addresses\/(0x[a-fA-F0-9]{40})\/(transactions|token-transfers|contract-info)$/;
 const TRANSACTION_PAGE_PARAMS = new Set(['index', 'value', 'hash', 'inserted_at', 'block_number', 'fee']);
 const TRANSFER_PAGE_PARAMS = new Set(['index', 'block_number']);
 const PAGE_PARAM_PATTERNS: Record<string, RegExp> = {
@@ -22,6 +22,7 @@ const PAGE_PARAM_PATTERNS: Record<string, RegExp> = {
 };
 
 function isValidPaginationQuery(searchParams: URLSearchParams, resource: string): boolean {
+  if (resource === 'contract-info') return searchParams.toString() === '';
   const cursorParams = resource === 'transactions' ? TRANSACTION_PAGE_PARAMS : TRANSFER_PAGE_PARAMS;
   const allowedParams = new Set(['items_count', ...cursorParams]);
   const seenParams = new Set<string>();
@@ -54,14 +55,25 @@ function arcScanProxy(): Plugin {
     if (!match || !isValidPaginationQuery(parsedUrl.searchParams, match[2])) {
       response.statusCode = 400;
       response.setHeader('Content-Type', 'application/json');
-      response.end(JSON.stringify({ error: 'Invalid ArcScan transaction request' }));
+      response.end(JSON.stringify({
+        error: 'Invalid ArcScan transaction request',
+        details: !match
+          ? 'Expected a supported address resource path.'
+          : match[2] === 'contract-info'
+            ? 'Contract verification does not accept query parameters.'
+            : 'Invalid ArcScan pagination parameters.',
+      }));
       return;
     }
 
     const [, address, resource] = match;
     const upstreamParams = new URLSearchParams();
     parsedUrl.searchParams.forEach((value, key) => upstreamParams.set(key, value));
-    const upstreamUrl = `${ARC_SCAN_API_BASE_URL}/addresses/${address}/${resource}?${upstreamParams}`;
+    const upstreamPath = resource === 'contract-info'
+      ? `addresses/${address}`
+      : `addresses/${address}/${resource}`;
+    const upstreamUrl = new URL(upstreamPath, `${ARC_SCAN_API_BASE_URL}/`);
+    upstreamUrl.search = upstreamParams.toString();
 
     try {
       const upstreamResponse = await fetch(upstreamUrl, {
@@ -70,6 +82,8 @@ function arcScanProxy(): Plugin {
       const body = await upstreamResponse.text();
       response.statusCode = upstreamResponse.status;
       response.setHeader('Content-Type', upstreamResponse.headers.get('content-type') ?? 'application/json');
+      const retryAfter = upstreamResponse.headers.get('retry-after');
+      if (retryAfter) response.setHeader('Retry-After', retryAfter);
       response.end(body);
     } catch {
       response.statusCode = 502;

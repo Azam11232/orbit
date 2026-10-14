@@ -1,9 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAccount, usePublicClient, useReadContract, useWriteContract } from 'wagmi';
 import { decodeFunctionData, encodeFunctionData, erc20Abi, type Address, type Hash } from 'viem';
 import { getRpcReadFailureMessage } from '../wallet';
-import type { BridgeToken } from '../types/bridge';
+import { getBridgeErrorCategory, markArcForwardingTiming, recordArcForwardingFailure, timeArcForwardingAwait, type ArcForwardingTiming } from '../services/bridge/arcForwardingTiming';
+import { getCircleForwardingApprovalAmount, getCircleForwardingApprovalTarget } from '../services/bridge/circleForwarding';
+import type { BridgeQuote, BridgeToken } from '../types/bridge';
+
+export function getBridgeApprovalRequest(quote: BridgeQuote | undefined, quoteCurrent: boolean) {
+  if (!quote || !quoteCurrent) return { spender: null, amount: null };
+  if (quote.selectedRoute === 'forwarding') {
+    return {
+      spender: getCircleForwardingApprovalTarget(quote.fromChain.id),
+      amount: getCircleForwardingApprovalAmount(quote.fromChain.id, quote.fromAmount, quote.totalSourceDebit),
+    };
+  }
+  return { spender: quote.transactionTarget, amount: quote.fromAmount };
+}
 
 export function hasSufficientBridgeAllowance(allowance: bigint, amount: bigint | null) {
   return amount !== null && amount > 0n && allowance >= amount;
@@ -20,7 +33,64 @@ export function resolveApprovalAllowanceResult(input: { directAllowance: bigint;
   };
 }
 
-export function useBridgeApproval(token: BridgeToken | undefined, owner: Address | undefined, spender: Address | null, amount: bigint | null) {
+export function getBridgeApprovalState(input: {
+  hasToken: boolean;
+  nativeToken: boolean;
+  hasOwner: boolean;
+  hasSpender: boolean;
+  amount: bigint | null;
+  allowance?: bigint;
+  isLoading: boolean;
+  isFetching: boolean;
+  isError: boolean;
+  isStale?: boolean;
+}) {
+  const isApplicable = input.hasToken && !input.nativeToken && input.hasOwner && input.amount !== null && input.amount > 0n;
+  const isReady = !isApplicable || (input.hasSpender && input.allowance !== undefined && !input.isLoading && !input.isFetching && !input.isError && !input.isStale);
+  const hasEnoughAllowance = input.allowance !== undefined && input.amount !== null && input.allowance >= input.amount;
+  return {
+    isReady,
+    required: isApplicable && isReady && !hasEnoughAllowance,
+  };
+}
+
+export function createBridgeApprovalOneShotGuard() {
+  let locked = false;
+  return {
+    claim() {
+      if (locked) return false;
+      locked = true;
+      return true;
+    },
+    release() {
+      locked = false;
+    },
+  };
+}
+
+export type BridgeApprovalStatus = 'idle' | 'checking' | 'confirmation' | 'pending' | 'confirmed' | 'failed';
+
+export function getBridgeApprovalActionState(input: {
+  required: boolean;
+  isReady: boolean;
+  sourceNetworkReady: boolean;
+  status: BridgeApprovalStatus;
+}) {
+  const show = input.required && input.isReady && input.sourceNetworkReady;
+  const disabled = input.status === 'checking' || input.status === 'confirmation' || input.status === 'pending';
+  const label = input.status === 'checking'
+    ? 'Checking allowance...'
+    : input.status === 'pending'
+      ? 'Approval pending...'
+      : input.status === 'confirmation'
+        ? 'Confirm in wallet'
+        : input.status === 'failed'
+          ? 'Retry approval'
+          : 'Approve exact amount';
+  return { show, disabled, label };
+}
+
+export function useBridgeApproval(token: BridgeToken | undefined, owner: Address | undefined, spender: Address | null, amount: bigint | null, timing?: ArcForwardingTiming) {
   const { chainId } = useAccount();
   const query = useReadContract({
     address: token?.address,
@@ -28,51 +98,73 @@ export function useBridgeApproval(token: BridgeToken | undefined, owner: Address
     functionName: 'allowance',
     args: owner && spender && token ? [owner, spender] : undefined,
     chainId: token?.chainId,
-    query: { enabled: Boolean(token && chainId === token.chainId && !token.isNative && owner && spender && amount !== null && amount > 0n) },
+    query: { enabled: Boolean(token && !token.isNative && owner && spender && amount !== null && amount > 0n), staleTime: 5_000 },
   });
   const publicClient = usePublicClient({ chainId: token?.chainId });
   const { writeContractAsync } = useWriteContract();
   const queryClient = useQueryClient();
-  const [status, setStatus] = useState<'idle' | 'confirmation' | 'pending' | 'confirmed' | 'failed'>('idle');
+  const [status, setStatus] = useState<BridgeApprovalStatus>('idle');
   const [hash, setHash] = useState<Hash>();
   const [error, setError] = useState<Error | null>(null);
+  const approvalGuardRef = useRef(createBridgeApprovalOneShotGuard());
   const allowance = query.data ?? 0n;
-  const required = Boolean(token && !token.isNative && spender && amount !== null && amount > 0n && allowance < amount);
+  const approvalState = getBridgeApprovalState({
+    hasToken: Boolean(token),
+    nativeToken: Boolean(token?.isNative),
+    hasOwner: Boolean(owner),
+    hasSpender: Boolean(spender),
+    amount,
+    allowance: query.data,
+    isLoading: query.isLoading,
+    isFetching: query.isFetching,
+    isError: query.isError,
+    isStale: query.isStale,
+  });
+  const required = approvalState.required;
   const amountKey = amount?.toString();
   useEffect(() => {
     setStatus('idle');
     setHash(undefined);
     setError(null);
   }, [token?.chainId, token?.address, spender, amountKey, owner]);
+  useEffect(() => {
+    if (!query.isStale || query.isFetching || query.isError || query.data === undefined || !token || !owner || !spender || amount === null || amount <= 0n) return;
+    void query.refetch();
+  }, [amount, owner, query.data, query.isError, query.isFetching, query.isStale, query.refetch, spender, token]);
   const approve = async () => {
-    if (!token || chainId !== token.chainId || token.isNative || !token.address || !spender || !owner || !amount || amount <= 0n || !publicClient) return;
-    if (status === 'confirmation' || status === 'pending') {
-      setError(new Error('Bridge approval already in progress'));
-      return;
-    }
-    const currentAllowance = (await query.refetch()).data ?? 0n;
-    if (hasSufficientBridgeAllowance(currentAllowance, amount)) {
-      await queryClient.invalidateQueries({ queryKey: query.queryKey });
-      setStatus('confirmed');
-      return;
-    }
-    setStatus('confirmation');
+    if (!token || token.isNative || !token.address || !spender || !owner || !amount || amount <= 0n || !publicClient) return;
+    if (!approvalGuardRef.current.claim()) return;
+    setStatus('checking');
     setHash(undefined);
     setError(null);
     try {
-      const gas = await publicClient.estimateGas({
+      if (chainId !== token.chainId) throw new Error(`Switch to the source network before approving ${token.symbol}`);
+      const allowanceResult = await timeArcForwardingAwait(timing, 'approval allowance precheck', () => query.refetch());
+      if (allowanceResult.isError || allowanceResult.data === undefined) {
+        throw allowanceResult.error instanceof Error ? allowanceResult.error : new Error('Unable to verify the current USDC allowance');
+      }
+      if (hasSufficientBridgeAllowance(allowanceResult.data, amount)) {
+        await queryClient.invalidateQueries({ queryKey: query.queryKey });
+        setStatus('confirmed');
+        markArcForwardingTiming(timing, 'approval already satisfied');
+        return;
+      }
+      setStatus('confirmation');
+      const gas = await timeArcForwardingAwait(timing, 'approval gas estimate', () => publicClient.estimateGas({
         account: owner,
         to: token.address,
         data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, amount] }),
-      });
-      const gasPrice = await publicClient.getGasPrice();
-      const nativeBalance = await publicClient.getBalance({ address: owner });
+      }));
+      const [gasPrice, nativeBalance] = await Promise.all([
+        timeArcForwardingAwait(timing, 'approval gas price read', () => publicClient.getGasPrice()),
+        timeArcForwardingAwait(timing, 'approval native balance read', () => publicClient.getBalance({ address: owner })),
+      ]);
       if (nativeBalance < gas * gasPrice) throw new Error(`Insufficient ${token.chainId === 5042002 ? 'native USDC' : 'native gas'} balance for approval`);
-      const txHash = await writeContractAsync({ address: token.address, abi: erc20Abi, functionName: 'approve', args: [spender, amount], chainId: token.chainId });
+      const txHash = await timeArcForwardingAwait(timing, 'approval wallet submission', () => writeContractAsync({ address: token.address, abi: erc20Abi, functionName: 'approve', args: [spender, amount], chainId: token.chainId }));
       setHash(txHash);
       setStatus('pending');
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-      const approvalTx = await publicClient.getTransaction({ hash: txHash });
+      const receipt = await timeArcForwardingAwait(timing, 'approval receipt wait', () => publicClient.waitForTransactionReceipt({ hash: txHash }));
+      const approvalTx = await timeArcForwardingAwait(timing, 'approval transaction lookup', () => publicClient.getTransaction({ hash: txHash }));
       const decodedApproval = decodeFunctionData({
         abi: erc20Abi,
         data: approvalTx.input,
@@ -100,12 +192,12 @@ export function useBridgeApproval(token: BridgeToken | undefined, owner: Address
         });
       }
       if (receipt.status !== 'success') throw new Error('Bridge approval transaction reverted');
-      const directFreshAllowance = await publicClient.readContract({
+      const directFreshAllowance = await timeArcForwardingAwait(timing, 'approval allowance verification', () => publicClient.readContract({
         address: token.address,
         abi: erc20Abi,
         functionName: 'allowance',
         args: [owner, spender],
-      });
+      }));
       await queryClient.invalidateQueries({ queryKey: query.queryKey });
       const hookRefetchedAllowance = (await query.refetch()).data ?? 0n;
       const allowanceVerification = resolveApprovalAllowanceResult({
@@ -145,12 +237,16 @@ export function useBridgeApproval(token: BridgeToken | undefined, owner: Address
       }
       await queryClient.invalidateQueries({ queryKey: ['bridge-simulation'] });
       setStatus('confirmed');
+      markArcForwardingTiming(timing, 'approval confirmed');
     } catch (caughtError) {
+      recordArcForwardingFailure(timing, 'Bridge approval', caughtError);
       const readFailureMessage = caughtError instanceof Error ? getRpcReadFailureMessage(caughtError) : 'Bridge approval failed';
-      if (import.meta.env.DEV) console.debug('[Orbit bridge] approval failed', { token: token?.address, owner, spender, required: amount?.toString(), hash, error: caughtError instanceof Error ? caughtError.message : String(caughtError) });
+      if (import.meta.env.DEV) console.debug('[Orbit bridge] approval failed', { errorCategory: getBridgeErrorCategory(caughtError) });
       setStatus('failed');
       setError(new Error(readFailureMessage === 'Bridge approval failed' && caughtError instanceof Error ? caughtError.message : readFailureMessage));
+    } finally {
+      approvalGuardRef.current.release();
     }
   };
-  return { allowance, required, isLoading: query.isLoading, isError: query.isError, approve, status, hash, error, refetchAllowance: query.refetch };
+  return { allowance, required, isReady: approvalState.isReady, isLoading: query.isLoading || query.isFetching, isError: query.isError, isStale: query.isStale, approve, status, hash, error, refetchAllowance: query.refetch };
 }

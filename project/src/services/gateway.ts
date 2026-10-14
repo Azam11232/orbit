@@ -52,15 +52,25 @@ export interface GatewayBalance {
   domain: number;
   raw: bigint;
   formatted: string;
+  pendingBatchRaw: bigint;
+  pendingBatchFormatted: string;
+}
+
+interface GatewayBalanceEntry {
+  domain?: unknown;
+  depositor?: unknown;
+  balance?: unknown;
+  pendingBatch?: unknown;
 }
 
 interface GatewayBalanceResponse {
-  balances?: Array<{ domain?: number; balance?: string }>;
+  token?: unknown;
+  balances?: unknown;
 }
 
-interface GatewayEstimateResponse {
-  body?: Array<{ burnIntent?: { maxFee?: string; maxBlockHeight?: string } }>;
-  fees?: { forwardingFee?: string; token?: string };
+interface GatewayEstimateBurnIntent {
+  maxFee?: unknown;
+  maxBlockHeight?: unknown;
 }
 
 interface GatewayTransferResponse {
@@ -78,7 +88,13 @@ export function gatewayNetworkForDomain(domain: number) {
   return gatewayNetworks.find((network) => network.cctpDomain === domain);
 }
 
-export async function fetchGatewayBalances(address: Address): Promise<GatewayBalance[]> {
+export function isGatewayTransferRouteValid(sourceId: number, destinationId: number) {
+  return sourceId !== destinationId &&
+    gatewayNetworks.some((network) => network.id === sourceId) &&
+    gatewayNetworks.some((network) => network.id === destinationId);
+}
+
+export async function fetchGatewayBalances(address: Address, signal?: AbortSignal): Promise<GatewayBalance[]> {
   const response = await fetch(`${GATEWAY_API_BASE}/v1/balances`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -86,22 +102,46 @@ export async function fetchGatewayBalances(address: Address): Promise<GatewayBal
       token: 'USDC',
       sources: gatewayNetworks.map((network) => ({ domain: network.cctpDomain, depositor: address })),
     }),
+    signal,
   });
   if (!response.ok) throw new Error(`Gateway balance request failed (${response.status})`);
-  const json = await response.json() as GatewayBalanceResponse;
-  if (!Array.isArray(json.balances)) {
+  const json: unknown = await response.json();
+  if (!json || typeof json !== 'object' || !('balances' in json) || !Array.isArray((json as GatewayBalanceResponse).balances)) {
     throw new Error('Gateway balance response did not include a balances array');
   }
-  return json.balances.map((balance) => {
-    if (!balance || typeof balance.domain !== 'number' || typeof balance.balance !== 'string') {
+  const responseBody = json as GatewayBalanceResponse;
+  if (responseBody.token !== 'USDC') throw new Error('Gateway balance response did not confirm the USDC token');
+  const seenDomains = new Set<number>();
+  const parsedBalances = (responseBody.balances as GatewayBalanceEntry[]).map((balance) => {
+    if (
+      !balance ||
+      typeof balance.domain !== 'number' ||
+      !gatewayNetworkForDomain(balance.domain) ||
+      typeof balance.depositor !== 'string' ||
+      balance.depositor.toLowerCase() !== address.toLowerCase() ||
+      typeof balance.balance !== 'string' ||
+      typeof balance.pendingBatch !== 'string' ||
+      seenDomains.has(balance.domain)
+    ) {
       throw new Error('Gateway balance response contains an invalid balance entry');
     }
+    seenDomains.add(balance.domain);
     try {
-      return { domain: balance.domain, raw: parseGatewayAmount(balance.balance), formatted: balance.balance };
+      return {
+        domain: balance.domain,
+        raw: parseGatewayAmount(balance.balance),
+        formatted: balance.balance,
+        pendingBatchRaw: parseGatewayAmount(balance.pendingBatch),
+        pendingBatchFormatted: balance.pendingBatch,
+      };
     } catch {
       throw new Error('Gateway balance response contains an invalid balance amount');
     }
   });
+  if (seenDomains.size !== gatewayNetworks.length) {
+    throw new Error('Gateway balance response is missing one or more requested source networks');
+  }
+  return parsedBalances;
 }
 
 function addressToBytes32(address: Address): Hex {
@@ -117,8 +157,8 @@ function randomSalt(): Hex {
 export function createGatewayTransferSpec(sourceId: number, destinationId: number, depositor: Address, amount: bigint) {
   const source = getOrbitNetwork(sourceId);
   const destination = getOrbitNetwork(destinationId);
-  if (!source?.capabilities.gateway || !destination?.capabilities.gateway) throw new Error('Gateway does not support this network route');
   if (sourceId === destinationId) throw new Error('Gateway source and destination must differ');
+  if (!source?.capabilities.gateway || !destination?.capabilities.gateway) throw new Error('Gateway does not support this network route');
   return {
     version: 1,
     sourceDomain: source.cctpDomain,
@@ -144,10 +184,27 @@ export async function estimateGatewayTransfer(spec: ReturnType<typeof createGate
     body: JSON.stringify([{ spec, }], (_, value) => typeof value === 'bigint' ? value.toString() : value),
   });
   if (!response.ok) throw new Error(`Gateway estimate failed (${response.status})`);
-  const json = await response.json() as GatewayEstimateResponse;
-  const estimate = json.body?.[0]?.burnIntent;
-  if (!estimate?.maxFee || !estimate.maxBlockHeight) throw new Error('Gateway did not return transfer limits');
-  return { maxFee: BigInt(estimate.maxFee), maxBlockHeight: BigInt(estimate.maxBlockHeight), fee: json.fees?.forwardingFee ?? null, feeToken: json.fees?.token ?? 'USDC' };
+  const json: unknown = await response.json();
+  const estimate = parseGatewayEstimateResponse(json);
+  return { ...estimate, fee: null, feeToken: 'USDC' };
+}
+
+export function parseGatewayEstimateResponse(response: unknown) {
+  const first = Array.isArray(response) && typeof response[0] === 'object' && response[0] !== null
+    ? response[0] as { burnIntent?: GatewayEstimateBurnIntent }
+    : undefined;
+  const burnIntent = first?.burnIntent;
+  const maxFee = burnIntent?.maxFee;
+  const maxBlockHeight = burnIntent?.maxBlockHeight;
+  if (
+    typeof maxFee !== 'string' ||
+    !/^\d+$/.test(maxFee) ||
+    typeof maxBlockHeight !== 'string' ||
+    !/^[1-9]\d*$/.test(maxBlockHeight)
+  ) {
+    throw new Error('Circle Gateway estimate response is missing valid burnIntent.maxFee or burnIntent.maxBlockHeight. No transfer was submitted; retry later or contact Circle Gateway support.');
+  }
+  return { maxFee: BigInt(maxFee), maxBlockHeight: BigInt(maxBlockHeight) };
 }
 
 export function createGatewayTypedData(spec: ReturnType<typeof createGatewayTransferSpec>, maxFee: bigint, maxBlockHeight: bigint) {
@@ -174,6 +231,10 @@ export async function submitGatewayTransfer(spec: ReturnType<typeof createGatewa
 
 export function sumGatewayBalances(balances: GatewayBalance[]): bigint {
   return balances.reduce((total, balance) => total + balance.raw, 0n);
+}
+
+export function sumGatewayPendingBatches(balances: GatewayBalance[]): bigint {
+  return balances.reduce((total, balance) => total + balance.pendingBatchRaw, 0n);
 }
 
 export { maxUint256 };

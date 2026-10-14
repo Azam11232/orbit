@@ -279,7 +279,7 @@ export function ArcSwapPage() {
           </div>
 
           <label className="mt-5 block">
-            <span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={() => setAmount(formatUnits(balance.raw, inputAsset.decimals))} className="font-mono text-[10px] text-cyan-300">MAX</button></span>
+            <span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={() => setAmount(formatUnits(balance.raw, inputAsset.decimals))} className="orbit-form-max font-mono text-[10px]">MAX</button></span>
             <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => { setAmount(event.target.value); setShowReview(false); }} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-2xl font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">{tokenIn}</span></div>
           </label>
 
