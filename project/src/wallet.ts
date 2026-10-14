@@ -46,7 +46,7 @@ export const walletConfig = createConfig({
     injected({ shimDisconnect: true }),
   ],
   transports: {
-    [ARC_TESTNET.id]: http(ARC_TESTNET.rpcUrls.default.http[0]),
+    [ARC_TESTNET.id]: http(ARC_TESTNET.rpcUrls.default.http[0], { retryCount: 0 }),
     [ETHEREUM_SEPOLIA.id]: fallback(
       getEthereumSepoliaRpcUrls().map((rpcUrl) => http(rpcUrl, { timeout: 15_000, batch: { wait: 16 } })),
       { retryCount: 1, retryDelay: 250, rank: false },

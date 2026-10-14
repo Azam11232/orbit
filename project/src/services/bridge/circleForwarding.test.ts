@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { ARC_PRIMARY_NETWORK, ARBITRUM_SEPOLIA, AVALANCHE_FUJI, BASE_SEPOLIA, ETHEREUM_SEPOLIA, OP_SEPOLIA, POLYGON_AMOY } from '../../data/networks';
+import { Blockchain, type BridgeEstimateResult } from '@circle-fin/bridge-kit';
+import { ARC_PRIMARY_NETWORK, ARBITRUM_SEPOLIA, AVALANCHE_FUJI, BASE_SEPOLIA, ETHEREUM_SEPOLIA, OP_SEPOLIA, POLYGON_AMOY, getOrbitNetwork } from '../../data/networks';
 import { FORWARDING_RECONCILIATION_INTERVAL_MS } from '../../hooks/useBridgeExecution';
 import { isDestinationGasReady } from '../../hooks/useBridgeQuote';
-import { calculateForwardedDestinationAmount, calculateForwardingQuoteAmounts, createCircleForwardingParams, forwardingRouteLabel, getCircleForwardingApprovalAmount, getCircleForwardingApprovalTarget, getCircleForwardingConfig, getForwardingFailureDetail, getForwardingPollRetryDelay, getForwardingStatusOutcome, getForwardingTerminalError, getWalletRequestDiagnostic, isAuthoritativeForwardingSuccess, isCircleForwardingSourceFeeSupported, isCircleForwardingSupported, isFastArcSepoliaForwarding, isForwardingDeliveryReady, isForwardingPendingResult, isForwardingRetryableResult, verifyCircleForwardingResult } from './circleForwarding';
+import { calculateForwardedDestinationAmount, calculateForwardingQuoteAmounts, createCircleEstimatedBridgeQuote, createCircleForwardingParams, forwardingRouteLabel, getCircleEstimateFeeTotal, getCircleForwardingApprovalAmount, getCircleForwardingApprovalTarget, getCircleForwardingConfig, getForwardingFailureDetail, getForwardingPollRetryDelay, getForwardingStatusOutcome, getForwardingTerminalError, getWalletRequestDiagnostic, isAuthoritativeForwardingSuccess, isCircleForwardingSourceFeeSupported, isCircleForwardingSupported, isFastArcSepoliaForwarding, isForwardingDeliveryReady, isForwardingPendingResult, isForwardingRetryableResult, isStandardCctpSupported, selectCircleBridgeRoute, verifyCircleForwardingResult } from './circleForwarding';
+import type { BridgeQuote } from '../../types/bridge';
 
 const source = ARC_PRIMARY_NETWORK.id;
 const recipient = '0x0000000000000000000000000000000000000002' as const;
@@ -16,6 +18,42 @@ const sdkNames = new Map([
   [AVALANCHE_FUJI.id, 'Avalanche_Fuji'],
   [POLYGON_AMOY.id, 'Polygon_Amoy_Testnet'],
 ]);
+const quote: BridgeQuote = {
+  id: 'test-quote',
+  provider: 'Circle',
+  fromChain: { id: source, name: ARC_PRIMARY_NETWORK.name },
+  toChain: { id: ETHEREUM_SEPOLIA.id, name: ETHEREUM_SEPOLIA.name },
+  fromToken: { chainId: source, address: getOrbitNetwork(source)!.usdc, symbol: 'USDC', name: 'USDC', decimals: 6, isNative: false },
+  toToken: { chainId: ETHEREUM_SEPOLIA.id, address: getOrbitNetwork(ETHEREUM_SEPOLIA.id)!.usdc, symbol: 'USDC', name: 'USDC', decimals: 6, isNative: false },
+  fromAmount: 5_000_000n,
+  toAmount: 5_000_000n,
+  toAmountMin: 5_000_000n,
+  feeAmount: 0n,
+  gasAmount: null,
+  gasCosts: [],
+  executionDurationSeconds: null,
+  transactionTarget: null,
+  transactionData: null,
+  transactionValue: 0n,
+  bridge: 'CCTP',
+  quotedAt: 1,
+  raw: {},
+};
+
+function sdkEstimate(fees: BridgeEstimateResult['fees'] = []): BridgeEstimateResult {
+  return {
+    token: 'USDC',
+    amount: '5',
+    source: { address: recipient, chain: Blockchain.Arc_Testnet },
+    destination: { address: recipient, chain: Blockchain.Ethereum_Sepolia, recipientAddress: recipient },
+    fees,
+    gasFees: [
+      { name: 'approve', token: ARC_PRIMARY_NETWORK.nativeCurrency.symbol, blockchain: Blockchain.Arc_Testnet, fees: { gas: 1n, gasPrice: 1n, fee: '0.001' } },
+      { name: 'burn', token: ARC_PRIMARY_NETWORK.nativeCurrency.symbol, blockchain: Blockchain.Arc_Testnet, fees: { gas: 1n, gasPrice: 1n, fee: '0.002' } },
+      { name: 'mint', token: ETHEREUM_SEPOLIA.nativeCurrency.symbol, blockchain: Blockchain.Ethereum_Sepolia, fees: { gas: 1n, gasPrice: 1n, fee: '0.00000042000672' } },
+    ],
+  };
+}
 
 describe('BridgeKit forwarding parameters', () => {
   it('uses a 1 second forwarding reconciliation interval', () => {
@@ -96,6 +134,62 @@ describe('Circle forwarding route capability', () => {
     expect(isFastArcSepoliaForwarding(ARC_PRIMARY_NETWORK.id, ETHEREUM_SEPOLIA.id)).toBe(true);
     expect(getForwardingPollRetryDelay(ARC_PRIMARY_NETWORK.id, BASE_SEPOLIA.id)).toBeUndefined();
     expect(isFastArcSepoliaForwarding(ARC_PRIMARY_NETWORK.id, BASE_SEPOLIA.id)).toBe(false);
+  });
+
+  describe('Circle estimate quote mapping', () => {
+    it('reports SDK Standard CCTP fees, received amount and per-chain gas without inventing values', () => {
+      const standardQuote = createCircleEstimatedBridgeQuote(quote, sdkEstimate([{ type: 'provider', token: 'USDC', amount: '0' }]), 'cctp', recipient);
+      expect(standardQuote).toMatchObject({
+        selectedRoute: 'cctp',
+        feeAmount: 0n,
+        forwardingFeeAmount: 0n,
+        protocolFeeAmount: 0n,
+        toAmount: 5_000_000n,
+        transferSpeed: 'Standard CCTP; slower attestation, user-submitted destination mint',
+      });
+      expect(standardQuote.gasEstimates?.map(({ step, chainId, amount }) => ({ step, chainId, amount }))).toEqual([
+        { step: 'approve', chainId: source, amount: 1_000_000_000_000_000n },
+        { step: 'burn', chainId: source, amount: 2_000_000_000_000_000n },
+        { step: 'mint', chainId: ETHEREUM_SEPOLIA.id, amount: 420_006_720_000n },
+      ]);
+    });
+
+    it('rejects a Standard estimate that omits destination mint gas', () => {
+      const estimate = sdkEstimate().gasFees.filter((fee) => fee.name !== 'mint');
+      expect(() => createCircleEstimatedBridgeQuote(quote, { ...sdkEstimate(), gasFees: estimate }, 'cctp', recipient))
+        .toThrow('Circle did not return the destination mint gas estimate for Standard CCTP');
+    });
+
+    it('rejects a forwarding fee reported on a Standard CCTP estimate', () => {
+      expect(() => createCircleEstimatedBridgeQuote(quote, sdkEstimate([{ type: 'forwarder', token: 'USDC', amount: '0.25' }]), 'cctp', recipient))
+        .toThrow('Circle returned a forwarding fee for the selected Standard CCTP route');
+    });
+
+    it('preserves Circle forwarding fee types and amounts from the fresh SDK estimate', () => {
+      const estimate = sdkEstimate([
+        { type: 'forwarder', token: 'USDC', amount: '0.125' },
+        { type: 'provider', token: 'USDC', amount: '0.025' },
+      ]);
+      expect(getCircleEstimateFeeTotal(estimate)).toBe(150_000n);
+      expect(createCircleEstimatedBridgeQuote(quote, estimate, 'forwarding', recipient)).toMatchObject({
+        forwardingFeeAmount: 125_000n,
+        protocolFeeAmount: 25_000n,
+        feeAmount: 150_000n,
+      });
+    });
+  });
+
+  it('selects only supported routes and chooses the lower fresh Circle fee, preferring forwarding on a tie', () => {
+    expect(isStandardCctpSupported(source, ETHEREUM_SEPOLIA.id)).toBe(true);
+    expect(isStandardCctpSupported(source, source)).toBe(false);
+    expect(selectCircleBridgeRoute({ forwardingSupported: true, standardCctpSupported: true, forwardingFeeAmount: 50_000n, standardCctpFeeAmount: 40_000n })).toBe('cctp');
+    expect(selectCircleBridgeRoute({ forwardingSupported: true, standardCctpSupported: true, forwardingFeeAmount: 40_000n, standardCctpFeeAmount: 50_000n })).toBe('forwarding');
+    expect(selectCircleBridgeRoute({ forwardingSupported: true, standardCctpSupported: true, forwardingFeeAmount: 40_000n, standardCctpFeeAmount: 40_000n })).toBe('forwarding');
+    expect(selectCircleBridgeRoute({ forwardingSupported: true, standardCctpSupported: true, standardCctpFeeAmount: 40_000n })).toBe('cctp');
+    expect(selectCircleBridgeRoute({ forwardingSupported: true, standardCctpSupported: true, forwardingFeeAmount: 40_000n })).toBe('forwarding');
+    expect(selectCircleBridgeRoute({ forwardingSupported: false, standardCctpSupported: true, standardCctpFeeAmount: 0n })).toBe('cctp');
+    expect(() => selectCircleBridgeRoute({ forwardingSupported: false, standardCctpSupported: false })).toThrow('no supported route');
+    expect(() => selectCircleBridgeRoute({ forwardingSupported: true, standardCctpSupported: true })).toThrow('fresh estimate');
   });
 
   it.each([ETHEREUM_SEPOLIA, BASE_SEPOLIA, ARBITRUM_SEPOLIA])('enables forwarding to %s', (destination) => {

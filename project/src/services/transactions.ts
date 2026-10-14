@@ -542,15 +542,10 @@ async function fetchArcTransactions(address: string, limit: number, fetchAllPage
   const transferMap = new Map<string, TokenTransfer[]>();
   for (const rawTransfer of transferItemsByKey.values()) {
     const transfer = normalizeBlockscoutTokenTransfer(rawTransfer, address);
-    if (!transfer || normalizeAddress(transfer.contractAddress) !== normalizeAddress(ARC_USDC_ADDRESS)) continue;
+    if (!transfer) continue;
     const key = transfer.hash.toLowerCase();
     const bucket = transferMap.get(key) ?? [];
-    bucket.push({
-      ...transfer,
-      amount: formatUnits(BigInt(transfer.rawAmount), ARC_USDC_DECIMALS),
-      decimals: ARC_USDC_DECIMALS,
-      symbol: ARC_USDC.symbol,
-    });
+    bucket.push(transfer);
     transferMap.set(key, bucket);
   }
 

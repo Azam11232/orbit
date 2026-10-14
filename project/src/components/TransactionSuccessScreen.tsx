@@ -44,7 +44,7 @@ function shortAddress(value: string) {
 
 const playedSuccessChimes = new Set<string>();
 
-function playSuccessChime(key: string) {
+export function playSuccessChime(key: string) {
   if (playedSuccessChimes.has(key)) return;
   playedSuccessChimes.add(key);
 

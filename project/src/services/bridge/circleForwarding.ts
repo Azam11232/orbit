@@ -1,9 +1,10 @@
 import { createViemAdapterFromProvider } from '@circle-fin/adapter-viem-v2';
-import { BridgeKit, type BridgeResult } from '@circle-fin/bridge-kit';
+import { BridgeKit, type BridgeEstimateResult, type BridgeResult } from '@circle-fin/bridge-kit';
 import { CCTPV2BridgingProvider } from '@circle-fin/provider-cctp-v2';
-import { parseUnits, type Address, type EIP1193Provider, type Hash } from 'viem';
+import { formatUnits, parseUnits, type Address, type EIP1193Provider, type Hash } from 'viem';
 import { ARC_PRIMARY_NETWORK, ETHEREUM_SEPOLIA, getOrbitNetwork } from '../../data/networks';
-import { markArcForwardingTiming, timeArcForwardingAwait, type ArcForwardingTiming } from './arcForwardingTiming';
+import type { BridgeGasEstimate, BridgeQuote } from '../../types/bridge';
+import { getBridgeErrorCategory, markArcForwardingTiming, timeArcForwardingAwait, type ArcForwardingTiming } from './arcForwardingTiming';
 
 const kit = new BridgeKit();
 const cctpProvider = new CCTPV2BridgingProvider();
@@ -33,6 +34,11 @@ function getSdkChain(chainId: number) {
   return kit.getSupportedChains({ chainType: 'evm', isTestnet: true }).find((chain) => chain.chain === sdkChain);
 }
 
+export function isStandardCctpSupported(sourceChainId: number, destinationChainId: number) {
+  if (sourceChainId === destinationChainId) return false;
+  return Boolean(getSdkChain(sourceChainId)?.cctp?.contracts.v2 && getSdkChain(destinationChainId)?.cctp?.contracts.v2);
+}
+
 export function isCircleForwardingSupported(sourceChainId: number, destinationChainId: number) {
   const source = getSdkChain(sourceChainId);
   const destination = getSdkChain(destinationChainId);
@@ -41,6 +47,39 @@ export function isCircleForwardingSupported(sourceChainId: number, destinationCh
     destination?.cctp?.contracts.v2 &&
     destination.cctp.forwarderSupported?.destination === true,
   );
+}
+
+export function getCircleEstimateFeeTotal(estimate: BridgeEstimateResult) {
+  return estimate.fees.reduce((total, fee) => {
+    if (fee.token !== 'USDC' || fee.amount === null) throw new Error('Circle returned an incomplete USDC fee estimate');
+    return total + parseUnits(fee.amount, 6);
+  }, 0n);
+}
+
+function isCircleForwardingFeeType(type: string) {
+  const normalizedType = type.toLowerCase();
+  return normalizedType === 'forwarder' || normalizedType === 'forward';
+}
+
+export function selectCircleBridgeRoute(input: {
+  forwardingSupported: boolean;
+  standardCctpSupported: boolean;
+  forwardingFeeAmount?: bigint;
+  standardCctpFeeAmount?: bigint;
+}): 'forwarding' | 'cctp' {
+  if (!input.forwardingSupported && !input.standardCctpSupported) throw new Error('Circle has no supported route for this network pair');
+  if (input.forwardingSupported && input.standardCctpSupported) {
+    if (input.forwardingFeeAmount === undefined && input.standardCctpFeeAmount !== undefined) return 'cctp';
+    if (input.standardCctpFeeAmount === undefined && input.forwardingFeeAmount !== undefined) return 'forwarding';
+  } else if (input.forwardingSupported && input.forwardingFeeAmount !== undefined) {
+    return 'forwarding';
+  } else if (input.standardCctpSupported && input.standardCctpFeeAmount !== undefined) {
+    return 'cctp';
+  }
+  if (input.forwardingFeeAmount === undefined || input.standardCctpFeeAmount === undefined) {
+    throw new Error('Circle did not return a fresh estimate for any supported route');
+  }
+  return input.forwardingFeeAmount <= input.standardCctpFeeAmount ? 'forwarding' : 'cctp';
 }
 
 export function getForwardingPollRetryDelay(sourceChainId: number, destinationChainId: number) {
@@ -75,32 +114,21 @@ export class CircleForwardingError extends Error {
 }
 
 function describeBridgeResult(result: BridgeResult) {
-  const rawResult = result as unknown as Record<string, unknown>;
   return {
     state: result.state,
-    provider: result.provider,
-    traceId: rawResult.traceId,
-    source: result.source ? { address: result.source.address, chain: result.source.chain.chain } : undefined,
-    destination: result.destination ? { address: result.destination.address, chain: result.destination.chain.chain } : undefined,
     steps: result.steps.map((step) => ({
       name: step.name,
       state: step.state,
-      txHash: step.txHash,
-      dataPresent: step.data !== undefined,
-      error: step.error,
-      errorMessage: step.errorMessage,
-      errorCategory: step.errorCategory,
+      errorCategory: step.state === 'error' ? step.errorCategory ?? getBridgeErrorCategory(step.error ?? step.errorMessage) : undefined,
       forwarded: step.forwarded,
     })),
-    error: rawResult.error,
-    warnings: rawResult.warnings,
   };
 }
 
 function emitBridgeDiagnostic(result: BridgeResult, phase: 'bridge' | 'retry', input: { sourceChainId: number; destinationChainId: number; recipient: Address; amount: bigint }) {
   if (!import.meta.env.DEV) return;
   console.groupCollapsed(`[Orbit bridge] BridgeKit ${phase} result`);
-  console.log({ sourceChainId: input.sourceChainId, destinationChainId: input.destinationChainId, recipient: input.recipient, amount: input.amount.toString() });
+  console.log({ sourceChainId: input.sourceChainId, destinationChainId: input.destinationChainId });
   console.log(describeBridgeResult(result));
   console.groupEnd();
 }
@@ -108,7 +136,12 @@ function emitBridgeDiagnostic(result: BridgeResult, phase: 'bridge' | 'retry', i
 function emitForwardingDiagnostic(phase: 'poll-start' | 'poll-complete' | 'poll-failed', input: { sourceChainId: number; destinationChainId: number; recipient: Address; amount: bigint }, forwarding?: { forwardState?: string | null; forwardTxHash?: string | null; eventNonce?: string; forwardErrorCode?: string | null; forwardErrorDetails?: string | null }, error?: unknown) {
   if (!import.meta.env.DEV) return;
   console.groupCollapsed(`[Orbit bridge] Circle forwarder ${phase}`);
-  console.log({ sourceChainId: input.sourceChainId, destinationChainId: input.destinationChainId, recipient: input.recipient, amount: input.amount.toString(), forwardState: forwarding?.forwardState, forwardTxHash: forwarding?.forwardTxHash, forwardErrorCode: forwarding?.forwardErrorCode, forwardErrorDetails: forwarding?.forwardErrorDetails, error: error instanceof Error ? error.message : error });
+  console.log({
+    sourceChainId: input.sourceChainId,
+    destinationChainId: input.destinationChainId,
+    forwardState: forwarding?.forwardState,
+    errorCategory: error ? getBridgeErrorCategory(error) : forwarding?.forwardErrorCode ? 'circle_service' : undefined,
+  });
   console.groupEnd();
 }
 
@@ -206,8 +239,7 @@ function instrumentForwardingAdapter(adapter: CircleAdapter, context: Forwarding
           walletClientChain: chain.chain,
           supportsAtomicBatch: false,
           adapterBatchExecuteExists: typeof diagnosticAdapter.batchExecute === 'function',
-          errorName: error instanceof Error ? error.name : typeof error,
-          errorMessage: error instanceof Error ? error.message : String(error),
+          errorCategory: getBridgeErrorCategory(error),
         });
         throw error;
       }
@@ -267,12 +299,14 @@ export function createCircleForwardingParams(input: { sourceChainId: number; des
 
 export interface CircleForwardingEstimate {
   fees: readonly { type: string; amount: string | null; token: string }[];
+  gasEstimates: BridgeGasEstimate[];
   forwardingFee: bigint;
   protocolFee: bigint;
   totalFee: bigint;
   destinationAmount: bigint;
   totalSourceDebit: bigint;
   feePayment: 'source' | 'destination';
+  sdkEstimate: BridgeEstimateResult;
   quote?: unknown;
   transferSpeed: string;
 }
@@ -285,31 +319,154 @@ export function calculateForwardingQuoteAmounts(input: { amount: bigint; totalFe
   return { destinationAmount, totalSourceDebit };
 }
 
-export async function estimateCircleForwarding(input: { provider: EIP1193Provider; sourceChainId: number; destinationChainId: number; recipient: Address; amount: bigint }, onDiagnostic?: (stage: 'createViemAdapterFromProvider' | 'estimateCircleForwarding', error: unknown) => void): Promise<CircleForwardingEstimate> {
+export function mapCircleGasEstimates(estimate: BridgeEstimateResult, sourceChainId: number, destinationChainId: number): BridgeGasEstimate[] {
+  const source = getOrbitNetwork(sourceChainId);
+  const destination = getOrbitNetwork(destinationChainId);
+  const sourceSdkName = sdkChainById[sourceChainId];
+  const destinationSdkName = sdkChainById[destinationChainId];
+  if (!source || !destination || !sourceSdkName || !destinationSdkName) throw new Error('Circle gas estimate route metadata is unavailable');
+
+  return estimate.gasFees.map((gasFee) => {
+    const network = gasFee.blockchain === sourceSdkName
+      ? source
+      : gasFee.blockchain === destinationSdkName
+        ? destination
+        : undefined;
+    if (!network) throw new Error(`Circle returned a gas estimate for unexpected chain ${gasFee.blockchain}`);
+    if (gasFee.token !== network.nativeCurrency.symbol) {
+      throw new Error(`Circle returned ${gasFee.token} gas for ${network.name}; expected ${network.nativeCurrency.symbol}`);
+    }
+    if (gasFee.error || !gasFee.fees || typeof gasFee.fees.fee !== 'string') {
+      throw new Error(`Circle did not return a complete ${gasFee.name} gas estimate for ${network.name}`);
+    }
+    return {
+      step: gasFee.name,
+      chainId: network.id,
+      tokenSymbol: gasFee.token,
+      decimals: network.nativeCurrency.decimals,
+      amount: parseUnits(gasFee.fees.fee, network.nativeCurrency.decimals),
+    };
+  });
+}
+
+export function createCircleEstimatedBridgeQuote(
+  quote: BridgeQuote,
+  estimate: BridgeEstimateResult,
+  selectedRoute: 'forwarding' | 'cctp',
+  recipient: Address,
+): BridgeQuote {
+  const sourceSdkName = sdkChainById[quote.fromChain.id];
+  const destinationSdkName = sdkChainById[quote.toChain.id];
+  if (!sourceSdkName || !destinationSdkName || estimate.source.chain !== sourceSdkName || estimate.destination.chain !== destinationSdkName) {
+    throw new Error('Circle estimate does not match the selected bridge route');
+  }
+  if (estimate.destination.recipientAddress?.toLowerCase() !== recipient.toLowerCase()) throw new Error('Circle estimate recipient does not match the selected bridge route');
+  if (parseUnits(estimate.amount, 6) !== quote.fromAmount) throw new Error('Circle estimate amount does not match the selected bridge quote');
+
+  const fees = estimate.fees.map((fee) => {
+    if (fee.token !== 'USDC' || fee.amount === null) throw new Error('Circle returned an incomplete USDC fee estimate');
+    return { ...fee, amount: parseUnits(fee.amount, 6) };
+  });
+  const forwardingFee = fees
+    .filter((fee) => isCircleForwardingFeeType(fee.type))
+    .reduce((total, fee) => total + fee.amount, 0n);
+  const protocolFee = fees
+    .filter((fee) => !isCircleForwardingFeeType(fee.type))
+    .reduce((total, fee) => total + fee.amount, 0n);
+  if (selectedRoute === 'cctp' && forwardingFee > 0n) throw new Error('Circle returned a forwarding fee for the selected Standard CCTP route');
+
+  const gasEstimates = mapCircleGasEstimates(estimate, quote.fromChain.id, quote.toChain.id);
+  if (!gasEstimates.some((gas) => gas.chainId === quote.fromChain.id && gas.step.toLowerCase() === 'burn')) {
+    throw new Error('Circle did not return the source burn gas estimate');
+  }
+  if (selectedRoute === 'forwarding' && !isCircleForwardingSupported(quote.fromChain.id, quote.toChain.id)) {
+    throw new Error('Circle forwarding is not supported for the selected route');
+  }
+  if (selectedRoute === 'cctp' && !gasEstimates.some((gas) => gas.chainId === quote.toChain.id && gas.step.toLowerCase() === 'mint')) {
+    throw new Error('Circle did not return the destination mint gas estimate for Standard CCTP');
+  }
+
+  const totalFee = forwardingFee + protocolFee;
+  const destinationAmount = quote.fromAmount > totalFee ? quote.fromAmount - totalFee : 0n;
+  const transferSpeed = selectedRoute === 'forwarding'
+    ? 'Circle forwarding; Arc Standard CCTP attestation'
+    : 'Standard CCTP; slower attestation, user-submitted destination mint';
+
+  return {
+    ...quote,
+    toAmount: destinationAmount,
+    toAmountMin: destinationAmount,
+    feeAmount: totalFee,
+    forwardingFeeAmount: forwardingFee,
+    protocolFeeAmount: protocolFee,
+    totalSourceDebit: quote.fromAmount,
+    feePayment: 'destination',
+    transferSpeed,
+    selectedRoute,
+    gasEstimates,
+    gasCosts: gasEstimates.map((gas) => `${gas.step}: ${formatUnits(gas.amount, gas.decimals)} ${gas.tokenSymbol}`),
+    raw: {
+      ...((quote.raw as object) ?? {}),
+      circleFees: estimate.fees,
+      circleGasFees: estimate.gasFees,
+      transferSpeed,
+    },
+  };
+}
+
+export async function estimateStandardCircleCctp(input: {
+  provider: EIP1193Provider;
+  sourceChainId: number;
+  destinationChainId: number;
+  recipient: Address;
+  amount: bigint;
+  timing?: ArcForwardingTiming;
+}): Promise<BridgeEstimateResult> {
+  const sourceChain = sdkChainById[input.sourceChainId];
+  const destinationChain = sdkChainById[input.destinationChainId];
+  if (!isStandardCctpSupported(input.sourceChainId, input.destinationChainId)) throw new Error('Circle Standard CCTP is unavailable for this route');
+  const adapter = await timeArcForwardingAwait(input.timing, 'Circle Standard CCTP quote adapter creation', () =>
+    createViemAdapterFromProvider({ provider: withWalletRequestDiagnostics(input.provider) }),
+  );
+  return timeArcForwardingAwait(input.timing, 'Circle Standard CCTP quote estimate', () =>
+    kit.estimate({
+      from: { adapter, chain: sourceChain },
+      to: { adapter, chain: destinationChain, recipientAddress: input.recipient },
+      amount: `${input.amount / 1_000_000n}.${(input.amount % 1_000_000n).toString().padStart(6, '0')}`,
+      token: 'USDC',
+      config: { transferSpeed: 'SLOW' },
+    }),
+  );
+}
+
+export async function estimateCircleForwarding(input: { provider: EIP1193Provider; sourceChainId: number; destinationChainId: number; recipient: Address; amount: bigint; timing?: ArcForwardingTiming }, onDiagnostic?: (stage: 'createViemAdapterFromProvider' | 'estimateCircleForwarding', error: unknown) => void): Promise<CircleForwardingEstimate> {
   let adapter: CircleAdapter;
   try {
-    adapter = await createViemAdapterFromProvider({ provider: withWalletRequestDiagnostics(input.provider) });
+    adapter = await timeArcForwardingAwait(input.timing, 'Circle forwarding quote adapter creation', () => createViemAdapterFromProvider({ provider: withWalletRequestDiagnostics(input.provider) }));
   } catch (error) {
     onDiagnostic?.('createViemAdapterFromProvider', error);
     throw error;
   }
   let estimate: Awaited<ReturnType<typeof kit.estimate>>;
   try {
-    estimate = await kit.estimate(createCircleForwardingParams(input, adapter));
+    estimate = await timeArcForwardingAwait(input.timing, 'Circle forwarding quote estimate', () => kit.estimate(createCircleForwardingParams(input, adapter)));
   } catch (error) {
     onDiagnostic?.('estimateCircleForwarding', error);
     throw error;
   }
   const fees = estimate.fees.map((fee) => ({ type: fee.type, amount: fee.amount, token: fee.token }));
-  const toUnits = (amount: string | null) => amount ? parseUnits(amount, 6) : 0n;
   const estimateRecord = estimate as typeof estimate & { amountReceived?: string; totalDebit?: string; feeTotal?: string; feeItems?: readonly { type: string; amount: string }[]; quote?: unknown };
   const authoritativeFees = estimateRecord.feeItems?.map((fee) => ({ type: fee.type, amount: fee.amount, token: 'USDC' })) ?? fees;
-  const forwardingFee = authoritativeFees.filter((fee) => fee.type === 'FORWARD' || fee.type === 'forwarder').reduce((total, fee) => total + toUnits(fee.amount), 0n);
-  const protocolFee = authoritativeFees.filter((fee) => fee.type !== 'FORWARD' && fee.type !== 'forwarder').reduce((total, fee) => total + toUnits(fee.amount), 0n);
+  const parseFee = (fee: { amount: string | null; token: string }) => {
+    if (fee.token !== 'USDC' || fee.amount === null) throw new Error('Circle returned an incomplete USDC forwarding fee estimate');
+    return parseUnits(fee.amount, 6);
+  };
+  const forwardingFee = authoritativeFees.filter((fee) => fee.type === 'FORWARD' || fee.type === 'forwarder').reduce((total, fee) => total + parseFee(fee), 0n);
+  const protocolFee = authoritativeFees.filter((fee) => fee.type !== 'FORWARD' && fee.type !== 'forwarder').reduce((total, fee) => total + parseFee(fee), 0n);
   const totalFee = forwardingFee + protocolFee;
   const sourcePaid = getCircleForwardingConfig(input.sourceChainId).feePayment === 'source';
   const { destinationAmount, totalSourceDebit } = calculateForwardingQuoteAmounts({ amount: input.amount, totalFee, feePayment: sourcePaid ? 'source' : 'destination', amountReceived: estimateRecord.amountReceived, totalDebit: estimateRecord.totalDebit });
-  return { fees: authoritativeFees, forwardingFee, protocolFee, totalFee, destinationAmount, totalSourceDebit, feePayment: sourcePaid ? 'source' : 'destination', quote: estimateRecord.quote, transferSpeed: getCircleForwardingConfig(input.sourceChainId).transferSpeed };
+  return { fees: authoritativeFees, gasEstimates: mapCircleGasEstimates(estimate, input.sourceChainId, input.destinationChainId), forwardingFee, protocolFee, totalFee, destinationAmount, totalSourceDebit, feePayment: sourcePaid ? 'source' : 'destination', sdkEstimate: estimate, quote: estimateRecord.quote, transferSpeed: getCircleForwardingConfig(input.sourceChainId).transferSpeed };
 }
 
 export function getWalletRequestDiagnostic(args: { method: string; params?: unknown }) {
@@ -320,12 +477,8 @@ export function getWalletRequestDiagnostic(args: { method: string; params?: unkn
   return {
     method: args.method,
     chainId: transaction?.chainId ?? domain?.chainId,
-    from: transaction?.from,
-    to: transaction?.to,
-    value: transaction?.value,
     dataSelector: typeof transaction?.data === 'string' ? transaction.data.slice(0, 10) : undefined,
-    gas: transaction ? { gas: transaction.gas, gasPrice: transaction.gasPrice, maxFeePerGas: transaction.maxFeePerGas, maxPriorityFeePerGas: transaction.maxPriorityFeePerGas } : undefined,
-    typedData: domain ? { name: domain.name, version: domain.version, chainId: domain.chainId, verifyingContract: domain.verifyingContract, primaryType: first?.primaryType } : undefined,
+    hasTypedData: Boolean(domain),
   };
 }
 
@@ -408,7 +561,7 @@ export async function executeCircleForwarding(input: {
     input.timing,
   );
   const bridgeParams = createCircleForwardingParams(input, adapter);
-  const estimate = input.quote ? undefined : await kit.estimate(bridgeParams);
+  const estimate = input.quote ? undefined : await timeArcForwardingAwait(input.timing, 'Circle forwarding execution estimate', () => kit.estimate(bridgeParams));
   const estimateRecord = estimate as (typeof estimate & { amountReceived?: string; totalDebit?: string; quote?: unknown }) | undefined;
   const destinationAmount = input.destinationAmount ?? (estimateRecord?.amountReceived ? parseUnits(estimateRecord.amountReceived, 6) : calculateForwardedDestinationAmount(input.amount, estimateRecord?.fees.map((fee) => fee.amount) ?? []));
   const totalSourceDebit = input.totalSourceDebit ?? (estimateRecord?.totalDebit ? parseUnits(estimateRecord.totalDebit, 6) : input.amount);
@@ -429,19 +582,11 @@ export async function executeCircleForwarding(input: {
   eventKit.on('fetchAttestation', handleAttestation);
   eventKit.on('mint', handleMint);
   let result: BridgeResult;
-  const originalFetch = globalThis.fetch;
-  if (input.timing) {
-    globalThis.fetch = (async (request: RequestInfo | URL, init?: RequestInit) => {
-      const url = request instanceof Request ? request.url : String(request);
-      if (!url.includes('/v2/burn/USDC/fees/26/0')) return originalFetch.call(globalThis, request, init);
-      const feeName = url.includes('forward=true') ? 'forwarding fee request' : 'FAST burn fee request';
-      return timeArcForwardingAwait(input.timing, feeName, () => originalFetch.call(globalThis, request, init));
-    }) as typeof fetch;
-  }
   try {
-    result = await executionKit.bridge(input.quote ? { ...bridgeParams, quote: input.quote } : estimateRecord?.quote ? { ...bridgeParams, quote: estimateRecord.quote } : bridgeParams);
+    result = await timeArcForwardingAwait(input.timing, 'Circle BridgeKit execution', () =>
+      executionKit.bridge(input.quote ? { ...bridgeParams, quote: input.quote } : estimateRecord?.quote ? { ...bridgeParams, quote: estimateRecord.quote } : bridgeParams),
+    );
   } finally {
-    if (input.timing) globalThis.fetch = originalFetch;
     eventKit.off('burn', handleBurn);
     eventKit.off('fetchAttestation', handleAttestation);
     eventKit.off('mint', handleMint);

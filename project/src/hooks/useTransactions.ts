@@ -23,6 +23,7 @@ export interface UseTransactionsResult {
   error: Error | null;
   refetch: () => void;
   isFetching: boolean;
+  lastScannedAt: number | null;
 }
 
 export function useTransactions(
@@ -30,10 +31,11 @@ export function useTransactions(
   enabled = true,
   chainId: number = arcTestnet.id,
   fetchAllPages = false,
+  refreshOnMount = false,
 ): UseTransactionsResult {
   const shouldFetchAllPages = fetchAllPages && chainId === arcTestnet.id;
   const query = useQuery({
-    queryKey: ['transactions', address, chainId, shouldFetchAllPages],
+    queryKey: ['transactions', address?.toLowerCase(), chainId, shouldFetchAllPages],
     queryFn: async () => {
       if (!address) return [];
       const provider = getTransactionProviderForChain(chainId);
@@ -41,20 +43,25 @@ export function useTransactions(
       return provider.fetchTransactions({ address, chainId, limit: 20, fetchAllPages: shouldFetchAllPages });
     },
     enabled: Boolean(address) && enabled && isTransactionChainSupported(chainId),
-    staleTime: 60_000,
+    staleTime: refreshOnMount ? 0 : 60_000,
     refetchOnWindowFocus: false,
     placeholderData: (previousData, previousQuery) =>
-      previousQuery && previousQuery.queryKey[1] === address && previousQuery.queryKey[2] === chainId
+      previousQuery &&
+      previousQuery.queryKey[1] === address?.toLowerCase() &&
+      previousQuery.queryKey[2] === chainId
         ? previousData
         : undefined,
   });
 
   return {
-    transactions: query.data ?? [],
+    transactions: query.isFetching || (refreshOnMount && query.isError) ? [] : query.data ?? [],
     isLoading: query.isLoading,
     isError: query.isError,
     error: query.error,
     refetch: () => query.refetch(),
     isFetching: query.isFetching,
+    lastScannedAt: !query.isFetching && !(refreshOnMount && query.isError) && query.dataUpdatedAt > 0
+      ? query.dataUpdatedAt
+      : null,
   };
 }
