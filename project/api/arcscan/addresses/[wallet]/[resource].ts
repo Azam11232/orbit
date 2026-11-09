@@ -1,4 +1,5 @@
 const ARC_SCAN_API_BASE_URL = 'https://explorer.testnet.arc.io/api/v2';
+const ARC_SCAN_TIMEOUT_MS = 10_000;
 const WALLET_ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const ALLOWED_RESOURCES = new Set(['transactions', 'token-transfers', 'contract-info']);
 const TRANSACTION_PAGE_PARAMS = new Set(['index', 'value', 'hash', 'inserted_at', 'block_number', 'fee']);
@@ -65,6 +66,21 @@ export default async function handler(request: VercelRequest, response: VercelRe
     return;
   }
 
+  for (const [parameter, expected] of [['wallet', address], ['resource', resource]] as const) {
+    const values = requestUrl.searchParams.getAll(parameter);
+    if (
+      values.length > 1 ||
+      (values.length === 1 && values[0].toLowerCase() !== expected.toLowerCase())
+    ) {
+      response.status(400).json({
+        error: 'Invalid ArcScan transaction request',
+        details: `The "${parameter}" query parameter must match the request path.`,
+      });
+      return;
+    }
+    requestUrl.searchParams.delete(parameter);
+  }
+
   if (resource === 'contract-info') {
     if (requestUrl.searchParams.toString() !== '') {
       response.status(400).json({
@@ -99,6 +115,7 @@ export default async function handler(request: VercelRequest, response: VercelRe
   try {
     const upstreamResponse = await fetch(upstreamUrl, {
       headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(ARC_SCAN_TIMEOUT_MS),
     });
     const body = await upstreamResponse.text();
 
@@ -107,7 +124,11 @@ export default async function handler(request: VercelRequest, response: VercelRe
     const retryAfter = upstreamResponse.headers.get('retry-after');
     if (retryAfter) response.setHeader('Retry-After', retryAfter);
     response.send(body);
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      response.status(504).json({ error: 'ArcScan request timed out' });
+      return;
+    }
     response.status(502).json({ error: 'Unable to reach ArcScan' });
   }
 }

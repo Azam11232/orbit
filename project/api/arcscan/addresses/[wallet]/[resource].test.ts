@@ -55,7 +55,8 @@ describe('ArcScan contract-info proxy', () => {
 
     const [url, options] = fetchMock.mock.calls[0];
     expect(String(url)).toBe(`https://explorer.testnet.arc.io/api/v2/addresses/${address}`);
-    expect(options).toEqual({ headers: { Accept: 'application/json' } });
+    expect(options).toMatchObject({ headers: { Accept: 'application/json' } });
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
     expect(state.statusCode).toBe(200);
     expect(JSON.parse(state.body ?? '')).toEqual({ is_contract: true, is_verified: true });
   });
@@ -115,6 +116,76 @@ describe('ArcScan contract-info proxy', () => {
     expect(upstreamUrl.pathname).toBe(`/api/v2/addresses/${address}/transactions`);
     expect(upstreamUrl.searchParams.toString()).toBe(params.toString());
     expect(state.statusCode).toBe(200);
+  });
+
+  it('strips Vercel dynamic route parameters before forwarding transaction pagination', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response(
+        JSON.stringify({ items: [], next_page_params: null }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { response, state } = responseRecorder();
+
+    await handler({
+      method: 'GET',
+      url: `/api/arcscan/addresses/${address}/transactions?items_count=20&wallet=${address}&resource=transactions`,
+      query: { wallet: address, resource: 'transactions' },
+    }, response);
+
+    const upstreamUrl = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(upstreamUrl.pathname).toBe(`/api/v2/addresses/${address}/transactions`);
+    expect(upstreamUrl.search).toBe('?items_count=20');
+    expect(state.statusCode).toBe(200);
+  });
+
+  it('strips Vercel dynamic route parameters before checking contract-info query parameters', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response(
+        JSON.stringify({ is_contract: true, is_verified: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { response, state } = responseRecorder();
+
+    await handler({
+      method: 'GET',
+      url: `/api/arcscan/addresses/${address}/contract-info?wallet=${address}&resource=contract-info`,
+      query: { wallet: address, resource: 'contract-info' },
+    }, response);
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      `https://explorer.testnet.arc.io/api/v2/addresses/${address}`,
+    );
+    expect(state.statusCode).toBe(200);
+  });
+
+  it('rejects Vercel route parameters that do not match the request path', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response();
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { response, state } = responseRecorder();
+
+    await handler({
+      method: 'GET',
+      url: `/api/arcscan/addresses/${address}/transactions?items_count=20&wallet=0x4600000000000000000000000000000000000000&resource=transactions`,
+    }, response);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(state.statusCode).toBe(400);
+    expect(JSON.parse(state.body ?? '')).toEqual({
+      error: 'Invalid ArcScan transaction request',
+      details: 'The "wallet" query parameter must match the request path.',
+    });
   });
 
   it('returns the specific local validation reason for an unsupported cursor field', async () => {
@@ -180,5 +251,22 @@ describe('ArcScan contract-info proxy', () => {
     expect(state.statusCode).toBe(429);
     expect(state.headers['retry-after']).toBe('2');
     expect(JSON.parse(state.body ?? '')).toEqual({ message: 'rate limit exceeded' });
+  });
+
+  it('returns a gateway timeout when ArcScan does not respond in time', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      throw new DOMException('The operation timed out', 'TimeoutError');
+    }));
+    const { response, state } = responseRecorder();
+
+    await handler({
+      method: 'GET',
+      url: `/api/arcscan/addresses/${address}/transactions?items_count=20&wallet=${address}&resource=transactions`,
+    }, response);
+
+    expect(state.statusCode).toBe(504);
+    expect(JSON.parse(state.body ?? '')).toEqual({ error: 'ArcScan request timed out' });
   });
 });
