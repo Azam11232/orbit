@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import handler from './[resource]';
+import handler from './[resource].js';
 
 const address = '0x3600000000000000000000000000000000000000';
 
@@ -36,10 +36,14 @@ afterEach(() => {
 
 describe('ArcScan contract-info proxy', () => {
   it('uses the live supported address endpoint and returns verified metadata', async () => {
-    const fetchMock = vi.fn(async () => new Response(
-      JSON.stringify({ is_contract: true, is_verified: true }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response(
+        JSON.stringify({ is_contract: true, is_verified: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
     vi.stubGlobal('fetch', fetchMock);
     const { response, state } = responseRecorder();
 
@@ -57,10 +61,14 @@ describe('ArcScan contract-info proxy', () => {
   });
 
   it('does not let query fields override the address and resource from the route path', async () => {
-    const fetchMock = vi.fn(async () => new Response(
-      JSON.stringify({ is_contract: true, is_verified: true }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response(
+        JSON.stringify({ is_contract: true, is_verified: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
     vi.stubGlobal('fetch', fetchMock);
     const { response, state } = responseRecorder();
 
@@ -77,10 +85,14 @@ describe('ArcScan contract-info proxy', () => {
   });
 
   it('forwards live ArcScan transaction cursor fields without changing their values', async () => {
-    const fetchMock = vi.fn(async () => new Response(
-      JSON.stringify({ items: [], next_page_params: null }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response(
+        JSON.stringify({ items: [], next_page_params: null }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
     vi.stubGlobal('fetch', fetchMock);
     const params = new URLSearchParams({
       items_count: '20',
@@ -106,7 +118,11 @@ describe('ArcScan contract-info proxy', () => {
   });
 
   it('returns the specific local validation reason for an unsupported cursor field', async () => {
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response();
+    });
     vi.stubGlobal('fetch', fetchMock);
     const { response, state } = responseRecorder();
 
@@ -124,10 +140,14 @@ describe('ArcScan contract-info proxy', () => {
   });
 
   it('passes upstream HTTP 400 responses through with their diagnostic body', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ message: 'Invalid address request' }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )));
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response(
+        JSON.stringify({ message: 'Invalid address request' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
+    }));
     const { response, state } = responseRecorder();
 
     await handler({
@@ -141,10 +161,14 @@ describe('ArcScan contract-info proxy', () => {
   });
 
   it('passes upstream rate limits and Retry-After through to the caller', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ message: 'rate limit exceeded' }),
-      { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } },
-    )));
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input;
+      void _init;
+      return new Response(
+        JSON.stringify({ message: 'rate limit exceeded' }),
+        { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } },
+      );
+    }));
     const { response, state } = responseRecorder();
 
     await handler({

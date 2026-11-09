@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ARC_PRIMARY_NETWORK, ETHEREUM_SEPOLIA, ORBIT_NETWORKS, getOrbitNetwork } from '../data/networks';
 import type { Address } from 'viem';
-import { createGatewayTransferSpec, estimateGatewayTransfer, fetchGatewayBalances, gatewayNetworkForDomain, gatewayNetworks, isGatewayTransferRouteValid, parseGatewayAmount, sumGatewayBalances, sumGatewayPendingBatches } from './gateway';
+import { createGatewayTransferSpec, estimateGatewayTransfer, fetchGatewayBalances, gatewayNetworkForDomain, gatewayNetworks, getGatewayBalanceStatus, isGatewayTransferRouteValid, parseGatewayAmount, sumGatewayBalances, sumGatewayPendingBatches } from './gateway';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -22,6 +22,13 @@ function gatewayBalancesResponse(overrides: Record<number, string> = {}) {
 }
 
 describe('Circle Gateway registry and accounting', () => {
+  it('distinguishes loading, unavailable, available zero, and stale cached balance states', () => {
+    expect(getGatewayBalanceStatus({ hasData: false, isLoading: true, isError: false })).toBe('loading');
+    expect(getGatewayBalanceStatus({ hasData: false, isLoading: false, isError: true })).toBe('unavailable');
+    expect(getGatewayBalanceStatus({ hasData: true, isLoading: false, isError: false })).toBe('available');
+    expect(getGatewayBalanceStatus({ hasData: true, isLoading: false, isError: true })).toBe('stale');
+  });
+
   it('marks the verified EVM testnets as Gateway-supported', () => {
     expect(gatewayNetworks).toHaveLength(7);
     expect(gatewayNetworks.every((network) => network.capabilities.gateway)).toBe(true);

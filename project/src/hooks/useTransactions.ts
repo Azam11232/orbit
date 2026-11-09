@@ -54,13 +54,13 @@ export function useTransactions(
   });
 
   return {
-    transactions: query.isFetching || (refreshOnMount && query.isError) ? [] : query.data ?? [],
+    transactions: query.data ?? [],
     isLoading: query.isLoading,
     isError: query.isError,
     error: query.error,
     refetch: () => query.refetch(),
     isFetching: query.isFetching,
-    lastScannedAt: !query.isFetching && !(refreshOnMount && query.isError) && query.dataUpdatedAt > 0
+    lastScannedAt: query.dataUpdatedAt > 0
       ? query.dataUpdatedAt
       : null,
   };

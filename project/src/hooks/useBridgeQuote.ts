@@ -3,13 +3,17 @@ import { useQuery } from '@tanstack/react-query';
 import { usePublicClient } from 'wagmi';
 import { formatUnits, type Address } from 'viem';
 import { createCctpProvider } from '../services/bridge/cctp';
-import { createCircleEstimatedBridgeQuote, estimateCircleForwarding, estimateStandardCircleCctp, getCircleEstimateFeeTotal, isCircleForwardingSupported, isStandardCctpSupported, selectCircleBridgeRoute } from '../services/bridge/circleForwarding';
-import { ARC_PRIMARY_NETWORK, ETHEREUM_SEPOLIA } from '../data/networks';
-import { associateBridgeQuoteTiming, beginArcForwardingTiming, getBridgeErrorCategory, markArcForwardingTiming, timeArcForwardingAwait } from '../services/bridge/arcForwardingTiming';
+import { createCircleEstimatedBridgeQuote, estimateCircleForwarding, estimateStandardCircleCctp, getCircleEstimateFeeTotal, isCircleForwardingSupported, isStandardCctpSupported, selectCircleBridgeRoute, selectCircleExecutionRoute } from '../services/bridge/circleForwarding';
+import { ARC_PRIMARY_NETWORK, ETHEREUM_SEPOLIA, getOrbitNetwork } from '../data/networks';
+import { associateBridgeQuoteTiming, beginArcForwardingTiming, getBridgeErrorCategory, timeArcForwardingAwait } from '../services/bridge/arcForwardingTiming';
 import type { BridgeChain, BridgeQuote, BridgeToken } from '../types/bridge';
 
 const provider = createCctpProvider();
 const BRIDGE_QUOTE_MAX_AGE_MS = 30_000;
+
+export type BridgeNativeGasRequirement =
+  | { amount: bigint; tokenSymbol: string; decimals: number }
+  | { error: string };
 
 export type BridgeQuoteFreshnessState = 'unavailable' | 'loading' | 'refreshing' | 'refresh-failed' | 'stale' | 'fresh';
 
@@ -69,6 +73,50 @@ export function isBridgeQuoteCurrent(input: {
     (input.recipientAddress === undefined || quote.recipientAddress?.toLowerCase() === input.recipientAddress.toLowerCase()) &&
     quote.fromAmount === input.amount &&
     (input.selectedRoute === undefined || quote.selectedRoute === input.selectedRoute);
+}
+
+export function getBridgeNativeGasRequirement(quote: BridgeQuote | undefined, chainId: number, approvalRequired = false): BridgeNativeGasRequirement {
+  const network = getOrbitNetwork(chainId);
+  if (!network || !quote || !quote.gasEstimates) {
+    return { error: 'Circle did not provide a source network gas estimate.' };
+  }
+  const estimates = quote.gasEstimates.filter((gas) =>
+    gas.chainId === chainId && (approvalRequired || gas.step.toLowerCase() !== 'approve'),
+  );
+  if (estimates.length === 0) return { error: `Circle did not provide a source transaction gas estimate for ${network.name}.` };
+  if (approvalRequired && !estimates.some((gas) => gas.step.toLowerCase() === 'approve')) {
+    return { error: `Circle did not provide an approval gas estimate for ${network.name}.` };
+  }
+  if (estimates.some((gas) =>
+    gas.tokenSymbol !== network.nativeCurrency.symbol ||
+    gas.decimals !== network.nativeCurrency.decimals ||
+    gas.amount < 0n,
+  )) {
+    return { error: `Circle returned an invalid ${network.nativeCurrency.symbol} gas estimate for ${network.name}.` };
+  }
+  return {
+    amount: estimates.reduce((total, gas) => total + gas.amount, 0n),
+    tokenSymbol: network.nativeCurrency.symbol,
+    decimals: network.nativeCurrency.decimals,
+  };
+}
+
+export function isBridgeNativeGasReady(input: {
+  applicable: boolean;
+  quoteCurrent: boolean;
+  loading: boolean;
+  balance: bigint | null;
+  error: boolean;
+  requirement: BridgeNativeGasRequirement;
+}) {
+  return !input.applicable || (
+    input.quoteCurrent &&
+    !('error' in input.requirement) &&
+    !input.loading &&
+    !input.error &&
+    input.balance !== null &&
+    input.balance >= input.requirement.amount
+  );
 }
 
 type BridgeQuoteSnapshot = Pick<BridgeQuote, 'id' | 'quotedAt' | 'selectedRoute' | 'fromAmount' | 'toAmount' | 'toAmountMin' | 'feeAmount' | 'forwardingFeeAmount' | 'protocolFeeAmount' | 'fromChain' | 'toChain' | 'fromToken' | 'toToken' | 'recipientAddress'>;
@@ -260,7 +308,11 @@ export function useBridgeQuote(fromChain: BridgeChain, toChain: BridgeChain, fro
             forwardingFeeAmount: forwardingEstimate?.totalFee,
             standardCctpFeeAmount: standardFee,
           });
-          const selectedRoute = preferredRoute === 'auto' || preferredRoute === undefined ? recommendedRoute : preferredRoute;
+          const selectedRoute = selectCircleExecutionRoute({
+            preferredRoute,
+            recommendedRoute,
+            forwardingSupported,
+          });
           const routeComparison = {
             forwardingFeeAmount: forwardingEstimate?.totalFee ?? null,
             standardCctpFeeAmount: standardFee ?? null,
@@ -283,7 +335,7 @@ export function useBridgeQuote(fromChain: BridgeChain, toChain: BridgeChain, fro
               routeComparison,
             }, timing);
           }
-          if (!forwardingEstimate) throw new Error('Circle forwarding is not supported for the selected route');
+          if (!forwardingEstimate) throw new Error('Circle forwarding estimate is unavailable for the selected route');
           const estimate = forwardingEstimate;
           const forwardingQuote = createCircleEstimatedBridgeQuote(quote, estimate.sdkEstimate, 'forwarding', address as Address);
           const feeError = getRouteFeeError({
@@ -375,7 +427,7 @@ export function useBridgeQuote(fromChain: BridgeChain, toChain: BridgeChain, fro
         totalSourceDebit: estimate.totalSourceDebit,
         feePayment: estimate.feePayment,
         transferSpeed: selectableArcSepoliaRoute
-          ? 'Circle forwarding; Arc Standard CCTP attestation'
+          ? 'Circle forwarding; Circle-managed destination mint'
           : estimate.transferSpeed,
         gasEstimates: estimate.gasEstimates,
         gasCosts: estimate.gasEstimates.map((gas) => `${gas.step}: ${formatUnits(gas.amount, gas.decimals)} ${gas.tokenSymbol}`),
@@ -394,12 +446,14 @@ export function useBridgeQuote(fromChain: BridgeChain, toChain: BridgeChain, fro
     refetchOnWindowFocus: false,
   });
   const [freshnessNow, setFreshnessNow] = useState(() => Date.now());
+  const quoteData = query.data;
+  const refetchQuote = query.refetch;
   const isFetchingRef = useRef(query.isFetching);
   isFetchingRef.current = query.isFetching;
   useEffect(() => {
-    if (!query.data) return;
+    if (!quoteData) return;
     setFreshnessNow(Date.now());
-    const expiresAt = query.data.quotedAt + BRIDGE_QUOTE_MAX_AGE_MS;
+    const expiresAt = quoteData.quotedAt + BRIDGE_QUOTE_MAX_AGE_MS;
     const timeout = window.setTimeout(
       () => {
         const now = Date.now();
@@ -409,12 +463,12 @@ export function useBridgeQuote(fromChain: BridgeChain, toChain: BridgeChain, fro
           queryEnabled: quoteQueryEnabled,
           executionStarted,
           isFetching: isFetchingRef.current,
-        })) void query.refetch();
+        })) void refetchQuote();
       },
       Math.max(0, expiresAt - Date.now() + 1),
     );
     return () => window.clearTimeout(timeout);
-  }, [executionStarted, query.data?.quotedAt, query.refetch, quoteQueryEnabled]);
+  }, [executionStarted, quoteData, quoteQueryEnabled, refetchQuote]);
   const sourceClient = usePublicClient({ chainId: fromChain.id });
   const forwardingEnabled = isCircleForwardingSupported(fromChain.id, toChain.id);
   const manualSimulationRequired = isManualBridgeSimulationRequired(query.data?.selectedRoute);

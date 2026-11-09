@@ -10,7 +10,7 @@ import {
   type PublicClient,
 } from 'viem';
 import { ARC_TESTNET } from '../data/networks';
-import { ARC_ERC20_ASSETS, ARC_USDC } from '../data/tokens';
+import { ARC_EURC, ARC_USDC } from '../data/tokens';
 import type { ChainTransaction } from './transactions';
 
 export type ApprovalRisk = 'High' | 'Medium' | 'Low' | 'Unknown';
@@ -34,6 +34,12 @@ interface CachedApprovalScanState {
   fromBlock: string;
   coveredRanges: Array<{ fromBlock: string; toBlock: string }>;
   spenderBlocks: Record<string, string>;
+  nextScanBlock?: string;
+  failedRanges?: Array<{ fromBlock: string; toBlock: string }>;
+  maxBlockRange?: string;
+  lastSuccessfulAt?: number;
+  lastSuccessfulRange?: { fromBlock: string; toBlock: string };
+  retryAfterAt?: number;
 }
 
 export interface TokenApproval {
@@ -46,6 +52,8 @@ export interface TokenApproval {
   risk: ApprovalRisk;
   status: string;
   lastSeenBlock: bigint;
+  allowanceCheckedBlock: bigint;
+  allowanceCheckedAt: number;
   tokenVerified: boolean | null;
   spenderVerified: boolean | null;
 }
@@ -56,20 +64,42 @@ export interface ApprovalScanResult {
   chainId: number;
   scannedFromBlock: bigint;
   scannedToBlock: bigint;
+  historyWindowBlocks: bigint;
   scope: string;
   errors: string[];
   isComplete: boolean;
-  lastScannedAt: number;
+  coveredBlocks: bigint;
+  totalBlocks: bigint;
+  tokenCoverage: Array<{
+    symbol: string;
+    coveredRanges: Array<{ fromBlock: bigint; toBlock: bigint }>;
+    failedRanges: Array<{ fromBlock: bigint; toBlock: bigint }>;
+    remainingRanges: Array<{ fromBlock: bigint; toBlock: bigint }>;
+    remainingRangeCount: number;
+    lastSuccessfulAt: number | null;
+    lastSuccessfulRange: { fromBlock: bigint; toBlock: bigint } | null;
+  }>;
+  lastSuccessfulAt: number | null;
+  lastScanAttemptAt: number;
+  retryAfterAt: number | null;
 }
 
 export function summarizeApprovalScanErrors(errors: string[]): string[] {
   const grouped = new Map<string, { count: number; example: string }>();
   const otherErrors = [...new Set(errors)];
+  const logFailureCategory = (detail: string) => {
+    if (/rate.?limit|too many requests|\b429\b/i.test(detail)) return 'rate-limited';
+    if (/request exceeds defined limit|response (?:size|too large)|result(?:s)? (?:set )?too large|requested range too large|range.{0,40}(?:too large|exceed|maximum|limit)/i.test(detail)) return 'range-limit rejected';
+    if (/requested data not available|historical data unavailable|pruned history unavailable|unknown block/i.test(detail)) return 'block data unavailable';
+    if (/timeout|timed out|deadline exceeded/i.test(detail)) return 'timed out';
+    if (/fetch failed|network error|connection refused|connection reset/i.test(detail)) return 'network unavailable';
+    return 'failed';
+  };
   const groupedPatterns = [
     {
       pattern: /^(.+?) Approval events blocks [\d-]+: (.*)$/i,
       label: (token: string, detail: string) =>
-        `${token} approval log ranges ${/rate.?limit|too many requests|\b429\b/i.test(detail) ? 'rate-limited' : 'failed'}`,
+        `${token} approval log ranges ${logFailureCategory(detail)}`,
     },
     {
       pattern: /^(.+?) spender verification for 0x[a-f\d]+: (.*)$/i,
@@ -105,7 +135,7 @@ export function summarizeApprovalScanErrors(errors: string[]): string[] {
   return summaries;
 }
 
-export const APPROVAL_TOKENS: ApprovalTokenConfig[] = ARC_ERC20_ASSETS.map((asset) => ({
+export const APPROVAL_TOKENS: ApprovalTokenConfig[] = [ARC_USDC, ARC_EURC].map((asset) => ({
   symbol: asset.symbol,
   name: asset.name,
   address: asset.address,
@@ -122,15 +152,56 @@ export function canRevokeApproval(approval: TokenApproval): boolean {
     );
 }
 
+export type RevokeConfirmationStatus = 'success' | 'confirmation-pending' | 'verification-pending' | 'error';
+
+export function getRevokeConfirmationStatus({
+  receiptStatus,
+  expectedWallet,
+  receiptWallet,
+  allowanceAtReceipt,
+  refreshedAllowance,
+}: {
+  receiptStatus: 'success' | 'reverted' | null;
+  expectedWallet: Address;
+  receiptWallet: Address;
+  allowanceAtReceipt?: bigint;
+  refreshedAllowance?: bigint;
+}): RevokeConfirmationStatus {
+  if (receiptStatus === null) return 'confirmation-pending';
+  if (receiptStatus !== 'success' || receiptWallet.toLowerCase() !== expectedWallet.toLowerCase()) return 'error';
+  if (allowanceAtReceipt === undefined || refreshedAllowance === undefined) return 'verification-pending';
+  return allowanceAtReceipt === 0n && refreshedAllowance === 0n ? 'success' : 'error';
+}
+
 const approvalEvent = parseAbiItem(
   'event Approval(address indexed owner, address indexed spender, uint256 value)',
 );
-const APPROVAL_SCAN_BLOCK_WINDOW = 1_000_000n;
+export const APPROVAL_SCAN_HISTORY_WINDOWS = [50_000, 100_000, 250_000] as const;
+export type ApprovalScanHistoryWindow = (typeof APPROVAL_SCAN_HISTORY_WINDOWS)[number];
+export const DEFAULT_APPROVAL_SCAN_HISTORY_WINDOW: ApprovalScanHistoryWindow = 50_000;
+export const APPROVAL_SCAN_HISTORY_WINDOW_STORAGE_KEY = 'orbit:approval-scan-history-window';
+
+export function getPreferredApprovalScanHistoryWindow(): ApprovalScanHistoryWindow {
+  try {
+    const savedWindow = Number(localStorage.getItem(APPROVAL_SCAN_HISTORY_WINDOW_STORAGE_KEY));
+    const isSupportedWindow = (window: number): window is ApprovalScanHistoryWindow =>
+      APPROVAL_SCAN_HISTORY_WINDOWS.some((candidate) => candidate === window);
+    return isSupportedWindow(savedWindow) ? savedWindow : DEFAULT_APPROVAL_SCAN_HISTORY_WINDOW;
+  } catch {
+    return DEFAULT_APPROVAL_SCAN_HISTORY_WINDOW;
+  }
+}
 const APPROVAL_LOG_BLOCK_CHUNK = 10_000n;
-const APPROVAL_LOG_REQUEST_GAP_MS = 300;
-const MAX_CONCURRENT_APPROVAL_LOG_REQUESTS = 2;
+const MAX_APPROVAL_LOG_CHUNKS_PER_TOKEN_PER_SCAN = 50;
+const MAX_APPROVAL_LOG_RANGES_IN_MEMORY_PER_TOKEN = 2_000;
+const APPROVAL_LOG_REQUEST_GAP_MS = 500;
+const MAX_CONCURRENT_APPROVAL_LOG_REQUESTS = 1;
 const MAX_APPROVAL_LOG_RETRIES = 2;
 const APPROVAL_LOG_RETRY_BASE_MS = 500;
+const MAX_APPROVAL_LOG_RETRY_DELAY_MS = 30_000;
+const APPROVAL_LOG_RATE_LIMIT_COOLDOWN_MS = 5_000;
+const MAX_APPROVAL_LOG_SPLIT_DEPTH = 14;
+const MAX_APPROVAL_LOG_REQUESTS_PER_TOKEN_PER_SCAN = 200;
 const APPROVAL_LOG_CACHE_TTL_MS = 30 * 60_000;
 const APPROVAL_LOG_CACHE_MAX_ENTRIES = 2_000;
 const APPROVAL_SCAN_CACHE_VERSION = 1;
@@ -146,9 +217,28 @@ const contractVerificationCache = new Map<string, { verified: boolean; expiresAt
 let lastContractVerificationRequestAt = 0;
 const approvalLogsCache = new WeakMap<object, Map<string, CachedApprovalLogRange>>();
 const approvalScanStateCache = new WeakMap<object, Map<string, CachedApprovalScanState>>();
-let activeApprovalLogRequests = 0;
-let nextApprovalLogRequestAt = 0;
-const approvalLogRequestWaiters: Array<() => void> = [];
+interface ApprovalLogThrottleState {
+  activeRequests: number;
+  nextRequestAt: number;
+  pauseUntil: number;
+  requestWaiters: Array<() => void>;
+}
+
+const approvalLogThrottleStates = new WeakMap<object, ApprovalLogThrottleState>();
+const approvalScansInFlight = new Map<string, Promise<ApprovalScanResult>>();
+
+function getApprovalLogThrottleState(client: PublicClient): ApprovalLogThrottleState {
+  const existing = approvalLogThrottleStates.get(client);
+  if (existing) return existing;
+  const state: ApprovalLogThrottleState = {
+    activeRequests: 0,
+    nextRequestAt: 0,
+    pauseUntil: 0,
+    requestWaiters: [],
+  };
+  approvalLogThrottleStates.set(client, state);
+  return state;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -257,6 +347,11 @@ interface ApprovalLogsResult {
   logs: ApprovalLog[];
   errors: string[];
   successfulRanges: Array<{ fromBlock: bigint; toBlock: bigint }>;
+  recommendedBlockRange?: bigint;
+  rateLimited?: boolean;
+  retryAfterAt?: number;
+  deferred?: boolean;
+  newlyScanned?: boolean;
 }
 
 function errorMessage(error: unknown): string {
@@ -277,10 +372,28 @@ function isUnsupportedLogRange(error: unknown): boolean {
       .join(' ');
     if (
       rpcError.code === -32012 ||
-      /requested range too large|(?:block )?range.{0,40}(?:too large|exceed|maximum|limit)/i.test(message)
+      /request exceeds defined limit|response (?:size|too large)|result(?:s)? (?:set )?too large|too many results|requested range too large|query returned more than|maximum block span|block range.{0,40}(?:too wide|too large|exceed|maximum|limit)|(?:block )?range.{0,40}(?:too large|too wide|exceed|maximum|limit)/i.test(message)
     ) {
       return true;
     }
+    current = rpcError.cause;
+  }
+  return false;
+}
+
+function isTransientInternalLogError(error: unknown): boolean {
+  let current = error;
+  while (typeof current === 'object' && current !== null) {
+    const rpcError = current as {
+      cause?: unknown;
+      code?: unknown;
+      message?: unknown;
+      shortMessage?: unknown;
+    };
+    const message = [rpcError.shortMessage, rpcError.message]
+      .filter((value): value is string => typeof value === 'string')
+      .join(' ');
+    if (rpcError.code === -32603 || /\binternal error\b/i.test(message)) return true;
     current = rpcError.cause;
   }
   return false;
@@ -295,6 +408,7 @@ function isRateLimitError(error: unknown): boolean {
       code?: unknown;
       message?: unknown;
       shortMessage?: unknown;
+      response?: { status?: unknown; headers?: Headers | Record<string, string> };
     };
     const message = [rpcError.shortMessage, rpcError.message]
       .filter((value): value is string => typeof value === 'string')
@@ -302,6 +416,7 @@ function isRateLimitError(error: unknown): boolean {
     if (
       rpcError.code === 429 ||
       rpcError.status === 429 ||
+      rpcError.response?.status === 429 ||
       rpcError.code === -32005 ||
       /rate.?limit|too many requests|http 429|\b429\b/i.test(message)
     ) {
@@ -335,24 +450,51 @@ function retryAfterMs(error: unknown): number | undefined {
   return undefined;
 }
 
-async function acquireApprovalLogRequestSlot(): Promise<() => void> {
-  if (activeApprovalLogRequests >= MAX_CONCURRENT_APPROVAL_LOG_REQUESTS) {
-    await new Promise<void>((resolve) => approvalLogRequestWaiters.push(resolve));
-  } else {
-    activeApprovalLogRequests += 1;
+class ApprovalRateLimitDeferredError extends Error {
+  constructor(readonly retryAt: number, message: string) {
+    super(message);
+    this.name = 'ApprovalRateLimitDeferredError';
   }
+}
 
-  const scheduledAt = Math.max(Date.now(), nextApprovalLogRequestAt);
-  nextApprovalLogRequestAt = scheduledAt + APPROVAL_LOG_REQUEST_GAP_MS;
-  while (Date.now() < scheduledAt) await delay(scheduledAt - Date.now());
+class ApprovalScanBudgetExceededError extends Error {
+  constructor() {
+    super('Per-token RPC request budget reached; remaining ranges are deferred until the next refresh.');
+    this.name = 'ApprovalScanBudgetExceededError';
+  }
+}
+
+interface ApprovalLogRequestBudget {
+  remaining: number;
+  rateLimited?: boolean;
+  scanRateLimitState?: { detected: boolean };
+}
+
+async function acquireApprovalLogRequestSlot(
+  throttle: ApprovalLogThrottleState,
+): Promise<() => void> {
+  while (throttle.activeRequests >= MAX_CONCURRENT_APPROVAL_LOG_REQUESTS) {
+    await new Promise<void>((resolve) => throttle.requestWaiters.push(resolve));
+  }
+  throttle.activeRequests += 1;
+
+  let scheduledAt = Math.max(Date.now(), throttle.nextRequestAt, throttle.pauseUntil);
+  throttle.nextRequestAt = scheduledAt + APPROVAL_LOG_REQUEST_GAP_MS;
+  while (Date.now() < scheduledAt) {
+    await delay(scheduledAt - Date.now());
+    if (throttle.pauseUntil > scheduledAt) {
+      scheduledAt = throttle.pauseUntil;
+      throttle.nextRequestAt = Math.max(throttle.nextRequestAt, scheduledAt + APPROVAL_LOG_REQUEST_GAP_MS);
+    }
+  }
 
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const next = approvalLogRequestWaiters.shift();
-    if (next) next();
-    else activeApprovalLogRequests -= 1;
+    throttle.activeRequests -= 1;
+    const next = throttle.requestWaiters.shift();
+    next?.();
   };
 }
 
@@ -362,31 +504,79 @@ async function fetchApprovalLogs(
   owner: Address,
   fromBlock: bigint,
   toBlock: bigint,
+  requestBudget: ApprovalLogRequestBudget,
 ): Promise<ApprovalLog[]> {
   let attempt = 0;
+  const throttle = getApprovalLogThrottleState(client);
   while (true) {
-    const release = await acquireApprovalLogRequestSlot();
+    if (requestBudget.rateLimited && attempt === 0) {
+      throw new ApprovalRateLimitDeferredError(
+        throttle.pauseUntil,
+        `RPC rate limit deferred queued range ${fromBlock.toString()}-${toBlock.toString()}.`,
+      );
+    }
+    if (throttle.pauseUntil - Date.now() > MAX_APPROVAL_LOG_RETRY_DELAY_MS) {
+      requestBudget.rateLimited = true;
+      throw new ApprovalRateLimitDeferredError(
+        throttle.pauseUntil,
+        `RPC rate limit cooldown is active; retry after ${new Date(throttle.pauseUntil).toISOString()}.`,
+      );
+    }
+    const release = await acquireApprovalLogRequestSlot(throttle);
     let requestError: unknown;
     try {
-      return await client.getLogs({
+      if (requestBudget.rateLimited && attempt === 0) {
+        throw new ApprovalRateLimitDeferredError(
+          throttle.pauseUntil,
+          `RPC rate limit deferred queued range ${fromBlock.toString()}-${toBlock.toString()}.`,
+        );
+      }
+      if (requestBudget.remaining <= 0) throw new ApprovalScanBudgetExceededError();
+      requestBudget.remaining -= 1;
+      const logs = await client.getLogs({
         address: token.address,
         event: approvalEvent,
         args: { owner },
         fromBlock,
         toBlock,
       });
+      requestBudget.rateLimited = false;
+      if (Date.now() >= throttle.pauseUntil) throttle.pauseUntil = 0;
+      return logs;
     } catch (error) {
       requestError = error;
     } finally {
       release();
     }
 
-    if (!isRateLimitError(requestError) || attempt >= MAX_APPROVAL_LOG_RETRIES) {
+    if (requestError instanceof ApprovalRateLimitDeferredError) {
       throw requestError;
     }
-    const backoff = APPROVAL_LOG_RETRY_BASE_MS * 2 ** attempt;
-    const jitteredBackoff = backoff * (0.5 + Math.random());
-    await delay(retryAfterMs(requestError) ?? jitteredBackoff);
+    if (isRateLimitError(requestError)) {
+      requestBudget.rateLimited = true;
+      if (requestBudget.scanRateLimitState) {
+        requestBudget.scanRateLimitState.detected = true;
+      }
+      const serverRetryDelay = retryAfterMs(requestError);
+      const retryDelay = Math.max(
+        serverRetryDelay ?? APPROVAL_LOG_RATE_LIMIT_COOLDOWN_MS,
+        APPROVAL_LOG_RATE_LIMIT_COOLDOWN_MS,
+      );
+      throttle.pauseUntil = Math.max(throttle.pauseUntil, Date.now() + retryDelay);
+      throw new ApprovalRateLimitDeferredError(
+        throttle.pauseUntil,
+        `RPC rate limit requires a later retry; retry after ${new Date(throttle.pauseUntil).toISOString()}.`,
+      );
+    }
+
+    if (!isTransientInternalLogError(requestError) || attempt >= MAX_APPROVAL_LOG_RETRIES) {
+      throw requestError;
+    }
+    const backoff = Math.min(
+      MAX_APPROVAL_LOG_RETRY_DELAY_MS,
+      APPROVAL_LOG_RETRY_BASE_MS * 2 ** attempt * (0.5 + Math.random()),
+    );
+    await delay(backoff);
     attempt += 1;
   }
 }
@@ -438,6 +628,8 @@ function createApprovalScanState(fromBlock: bigint): CachedApprovalScanState {
     fromBlock: fromBlock.toString(),
     coveredRanges: [],
     spenderBlocks: {},
+    nextScanBlock: fromBlock.toString(),
+    failedRanges: [],
   };
 }
 
@@ -450,14 +642,35 @@ function isCachedApprovalScanState(value: unknown): value is CachedApprovalScanS
     value.spenderBlocks === null || Array.isArray(value.spenderBlocks)) {
     return false;
   }
-  return value.coveredRanges.every((range) =>
-    typeof range === 'object' && range !== null &&
-    'fromBlock' in range && typeof range.fromBlock === 'string' && /^\d+$/.test(range.fromBlock) &&
-    'toBlock' in range && typeof range.toBlock === 'string' && /^\d+$/.test(range.toBlock) &&
-    BigInt(range.fromBlock) <= BigInt(range.toBlock),
-  ) && Object.entries(value.spenderBlocks).every(([spender, block]) =>
-    /^0x[0-9a-f]{40}$/i.test(spender) && typeof block === 'string' && /^\d+$/.test(block),
-  );
+  const validRanges = (ranges: unknown): ranges is Array<{ fromBlock: string; toBlock: string }> =>
+    Array.isArray(ranges) && ranges.every((range) =>
+      typeof range === 'object' && range !== null &&
+      'fromBlock' in range && typeof range.fromBlock === 'string' && /^\d+$/.test(range.fromBlock) &&
+      'toBlock' in range && typeof range.toBlock === 'string' && /^\d+$/.test(range.toBlock) &&
+      BigInt(range.fromBlock) <= BigInt(range.toBlock),
+    );
+  return validRanges(value.coveredRanges) &&
+    (!('failedRanges' in value) || validRanges(value.failedRanges)) &&
+    (!('maxBlockRange' in value) ||
+      typeof value.maxBlockRange === 'string' && /^\d+$/.test(value.maxBlockRange) &&
+      BigInt(value.maxBlockRange) > 0n) &&
+    (!('lastSuccessfulAt' in value) ||
+      typeof value.lastSuccessfulAt === 'number' && Number.isFinite(value.lastSuccessfulAt)) &&
+    (!('lastSuccessfulRange' in value) ||
+      typeof value.lastSuccessfulRange === 'object' && value.lastSuccessfulRange !== null &&
+      'fromBlock' in value.lastSuccessfulRange &&
+      typeof value.lastSuccessfulRange.fromBlock === 'string' &&
+      /^\d+$/.test(value.lastSuccessfulRange.fromBlock) &&
+      'toBlock' in value.lastSuccessfulRange &&
+      typeof value.lastSuccessfulRange.toBlock === 'string' &&
+      /^\d+$/.test(value.lastSuccessfulRange.toBlock) &&
+      BigInt(value.lastSuccessfulRange.fromBlock) <= BigInt(value.lastSuccessfulRange.toBlock)) &&
+    (!('retryAfterAt' in value) ||
+      typeof value.retryAfterAt === 'number' && Number.isFinite(value.retryAfterAt)) &&
+    Object.entries(value.spenderBlocks).every(([spender, block]) =>
+      /^0x[0-9a-f]{40}$/i.test(spender) && typeof block === 'string' && /^\d+$/.test(block),
+    ) && (!('nextScanBlock' in value) ||
+      typeof value.nextScanBlock === 'string' && /^\d+$/.test(value.nextScanBlock));
 }
 
 function loadApprovalScanState(
@@ -564,15 +777,99 @@ function uncoveredApprovalRanges(
   if (nextBlock <= toBlock) ranges.push([nextBlock, toBlock]);
 
   const chunks: Array<[bigint, bigint]> = [];
+  const chunkSize = state.maxBlockRange ? BigInt(state.maxBlockRange) : APPROVAL_LOG_BLOCK_CHUNK;
   for (const [rangeFrom, rangeTo] of ranges) {
-    for (let chunkFrom = rangeFrom; chunkFrom <= rangeTo; chunkFrom += APPROVAL_LOG_BLOCK_CHUNK) {
-      const chunkTo = chunkFrom + APPROVAL_LOG_BLOCK_CHUNK - 1n > rangeTo
+    for (let chunkFrom = rangeFrom; chunkFrom <= rangeTo; chunkFrom += chunkSize) {
+      if (chunks.length >= MAX_APPROVAL_LOG_RANGES_IN_MEMORY_PER_TOKEN) return chunks;
+      const chunkTo = chunkFrom + chunkSize - 1n > rangeTo
         ? rangeTo
-        : chunkFrom + APPROVAL_LOG_BLOCK_CHUNK - 1n;
+        : chunkFrom + chunkSize - 1n;
       chunks.push([chunkFrom, chunkTo]);
     }
   }
   return chunks;
+}
+
+function countUncoveredApprovalRanges(state: CachedApprovalScanState, toBlock: bigint): number {
+  const chunkSize = state.maxBlockRange ? BigInt(state.maxBlockRange) : APPROVAL_LOG_BLOCK_CHUNK;
+  let count = 0n;
+  let nextBlock = BigInt(state.fromBlock);
+  const covered = state.coveredRanges
+    .map((range) => ({ fromBlock: BigInt(range.fromBlock), toBlock: BigInt(range.toBlock) }))
+    .sort((left, right) => left.fromBlock < right.fromBlock ? -1 : left.fromBlock > right.fromBlock ? 1 : 0);
+
+  for (const range of covered) {
+    if (range.toBlock < nextBlock) continue;
+    if (range.fromBlock > toBlock) break;
+    if (range.fromBlock > nextBlock) {
+      const gapSize = range.fromBlock - nextBlock;
+      count += (gapSize + chunkSize - 1n) / chunkSize;
+    }
+    if (range.toBlock >= nextBlock) nextBlock = range.toBlock + 1n;
+    if (nextBlock > toBlock) break;
+  }
+  if (nextBlock <= toBlock) {
+    const gapSize = toBlock - nextBlock + 1n;
+    count += (gapSize + chunkSize - 1n) / chunkSize;
+  }
+
+  return Number(count);
+}
+
+function constrainApprovalScanState(
+  state: CachedApprovalScanState,
+  fromBlock: bigint,
+  toBlock: bigint,
+): void {
+  const constrainRanges = (ranges: Array<{ fromBlock: string; toBlock: string }>) =>
+    ranges.flatMap((range) => {
+      const rangeFrom = BigInt(range.fromBlock) < fromBlock ? fromBlock : BigInt(range.fromBlock);
+      const rangeTo = BigInt(range.toBlock) > toBlock ? toBlock : BigInt(range.toBlock);
+      return rangeFrom <= rangeTo
+        ? [{ fromBlock: rangeFrom.toString(), toBlock: rangeTo.toString() }]
+        : [];
+    });
+  state.coveredRanges = constrainRanges(state.coveredRanges);
+  state.failedRanges = constrainRanges(state.failedRanges ?? []);
+  state.fromBlock = fromBlock.toString();
+  const nextScanBlock = BigInt(state.nextScanBlock ?? fromBlock.toString());
+  state.nextScanBlock = (nextScanBlock < fromBlock ? fromBlock : nextScanBlock).toString();
+}
+
+export function selectApprovalLogRanges(
+  ranges: Array<[bigint, bigint]>,
+  cursor: bigint,
+  limit: number,
+  failedRanges: Array<[bigint, bigint]> = [],
+): Array<[bigint, bigint]> {
+  const retryRanges: Array<[bigint, bigint]> = [];
+  for (const [fromBlock, toBlock] of ranges) {
+    for (const [failedFrom, failedTo] of failedRanges) {
+      const retryFrom = fromBlock > failedFrom ? fromBlock : failedFrom;
+      const retryTo = toBlock < failedTo ? toBlock : failedTo;
+      if (retryFrom <= retryTo) retryRanges.push([retryFrom, retryTo]);
+    }
+  }
+  const retryKeys = new Set(retryRanges.map(([fromBlock, toBlock]) => `${fromBlock}:${toBlock}`));
+  const remainingRanges = ranges.flatMap(([fromBlock, toBlock]) => {
+    const overlaps = retryRanges
+      .filter(([retryFrom, retryTo]) => fromBlock <= retryTo && toBlock >= retryFrom)
+      .sort((left, right) => left[0] < right[0] ? -1 : 1);
+    if (overlaps.length === 0) return [[fromBlock, toBlock] as [bigint, bigint]];
+    const result: Array<[bigint, bigint]> = [];
+    let cursor = fromBlock;
+    for (const [retryFrom, retryTo] of overlaps) {
+      if (retryFrom > cursor) result.push([cursor, retryFrom - 1n]);
+      cursor = retryTo + 1n > cursor ? retryTo + 1n : cursor;
+    }
+    if (cursor <= toBlock) result.push([cursor, toBlock]);
+    return result;
+  }).filter(([fromBlock, toBlock]) => !retryKeys.has(`${fromBlock}:${toBlock}`));
+  const nextRangeIndex = remainingRanges.findIndex(([rangeFrom]) => rangeFrom >= cursor);
+  const orderedRemainingRanges = nextRangeIndex < 0
+    ? remainingRanges
+    : [...remainingRanges.slice(nextRangeIndex), ...remainingRanges.slice(0, nextRangeIndex)];
+  return [...retryRanges, ...orderedRemainingRanges].slice(0, limit);
 }
 
 async function getApprovalLogs(
@@ -581,6 +878,8 @@ async function getApprovalLogs(
   owner: Address,
   fromBlock: bigint,
   toBlock: bigint,
+  requestBudget: ApprovalLogRequestBudget,
+  splitDepth = 0,
 ): Promise<ApprovalLogsResult> {
   let clientCache = approvalLogsCache.get(client);
   if (!clientCache) {
@@ -599,27 +898,70 @@ async function getApprovalLogs(
     ? cached.logs.filter((log) => log.blockNumber !== null && log.blockNumber <= toBlock)
     : [];
   if (cacheIsValid && cached.coveredToBlock >= toBlock) {
-    return { logs: cachedLogs, errors: [], successfulRanges: [{ fromBlock, toBlock }] };
+    return { logs: cachedLogs, errors: [], successfulRanges: [{ fromBlock, toBlock }], newlyScanned: false };
   }
   const queryFromBlock = cacheIsValid ? cached.coveredToBlock + 1n : fromBlock;
   if (cached) clientCache.delete(cacheKey);
 
   try {
-    const newLogs = await fetchApprovalLogs(client, token, owner, queryFromBlock, toBlock);
+    const newLogs = await fetchApprovalLogs(client, token, owner, queryFromBlock, toBlock, requestBudget);
     const logs = [...cachedLogs, ...newLogs];
     cacheApprovalLogs(clientCache, cacheKey, toBlock, logs);
-    return { logs, errors: [], successfulRanges: [{ fromBlock, toBlock }] };
+    return { logs, errors: [], successfulRanges: [{ fromBlock, toBlock }], newlyScanned: true };
   } catch (error) {
-    if (fromBlock < toBlock && isUnsupportedLogRange(error)) {
+    if (fromBlock < toBlock && splitDepth < MAX_APPROVAL_LOG_SPLIT_DEPTH && isUnsupportedLogRange(error)) {
       const midpoint = fromBlock + (toBlock - fromBlock) / 2n;
-      const [firstHalf, secondHalf] = await Promise.all([
-        getApprovalLogs(client, token, owner, fromBlock, midpoint),
-        getApprovalLogs(client, token, owner, midpoint + 1n, toBlock),
-      ]);
+      const firstHalf = await getApprovalLogs(
+        client,
+        token,
+        owner,
+        fromBlock,
+        midpoint,
+        requestBudget,
+        splitDepth + 1,
+      );
+      const secondHalf: ApprovalLogsResult = firstHalf.deferred
+        ? {
+            logs: [],
+            errors: [],
+            successfulRanges: [],
+            deferred: true,
+            rateLimited: firstHalf.rateLimited,
+            retryAfterAt: firstHalf.retryAfterAt,
+          }
+        : await getApprovalLogs(
+            client,
+            token,
+            owner,
+            midpoint + 1n,
+            toBlock,
+            requestBudget,
+            splitDepth + 1,
+          );
+      const splitRange = (toBlock - fromBlock + 1n + 1n) / 2n;
+      const recommendedBlockRange = [splitRange, firstHalf.recommendedBlockRange, secondHalf.recommendedBlockRange]
+        .filter((value): value is bigint => value !== undefined)
+        .reduce((smallest, value) => value < smallest ? value : smallest);
       return {
         logs: [...firstHalf.logs, ...secondHalf.logs],
         errors: [...firstHalf.errors, ...secondHalf.errors],
         successfulRanges: [...firstHalf.successfulRanges, ...secondHalf.successfulRanges],
+        recommendedBlockRange,
+        rateLimited: firstHalf.rateLimited || secondHalf.rateLimited,
+        retryAfterAt: Math.max(firstHalf.retryAfterAt ?? 0, secondHalf.retryAfterAt ?? 0) || undefined,
+        deferred: firstHalf.deferred || secondHalf.deferred,
+        newlyScanned: firstHalf.newlyScanned || secondHalf.newlyScanned,
+      };
+    }
+
+    if (error instanceof ApprovalScanBudgetExceededError) {
+      return {
+        logs: cachedLogs,
+        errors: [],
+        successfulRanges: cacheIsValid && cached.coveredToBlock >= fromBlock
+          ? [{ fromBlock, toBlock: cached.coveredToBlock }]
+          : [],
+        deferred: true,
       };
     }
 
@@ -629,6 +971,11 @@ async function getApprovalLogs(
       successfulRanges: cacheIsValid && cached.coveredToBlock >= fromBlock
         ? [{ fromBlock, toBlock: cached.coveredToBlock }]
         : [],
+      rateLimited: isRateLimitError(error) || error instanceof ApprovalRateLimitDeferredError,
+      deferred: error instanceof ApprovalRateLimitDeferredError,
+      retryAfterAt: error instanceof ApprovalRateLimitDeferredError
+        ? error.retryAt
+        : isRateLimitError(error) ? getApprovalLogThrottleState(client).pauseUntil : undefined,
     };
   }
 }
@@ -655,43 +1002,195 @@ export function decodeApprovalEvent(log: ApprovalLog): DecodedApprovalEvent {
   };
 }
 
+export type ApprovalScanStatus =
+  | 'Scanning'
+  | 'Partial scan — provider limit'
+  | 'Partial scan'
+  | 'Window complete'
+  | 'Failed';
+
+export function getApprovalScanStatus({
+  isFetching,
+  isError,
+  data,
+  now = Date.now(),
+}: {
+  isFetching: boolean;
+  isError: boolean;
+  data: Pick<ApprovalScanResult, 'isComplete' | 'retryAfterAt'> | undefined;
+  now?: number;
+}): ApprovalScanStatus | null {
+  if (isFetching) return 'Scanning';
+  if (isError) return 'Failed';
+  if (!data) return null;
+  if (!data.isComplete && data.retryAfterAt !== null && data.retryAfterAt > now) {
+    return 'Partial scan — provider limit';
+  }
+  return data.isComplete ? 'Window complete' : 'Partial scan';
+}
+
+export type SecurityAssessmentStatus =
+  | 'Connect wallet'
+  | 'Scan required'
+  | 'Scanning'
+  | 'Paused — provider limit'
+  | 'Window assessed'
+  | 'Assessment unavailable';
+
+export interface SecurityAssessment {
+  status: SecurityAssessmentStatus;
+  description: string;
+  canCalculateScore: boolean;
+}
+
+export function getSecurityAssessment({
+  walletConnected,
+  supportedNetwork,
+  isScanning,
+  providerRateLimited,
+  approvalScanStarted,
+  approvalWindowComplete,
+  approvalHistoryStartsAtGenesis,
+  approvalDataUnavailable,
+  activityScanStarted,
+  activityDataUnavailable,
+  activityHasUnresolvedTransactions,
+}: {
+  walletConnected: boolean;
+  supportedNetwork: boolean;
+  isScanning: boolean;
+  providerRateLimited: boolean;
+  approvalScanStarted: boolean;
+  approvalWindowComplete: boolean;
+  approvalHistoryStartsAtGenesis: boolean;
+  approvalDataUnavailable: boolean;
+  activityScanStarted: boolean;
+  activityDataUnavailable: boolean;
+  activityHasUnresolvedTransactions: boolean;
+}): SecurityAssessment {
+  if (!walletConnected) {
+    return {
+      status: 'Connect wallet',
+      description: 'Connect a wallet on Arc Testnet to assess configured-token approvals and recent activity.',
+      canCalculateScore: false,
+    };
+  }
+  if (!supportedNetwork) {
+    return {
+      status: 'Assessment unavailable',
+      description: 'Security assessment data is available on Arc Testnet only.',
+      canCalculateScore: false,
+    };
+  }
+  if (providerRateLimited) {
+    return {
+      status: 'Paused — provider limit',
+      description: 'The public RPC deferred approval-history ranges. Scanning can resume after its cooldown.',
+      canCalculateScore: false,
+    };
+  }
+  if (isScanning) {
+    return {
+      status: 'Scanning',
+      description: 'Checking the selected approval window and recent activity sample.',
+      canCalculateScore: false,
+    };
+  }
+  if (approvalDataUnavailable || activityDataUnavailable || activityHasUnresolvedTransactions) {
+    return {
+      status: 'Assessment unavailable',
+      description: 'Required approval or recent-activity data could not be validated. No numeric score is shown.',
+      canCalculateScore: false,
+    };
+  }
+  if (!approvalScanStarted || !activityScanStarted || !approvalWindowComplete) {
+    return {
+      status: 'Scan required',
+      description: 'Complete the selected approval window and load a validated recent-activity sample.',
+      canCalculateScore: false,
+    };
+  }
+  if (!approvalHistoryStartsAtGenesis) {
+    return {
+      status: 'Window assessed',
+      description: 'The selected approval window and recent activity sample are complete; older or unsupported approvals are not covered. No numeric score is shown.',
+      canCalculateScore: false,
+    };
+  }
+  return {
+    status: 'Window assessed',
+    description: 'The supported approval history begins at block 0 and recent activity checks are available. The score is not a security guarantee.',
+    canCalculateScore: true,
+  };
+}
+
+export function getApprovalCoveragePercent(coveredBlocks: bigint, totalBlocks: bigint): number {
+  if (coveredBlocks <= 0n || totalBlocks <= 0n) return 0;
+  const covered = coveredBlocks > totalBlocks ? totalBlocks : coveredBlocks;
+  return Number(covered * 10_000n / totalBlocks) / 100;
+}
+
+export function summarizeApprovalInventory(
+  approvals: readonly TokenApproval[] | undefined,
+  isCoverageComplete: boolean,
+): {
+  observedSpenderRecords: number | null;
+  activeAllowances: number | null;
+  isCoverageComplete: boolean;
+} {
+  return {
+    observedSpenderRecords: approvals?.length ?? null,
+    activeAllowances: approvals && approvals.length > 0
+      ? approvals.filter((approval) => approval.allowance > 0n).length
+      : null,
+    isCoverageComplete,
+  };
+}
+
 export interface ApprovalProvider {
-  scan(address: Address): Promise<ApprovalScanResult>;
+  scan(address: Address, historyWindowBlocks?: number): Promise<ApprovalScanResult>;
+  getCooldownUntil(address: Address): number | null;
 }
 
 export function createApprovalProvider(client: PublicClient): ApprovalProvider {
-  return {
-    async scan(address) {
+  const throttle = getApprovalLogThrottleState(client);
+  const runScan = async (
+    address: Address,
+    historyWindowBlocks: number,
+  ): Promise<ApprovalScanResult> => {
       if (client.chain?.id !== ARC_TESTNET.id) {
         throw new Error('Approval scanning is only configured for Arc Testnet');
+      }
+      if (!APPROVAL_SCAN_HISTORY_WINDOWS.some((window) => window === historyWindowBlocks)) {
+        throw new Error(`Unsupported approval scan history window: ${historyWindowBlocks}`);
       }
 
       const scanStartedAt = Date.now();
       const latestBlock = await client.getBlockNumber();
-      const minimumFromBlock = latestBlock > APPROVAL_SCAN_BLOCK_WINDOW
-        ? latestBlock - APPROVAL_SCAN_BLOCK_WINDOW
-        : 0n;
-      const fromBlock = minimumFromBlock === 0n
-        ? 0n
-        : ((minimumFromBlock + APPROVAL_LOG_BLOCK_CHUNK - 1n) / APPROVAL_LOG_BLOCK_CHUNK) *
-          APPROVAL_LOG_BLOCK_CHUNK;
+      const windowSize = BigInt(historyWindowBlocks);
+      const fromBlock = latestBlock + 1n > windowSize ? latestBlock - windowSize + 1n : 0n;
       const approvals: TokenApproval[] = [];
       const errors: string[] = [];
+      const tokenCoverage: ApprovalScanResult['tokenCoverage'] = [];
       let scannedFromBlock = fromBlock;
       let allRangesCovered = true;
+      let coveredBlocks = 0n;
+      let lastSuccessfulAt: number | null = null;
+      let retryAfterAt: number | null = null;
+      const scanRateLimitState = { detected: false };
 
       for (const token of APPROVAL_TOKENS) {
         const loadedCache = loadApprovalScanState(client, token, address, fromBlock);
         const scanCache = loadedCache.state;
+        constrainApprovalScanState(scanCache, fromBlock, latestBlock);
+        scanCache.nextScanBlock ??= fromBlock.toString();
+        scanCache.failedRanges ??= [];
+        if (scanCache.retryAfterAt !== undefined && scanCache.retryAfterAt <= Date.now()) {
+          scanCache.retryAfterAt = undefined;
+        }
         if (loadedCache.error) errors.push(`${token.symbol} ${loadedCache.error}`);
         let tokenFromBlock = BigInt(scanCache.fromBlock);
-        if (tokenFromBlock > latestBlock) {
-          errors.push(`${token.symbol} approval scan cache is ahead of the RPC block height; a fresh scan is required.`);
-          tokenFromBlock = fromBlock;
-          scanCache.fromBlock = fromBlock.toString();
-          scanCache.coveredRanges = [];
-          scanCache.spenderBlocks = {};
-        }
+        if (tokenFromBlock > latestBlock) tokenFromBlock = fromBlock;
         if (tokenFromBlock < scannedFromBlock) scannedFromBlock = tokenFromBlock;
         const initialCacheError = saveApprovalScanState(client, token, address, scanCache);
         if (initialCacheError) errors.push(`${token.symbol} ${initialCacheError}`);
@@ -703,11 +1202,49 @@ export function createApprovalProvider(client: PublicClient): ApprovalProvider {
           errors.push(`${token.symbol} contract verification: ${errorMessage(error)}`);
         }
 
-        const ranges = uncoveredApprovalRanges(scanCache, latestBlock);
+        const isRateLimited = scanRateLimitState.detected ||
+          Math.max(scanCache.retryAfterAt ?? 0, throttle.pauseUntil) > Date.now();
+        if (isRateLimited) {
+          scanCache.retryAfterAt = Math.max(scanCache.retryAfterAt ?? 0, throttle.pauseUntil);
+          retryAfterAt = Math.max(retryAfterAt ?? 0, scanCache.retryAfterAt);
+          errors.push(scanRateLimitState.detected
+            ? `${token.symbol} approval log scan paused by RPC rate limit after an earlier token exhausted retries; resume with a later refresh.`
+            : `${token.symbol} approval log scan paused by RPC rate limit until ${new Date(scanCache.retryAfterAt).toISOString()}; refresh later to resume.`);
+          allRangesCovered = false;
+        }
+        const uncoveredRanges = uncoveredApprovalRanges(scanCache, latestBlock);
+        const ranges = isRateLimited ? [] : selectApprovalLogRanges(
+          uncoveredRanges,
+          BigInt(scanCache.nextScanBlock),
+          MAX_APPROVAL_LOG_CHUNKS_PER_TOKEN_PER_SCAN,
+          scanCache.failedRanges.map((range) => [
+            BigInt(range.fromBlock),
+            BigInt(range.toBlock),
+          ]),
+        );
+        if (ranges.length < uncoveredRanges.length) allRangesCovered = false;
+        let rateLimitStop = false;
+        const requestBudget = {
+          remaining: MAX_APPROVAL_LOG_REQUESTS_PER_TOKEN_PER_SCAN,
+          scanRateLimitState,
+        };
         const chunks = await mapWithConcurrency(
           ranges,
           MAX_CONCURRENT_APPROVAL_LOG_REQUESTS,
-          ([chunkFrom, chunkTo]) => getApprovalLogs(client, token, address, chunkFrom, chunkTo),
+          async ([chunkFrom, chunkTo]) => {
+            if (rateLimitStop) {
+              return {
+                logs: [],
+                errors: [],
+                successfulRanges: [],
+                deferred: true,
+                rateLimited: true,
+              };
+            }
+            const result = await getApprovalLogs(client, token, address, chunkFrom, chunkTo, requestBudget);
+            if (result.rateLimited) rateLimitStop = true;
+            return result;
+          },
         );
         const candidates = new Map<string, bigint>(
           Object.entries(scanCache.spenderBlocks).map(([spenderKey, blockNumber]) => [
@@ -717,7 +1254,15 @@ export function createApprovalProvider(client: PublicClient): ApprovalProvider {
         );
         let cacheErrorReported = initialCacheError !== undefined;
         let cacheCapacityReported = false;
+        let requestBudgetReported = false;
+        let lastProcessedRange: [bigint, bigint] | undefined;
         for (const [chunkIndex, chunk] of chunks.entries()) {
+          if (
+            ranges[chunkIndex] &&
+            (!chunk.deferred || !chunk.rateLimited || chunk.retryAfterAt !== undefined)
+          ) {
+            lastProcessedRange = ranges[chunkIndex];
+          }
           errors.push(...chunk.errors.map((scanError) => `${token.symbol} Approval events ${scanError}`));
 
           let chunkIsCacheable = true;
@@ -749,7 +1294,66 @@ export function createApprovalProvider(client: PublicClient): ApprovalProvider {
             for (const range of chunk.successfulRanges) {
               addCoveredRange(scanCache, range.fromBlock, range.toBlock);
             }
+            if (chunk.successfulRanges.length > 0 && chunk.newlyScanned) {
+              scanCache.lastSuccessfulAt = Date.now();
+              const lastRange = chunk.successfulRanges[chunk.successfulRanges.length - 1];
+              scanCache.lastSuccessfulRange = {
+                fromBlock: lastRange.fromBlock.toString(),
+                toBlock: lastRange.toBlock.toString(),
+              };
+              lastSuccessfulAt = Math.max(lastSuccessfulAt ?? 0, scanCache.lastSuccessfulAt);
+              scanCache.retryAfterAt = undefined;
+            }
           }
+          if (chunk.deferred) {
+            allRangesCovered = false;
+            if (!requestBudgetReported && chunk.errors.length === 0 && !chunk.rateLimited) {
+              errors.push(`${token.symbol} approval scan reached its bounded per-refresh RPC request budget; uncovered ranges are retained for the next refresh.`);
+              requestBudgetReported = true;
+            }
+          }
+          if (chunk.recommendedBlockRange !== undefined) {
+            const previousRange = scanCache.maxBlockRange
+              ? BigInt(scanCache.maxBlockRange)
+              : APPROVAL_LOG_BLOCK_CHUNK;
+            if (chunk.recommendedBlockRange < previousRange) {
+              scanCache.maxBlockRange = chunk.recommendedBlockRange.toString();
+            }
+          }
+          if (chunk.retryAfterAt !== undefined) {
+            scanCache.retryAfterAt = Math.max(scanCache.retryAfterAt ?? 0, chunk.retryAfterAt);
+            retryAfterAt = Math.max(retryAfterAt ?? 0, chunk.retryAfterAt);
+            allRangesCovered = false;
+          }
+          const attemptedRange = ranges[chunkIndex];
+          if (attemptedRange && !chunk.deferred && (chunk.errors.length > 0 || !chunkIsCacheable)) {
+            const remainingFailedRanges: NonNullable<CachedApprovalScanState['failedRanges']> =
+              scanCache.failedRanges.filter((range) =>
+              BigInt(range.fromBlock) !== attemptedRange[0] ||
+              BigInt(range.toBlock) !== attemptedRange[1],
+            );
+            scanCache.failedRanges = [
+              ...remainingFailedRanges,
+              { fromBlock: attemptedRange[0].toString(), toBlock: attemptedRange[1].toString() },
+            ];
+          }
+          scanCache.failedRanges = scanCache.failedRanges.filter((range) =>
+            !scanCache.coveredRanges.some((covered) =>
+              BigInt(covered.fromBlock) <= BigInt(range.fromBlock) &&
+              BigInt(covered.toBlock) >= BigInt(range.toBlock),
+            ),
+          );
+          const stillUncoveredRanges = uncoveredApprovalRanges(scanCache, latestBlock);
+          scanCache.failedRanges = scanCache.failedRanges.flatMap((failedRange) =>
+            stillUncoveredRanges
+              .filter(([rangeFrom, rangeTo]) =>
+                rangeFrom <= BigInt(failedRange.toBlock) && rangeTo >= BigInt(failedRange.fromBlock),
+              )
+              .map(([rangeFrom, rangeTo]) => ({
+                fromBlock: rangeFrom.toString(),
+                toBlock: rangeTo.toString(),
+              })),
+          );
           if (!cacheErrorReported) {
             const cacheError = saveApprovalScanState(client, token, address, scanCache);
             if (cacheError) {
@@ -761,10 +1365,60 @@ export function createApprovalProvider(client: PublicClient): ApprovalProvider {
           if (chunk.successfulRanges.length === 0 && ranges[chunkIndex]) allRangesCovered = false;
         }
 
+        if (lastProcessedRange) {
+          const lastAttemptedRange = lastProcessedRange;
+          scanCache.nextScanBlock = lastAttemptedRange[1] >= latestBlock
+            ? fromBlock.toString()
+            : (lastAttemptedRange[1] + 1n).toString();
+          if (!cacheErrorReported) {
+            const cacheError = saveApprovalScanState(client, token, address, scanCache);
+            if (cacheError) {
+              errors.push(`${token.symbol} ${cacheError}`);
+              cacheErrorReported = true;
+            }
+          }
+        }
+        if (!cacheErrorReported) {
+          const cacheError = saveApprovalScanState(client, token, address, scanCache);
+          if (cacheError) errors.push(`${token.symbol} ${cacheError}`);
+        }
+
+        for (const range of scanCache.coveredRanges) {
+          const coveredFrom = BigInt(range.fromBlock) < fromBlock ? fromBlock : BigInt(range.fromBlock);
+          const coveredTo = BigInt(range.toBlock) > latestBlock ? latestBlock : BigInt(range.toBlock);
+          if (coveredTo >= coveredFrom) coveredBlocks += coveredTo - coveredFrom + 1n;
+        }
+
         const coverage = scanCache.coveredRanges
           .map((range) => ({ fromBlock: BigInt(range.fromBlock), toBlock: BigInt(range.toBlock) }))
           .some((range) => range.fromBlock <= tokenFromBlock && range.toBlock >= latestBlock);
         if (!coverage) allRangesCovered = false;
+        if (scanCache.lastSuccessfulAt !== undefined) {
+          lastSuccessfulAt = Math.max(lastSuccessfulAt ?? 0, scanCache.lastSuccessfulAt);
+        }
+        tokenCoverage.push({
+          symbol: token.symbol,
+          coveredRanges: scanCache.coveredRanges.map((range) => ({
+            fromBlock: BigInt(range.fromBlock),
+            toBlock: BigInt(range.toBlock),
+          })),
+          failedRanges: scanCache.failedRanges.map((range) => ({
+            fromBlock: BigInt(range.fromBlock),
+            toBlock: BigInt(range.toBlock),
+          })),
+          remainingRanges: uncoveredApprovalRanges(scanCache, latestBlock).map(([rangeFrom, rangeTo]) => ({
+            fromBlock: rangeFrom,
+            toBlock: rangeTo,
+          })),
+          remainingRangeCount: countUncoveredApprovalRanges(scanCache, latestBlock),
+          lastSuccessfulAt: scanCache.lastSuccessfulAt ?? null,
+          lastSuccessfulRange: scanCache.lastSuccessfulRange
+            ? {
+                fromBlock: BigInt(scanCache.lastSuccessfulRange.fromBlock),
+                toBlock: BigInt(scanCache.lastSuccessfulRange.toBlock),
+              }
+            : null,
+        });
 
         if (candidates.size > MAX_SPENDERS_PER_TOKEN) {
           errors.push(`${token.symbol}: spender limit reached; the result is partial.`);
@@ -847,6 +1501,8 @@ export function createApprovalProvider(client: PublicClient): ApprovalProvider {
               allowanceFormatted: formatUnits(allowance, actualTokenDecimals),
               ...interpreted,
               lastSeenBlock,
+              allowanceCheckedBlock: latestBlock,
+              allowanceCheckedAt: Date.now(),
               tokenVerified,
               spenderVerified,
             });
@@ -865,11 +1521,38 @@ export function createApprovalProvider(client: PublicClient): ApprovalProvider {
         chainId: ARC_TESTNET.id,
         scannedFromBlock,
         scannedToBlock: latestBlock,
-        scope: `Configured Arc Testnet ERC-20 tokens (${APPROVAL_TOKENS.length}); Approval events from block ${scannedFromBlock.toString()} through ${latestBlock.toString()}. This is a bounded recent-history scan, not a complete lifetime approval inventory.`,
+        historyWindowBlocks: windowSize,
+        scope: `Configured Arc Testnet ERC-20 tokens (${APPROVAL_TOKENS.map((token) => token.symbol).join(', ')}); recent approval events from block ${fromBlock.toString()} through ${latestBlock.toString()} (${windowSize.toString()}-block maximum history window).`,
         errors,
-        isComplete: scannedFromBlock === 0n && allRangesCovered && errors.length === 0,
-        lastScannedAt: Math.max(scanStartedAt, Date.now()),
+        isComplete: allRangesCovered && errors.length === 0,
+        coveredBlocks,
+        totalBlocks: (latestBlock - fromBlock + 1n) * BigInt(APPROVAL_TOKENS.length),
+        tokenCoverage,
+        lastSuccessfulAt,
+        lastScanAttemptAt: Math.max(scanStartedAt, Date.now()),
+        retryAfterAt,
       };
+  };
+  return {
+    scan(address, historyWindowBlocks = DEFAULT_APPROVAL_SCAN_HISTORY_WINDOW) {
+      const scanKey = `${ARC_TESTNET.id}:${address.toLowerCase()}:${historyWindowBlocks}`;
+      const inFlight = approvalScansInFlight.get(scanKey);
+      if (inFlight) return inFlight;
+      const scan = runScan(address, historyWindowBlocks).finally(() => {
+        if (approvalScansInFlight.get(scanKey) === scan) {
+          approvalScansInFlight.delete(scanKey);
+        }
+      });
+      approvalScansInFlight.set(scanKey, scan);
+      return scan;
+    },
+    getCooldownUntil(address) {
+      let retryAt = throttle.pauseUntil;
+      for (const token of APPROVAL_TOKENS) {
+        const cached = loadApprovalScanState(client, token, address, 0n);
+        retryAt = Math.max(retryAt, cached.state.retryAfterAt ?? 0);
+      }
+      return retryAt > Date.now() ? retryAt : null;
     },
   };
 }

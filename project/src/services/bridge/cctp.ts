@@ -1,4 +1,4 @@
-import { encodeFunctionData, pad, type Address, type Hex } from 'viem';
+import { encodeFunctionData, keccak256, pad, type Address, type Hex } from 'viem';
 import { getOrbitNetwork, isCctpRouteSupported } from '../../data/networks';
 import type { BridgeProvider, BridgeQuoteRequest, BridgeStatus, BridgeToken } from '../../types/bridge';
 
@@ -20,6 +20,49 @@ const tokenMessengerAbi = [{
 
 interface AttestationResponse {
   messages?: Array<{ message?: string; attestation?: string; status?: string }>;
+}
+
+export interface CctpMessageIdentity {
+  sourceDomain: number;
+  nonce: Hex;
+  sender: Hex;
+  messageBodyHash: Hex;
+}
+
+export function getCctpMessageIdentity(
+  message: Hex,
+  expected: {
+    sourceDomain: number;
+    destinationDomain: number;
+    sourceTokenMessenger: Address;
+    destinationTokenMessenger: Address;
+  },
+): CctpMessageIdentity {
+  const headerBytes = 148;
+  if (!/^0x(?:[a-f\d]{2})+$/i.test(message) || message.length < 2 + headerBytes * 2) {
+    throw new Error('Circle returned an incomplete CCTP V2 message.');
+  }
+  const readHex = (offset: number, byteLength: number) => message.slice(2 + offset * 2, 2 + (offset + byteLength) * 2);
+  const sourceDomain = Number.parseInt(readHex(4, 4), 16);
+  const destinationDomain = Number.parseInt(readHex(8, 4), 16);
+  const nonce = `0x${readHex(12, 32)}` as Hex;
+  const sender = `0x${readHex(44, 32)}` as Hex;
+  const recipient = `0x${readHex(76, 32)}` as Hex;
+  const messageBody = `0x${message.slice(2 + headerBytes * 2)}` as Hex;
+  if (
+    sourceDomain !== expected.sourceDomain ||
+    destinationDomain !== expected.destinationDomain ||
+    sender.toLowerCase() !== pad(expected.sourceTokenMessenger, { size: 32 }).toLowerCase() ||
+    recipient.toLowerCase() !== pad(expected.destinationTokenMessenger, { size: 32 }).toLowerCase()
+  ) {
+    throw new Error('Circle returned a CCTP message for a different source, destination, or token messenger.');
+  }
+  return {
+    sourceDomain,
+    nonce,
+    sender,
+    messageBodyHash: keccak256(messageBody),
+  };
 }
 
 async function getAttestation(sourceDomain: number, transactionHash: string): Promise<BridgeStatus> {

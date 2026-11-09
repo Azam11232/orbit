@@ -1,56 +1,40 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAccount, useSwitchChain } from 'wagmi';
 import { formatUnits, parseUnits, type EIP1193Provider } from 'viem';
+import type { SwapEstimate } from '@circle-fin/swap-kit';
 import { RefreshCw, ShieldCheck, Wallet } from 'lucide-react';
 import { ARC_EURC, ARC_USDC, ARC_SWAP_ASSETS, type BaseAssetConfig } from '../data/tokens';
 import { useTokenBalance } from '../hooks/useTokenBalance';
 import { useArcSwapExecution, useArcSwapQuote } from '../hooks/useArcSwap';
-import { explorerTxUrl } from '../services/transactions';
-import { getCurrentArcSwapQuote, isArcSwapQuoteReviewable } from '../services/swap/quoteState';
+import {
+  dismissArcSwapSuccess,
+  createArcSwapSuccessPopupActions,
+  getArcSwapCompletionTransition,
+  isArcSwapSuccessDismissed,
+  persistArcSwapSuccessDismissal,
+  persistArcSwapSuccessSummary,
+  readArcSwapSuccess,
+} from '../services/swap/successLifecycle';
+import { formatArcSwapProviderFees, formatArcSwapQuoteDetails } from '../services/swap/quotePresentation';
+import { ARC_SWAP_QUOTE_MAX_AGE_MS, canReviewArcSwap, canSubmitArcSwapQuote, getCurrentArcSwapQuote, isArcSwapQuoteFresh, isArcSwapReviewButtonDisabled, matchesArcSwapQuoteRequest, toggleArcSwapDirection } from '../services/swap/quoteState';
+import { ArcSwapQuoteVerificationError, isArcSwapRouteUnavailableError } from '../services/swap/quoteVerification';
+import { refreshArcSwapBalances } from '../services/swap/arcSwapBalanceRefresh';
+import {
+  isArcSwapReceiptAccountingCurrent,
+  runArcSwapReceiptAccountingIfCurrent,
+  type ArcSwapReceiptAccountingGenerationIdentity,
+} from '../services/swap/receiptAccountingRetry';
+import { ARC_TESTNET } from '../data/networks';
 import type { ArcSwapSymbol } from '../types/swap';
-import { Button, Card, Label, TokenIcon } from './ui';
 import { TransactionSuccessScreen } from './TransactionSuccessScreen';
+import { Button, Card, Label, TokenIcon } from './ui';
+import { SlideToConfirm } from './SlideToConfirm';
 
 const ARC_CHAIN_ID = 5042002;
-const QUOTE_MAX_AGE_MS = 30_000;
 
 function assetFor(symbol: ArcSwapSymbol): BaseAssetConfig & { address: `0x${string}` } {
   return symbol === 'USDC' ? ARC_USDC : ARC_EURC;
-}
-
-function isUnsupportedRouteError(error: unknown): boolean {
-  const pending: unknown[] = [error];
-  const visited = new Set<object>();
-
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (typeof current === 'string') {
-      if (current.includes('331001') || /no route available/i.test(current)) return true;
-      continue;
-    }
-    if (!current || typeof current !== 'object' || visited.has(current)) continue;
-
-    visited.add(current);
-    const errorDetails = current as Record<string, unknown>;
-    const name = errorDetails.name ?? (current instanceof Error ? current.name : undefined);
-    const code = errorDetails.code;
-
-    if (
-      name === 'INPUT_UNSUPPORTED_ROUTE'
-      || code === 1003
-      || code === '1003'
-      || code === 331001
-      || code === '331001'
-    ) {
-      return true;
-    }
-
-    pending.push(errorDetails.message, errorDetails.cause, ...Object.values(errorDetails));
-    if (current instanceof Error) pending.push(current.message);
-  }
-
-  return false;
 }
 
 export function ArcSwapPage() {
@@ -61,16 +45,25 @@ export function ArcSwapPage() {
     connector: NonNullable<typeof connector>;
     provider: EIP1193Provider;
   }>();
-  const [tokenIn, setTokenIn] = useState<ArcSwapSymbol>('USDC');
-  const [tokenOut, setTokenOut] = useState<ArcSwapSymbol>('EURC');
+  const [direction, setDirection] = useState<{ tokenIn: ArcSwapSymbol; tokenOut: ArcSwapSymbol }>({
+    tokenIn: 'USDC',
+    tokenOut: 'EURC',
+  });
+  const { tokenIn, tokenOut } = direction;
   const [amount, setAmount] = useState('');
   const [slippageBps, setSlippageBps] = useState(50);
-  const [quoteUpdatedAt, setQuoteUpdatedAt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [showReview, setShowReview] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [successPersistenceError, setSuccessPersistenceError] = useState<string | null>(null);
+  const [successPersistenceRetry, setSuccessPersistenceRetry] = useState(0);
   const [mode, setMode] = useState<'token' | 'fx'>('token');
-  const [completedAt, setCompletedAt] = useState<number | null>(null);
+  const [completedAt, setCompletedAt] = useState<number>();
+  const [successSnapshot, setSuccessSnapshot] = useState<{
+    quote: SwapEstimate;
+    inputAsset: BaseAssetConfig & { address: `0x${string}` };
+    outputAsset: BaseAssetConfig & { address: `0x${string}` };
+  }>();
 
   useEffect(() => {
     let active = true;
@@ -93,11 +86,6 @@ export function ArcSwapPage() {
     : undefined;
   const provider = providerForCurrentConnector?.provider;
 
-  useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(interval);
-  }, []);
-
   const inputAsset = assetFor(tokenIn);
   const outputAsset = assetFor(tokenOut);
   const inputBalance = useTokenBalance(inputAsset, address, Boolean(isConnected && chainId === ARC_CHAIN_ID));
@@ -115,110 +103,358 @@ export function ArcSwapPage() {
     ? `Enter a valid amount with up to ${inputAsset.decimals} decimals.`
     : rawAmount !== null && rawAmount <= 0n
       ? 'Amount must be greater than zero.'
-      : rawAmount !== null && rawAmount > balance.raw
+      : rawAmount !== null && balance.isError
+        ? `Unable to verify the ${tokenIn} balance. Refresh the balance before swapping.`
+        : rawAmount !== null && (balance.isLoading || balance.isFetching)
+          ? `Checking the ${tokenIn} balance...`
+          : rawAmount !== null && rawAmount > balance.raw
         ? `Insufficient ${tokenIn} balance.`
         : null;
   const amountForQuote = !amountError && rawAmount !== null ? amount : '';
   const quoteQuery = useArcSwapQuote({ provider, providerConnector: providerForCurrentConnector?.connector, tokenIn, tokenOut, amountIn: amountForQuote, slippageBps });
+  const refetchQuote = quoteQuery.refetch;
+  const isNoRouteError = isArcSwapRouteUnavailableError(quoteQuery.error);
+  const matchesCurrentRequest = (candidate: NonNullable<typeof quoteQuery.quote>) => matchesArcSwapQuoteRequest(candidate, {
+    tokenIn,
+    tokenOut,
+    amountIn: amountForQuote,
+    chainIn: 'Arc_Testnet',
+    chainOut: 'Arc_Testnet',
+    fromAddress: address,
+    toAddress: address,
+  });
+  const availableQuote = getCurrentArcSwapQuote(quoteQuery, isNoRouteError, matchesCurrentRequest);
+  const quoteUpdatedAt = quoteQuery.dataUpdatedAt;
   useEffect(() => {
-    if (quoteQuery.quote) setQuoteUpdatedAt(Date.now());
-  }, [quoteQuery.quote]);
-  const isNoRouteError = isUnsupportedRouteError(quoteQuery.error);
-  const availableQuote = getCurrentArcSwapQuote(quoteQuery, isNoRouteError);
-  const quoteExpiresAt = quoteUpdatedAt + QUOTE_MAX_AGE_MS;
-  const quoteFresh = Boolean(availableQuote && quoteUpdatedAt > 0 && now < quoteExpiresAt);
-  const execution = useArcSwapExecution();
+    if (!quoteUpdatedAt) return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [quoteUpdatedAt]);
+  const quoteFresh = Boolean(
+    availableQuote &&
+    !quoteQuery.isError &&
+    !quoteQuery.isFetching &&
+    quoteQuery.isSuccess &&
+    isArcSwapQuoteFresh(quoteUpdatedAt, now),
+  );
+  const visibleQuote = quoteFresh ? availableQuote : undefined;
+  const quoteDetails = visibleQuote ? formatArcSwapQuoteDetails(visibleQuote, slippageBps) : undefined;
+  const quoteExpiresInSeconds = visibleQuote
+    ? Math.max(0, Math.ceil((quoteUpdatedAt + ARC_SWAP_QUOTE_MAX_AGE_MS - now) / 1000))
+    : undefined;
+  useEffect(() => {
+    if (availableQuote && quoteUpdatedAt && !quoteFresh && !quoteQuery.isError && !quoteQuery.isFetching) {
+      void refetchQuote();
+    }
+  }, [availableQuote, quoteFresh, quoteQuery.isError, quoteQuery.isFetching, quoteUpdatedAt, refetchQuote]);
+  const refreshConfirmedBalances = useCallback(async (
+    identity: ArcSwapReceiptAccountingGenerationIdentity,
+    isCurrent: () => boolean,
+  ) => {
+    if (identity.walletAddress.toLowerCase() !== address?.toLowerCase() || !isCurrent()) return;
+    try {
+      const hasError = await refreshArcSwapBalances(inputBalance.refetch, outputBalance.refetch);
+      if (identity.walletAddress.toLowerCase() !== address?.toLowerCase() || !isCurrent()) return;
+      if (hasError) {
+        setValidationError('Swap confirmed, but one or more Arc Testnet token balances could not be refreshed.');
+      }
+    } catch (error) {
+      if (identity.walletAddress.toLowerCase() !== address?.toLowerCase() || !isCurrent()) return;
+      setValidationError(
+        `Swap confirmed, but Arc Testnet token balance refresh failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    }
+  }, [address, inputBalance.refetch, outputBalance.refetch]);
+  const execution = useArcSwapExecution(refreshConfirmedBalances);
   const resetExecution = execution.reset;
+  const persistedSuccess = useMemo(
+    () => address && execution.transactionHash
+      ? readArcSwapSuccess(address, execution.transactionHash)
+      : { record: null, error: null },
+    [address, execution.transactionHash],
+  );
+  const receiptAccountingIsCurrent = Boolean(
+    execution.state === 'confirmed' &&
+    isArcSwapReceiptAccountingCurrent(
+      execution.receiptAccountingIdentity,
+      address,
+      execution.transactionHash,
+      execution.receiptAccountingCurrentGeneration,
+    ),
+  );
+  const currentReceiptAccounting = receiptAccountingIsCurrent ? execution.receiptAccounting : null;
+  const persistedSuccessKeysRef = useRef(new Set<string>());
+  const successDismissed = isArcSwapSuccessDismissed(persistedSuccess.record);
+  const successCompletedAt = currentReceiptAccounting?.completedAt
+    ?? persistedSuccess.record?.summary?.completedAt
+    ?? completedAt;
+  const successSummary = useMemo(() => {
+    const saved = persistedSuccess.record?.summary;
+    const accounting = currentReceiptAccounting;
+    if (!successSnapshot && !accounting && !saved) return undefined;
+    const quotedProviderFee = successSnapshot
+      ? formatArcSwapProviderFees(successSnapshot.quote)
+      : null;
+    return {
+      amountSold: accounting?.amountSold ?? saved?.amountSold ?? 'Not verified',
+      inputToken: accounting
+        ? { symbol: accounting.inputToken, color: accounting.inputToken === 'USDC' ? ARC_USDC.color : ARC_EURC.color }
+        : successSnapshot
+          ? { symbol: successSnapshot.inputAsset.symbol, color: successSnapshot.inputAsset.color }
+          : saved!.inputToken,
+      amountReceived: accounting?.amountReceived ?? saved?.amountReceived ?? null,
+      actualReceivedVerified: Boolean(accounting || saved?.actualReceivedVerified),
+      outputToken: accounting
+        ? { symbol: accounting.outputToken, color: accounting.outputToken === 'USDC' ? ARC_USDC.color : ARC_EURC.color }
+        : successSnapshot
+          ? { symbol: successSnapshot.outputAsset.symbol, color: successSnapshot.outputAsset.color }
+          : saved!.outputToken,
+      completedAt: accounting?.completedAt ?? successCompletedAt ?? Date.now(),
+      expectedOutput: successSnapshot
+        ? `${successSnapshot.quote.estimatedOutput.amount} ${successSnapshot.quote.estimatedOutput.token}`
+        : saved?.expectedOutput ?? null,
+      minimumReceived: accounting
+        ? `${accounting.minimumReceived} ${accounting.outputToken}`
+        : successSnapshot
+          ? `${successSnapshot.quote.stopLimit.amount} ${successSnapshot.quote.stopLimit.token}`
+        : saved?.minimumReceived ?? null,
+      providerFee: quotedProviderFee ??
+        (accounting?.providerFee
+          ? `${accounting.providerFee} ${accounting.inputToken}`
+          : saved?.providerFee ?? 'Not reported by route'),
+      gasPaid: accounting
+        ? accounting.gasPaid === null ? null : `${accounting.gasPaid} ${ARC_TESTNET.nativeCurrency.symbol}`
+        : saved?.gasPaid ?? null,
+      usdcBalanceBefore: accounting?.usdcBalanceBefore ?? null,
+      usdcBalanceAfter: accounting?.usdcBalanceAfter ?? null,
+      netUsdcBalanceChange: accounting
+        ? accounting.netUsdcBalanceChange === null ? null : `${accounting.netUsdcBalanceChange} USDC`
+        : null,
+    };
+  }, [currentReceiptAccounting, persistedSuccess.record?.summary, successCompletedAt, successSnapshot]);
   useEffect(() => {
     if (execution.state === 'confirmed' && execution.transactionHash) {
-      setCompletedAt((current) => current ?? Date.now());
+      setCompletedAt((current) => current ?? persistedSuccess.record?.summary?.completedAt ?? Date.now());
     } else if (execution.state !== 'confirmed') {
-      setCompletedAt(null);
+      setCompletedAt(undefined);
     }
-  }, [execution.state, execution.transactionHash]);
+  }, [execution.state, execution.transactionHash, persistedSuccess.record?.summary?.completedAt]);
   useEffect(() => {
-    resetExecution();
+    if (persistedSuccess.error) setValidationError(persistedSuccess.error);
+  }, [persistedSuccess.error]);
+  useEffect(() => {
+    if (
+      execution.state === 'confirmed' &&
+      execution.transactionHash &&
+      address &&
+      currentReceiptAccounting &&
+      execution.receiptAccountingIdentity?.walletAddress.toLowerCase() === address.toLowerCase() &&
+      execution.receiptAccountingIdentity.transactionHash.toLowerCase() === execution.transactionHash.toLowerCase() &&
+      execution.receiptAccountingIdentity.generation === execution.receiptAccountingCurrentGeneration &&
+      successSummary
+    ) {
+      const persistenceKey = `${address.toLowerCase()}:${execution.transactionHash.toLowerCase()}`;
+      if (!persistedSuccessKeysRef.current.has(persistenceKey)) {
+        const error = runArcSwapReceiptAccountingIfCurrent(
+          execution.receiptAccountingIdentity,
+          address,
+          execution.transactionHash,
+          execution.receiptAccountingCurrentGeneration,
+          () => persistArcSwapSuccessSummary(address, execution.transactionHash!, successSummary),
+        );
+        if (error) {
+          setSuccessPersistenceError(error.message);
+          setValidationError(`Swap confirmed, but its success summary could not be saved: ${error.message}`);
+        } else {
+          persistedSuccessKeysRef.current.add(persistenceKey);
+          setSuccessPersistenceError(null);
+          setValidationError((current) => current?.startsWith('Swap confirmed, but its success summary could not be saved:') ? null : current);
+        }
+      }
+    }
+  }, [address, currentReceiptAccounting, execution.receiptAccountingCurrentGeneration, execution.receiptAccountingIdentity, execution.state, execution.transactionHash, successPersistenceRetry, successSnapshot, successSummary]);
+  const swapLocked = ['pending', 'executing', 'confirming', 'timeout', 'rpc-error', 'uncertain'].includes(execution.state);
+  const clearSwapInputState = () => {
+    setCompletedAt(undefined);
+    setSuccessSnapshot(undefined);
+    setSuccessPersistenceError(null);
     setShowReview(false);
     setValidationError(null);
-  }, [tokenIn, tokenOut, amount, resetExecution]);
-  const canReview = Boolean(isConnected && chainId === ARC_CHAIN_ID && provider && rawAmount && rawAmount > 0n && !amountError && isArcSwapQuoteReviewable(quoteQuery, isNoRouteError, quoteFresh));
+    resetExecution();
+  };
+  const canReview = canReviewArcSwap({
+    query: quoteQuery,
+    isUnavailableRoute: isNoRouteError,
+    quoteFresh,
+    matchesCurrentRequest,
+    isConnected,
+    isArcTestnet: chainId === ARC_CHAIN_ID,
+    hasProvider: Boolean(provider),
+    hasValidAmount: Boolean(rawAmount && rawAmount > 0n && !amountError),
+  });
 
   const changeDirection = () => {
-    setTokenIn(tokenOut);
-    setTokenOut(tokenIn);
+    clearSwapInputState();
+    setDirection((current) => toggleArcSwapDirection(current));
     setAmount('');
-    setShowReview(false);
-    setValidationError(null);
   };
 
-  const execute = () => {
-    if (isNoRouteError || quoteQuery.isError || quoteQuery.isFetching || !quoteQuery.isSuccess || !availableQuote || !quoteFresh || !amountForQuote) {
-      setValidationError('Swap quote expired. Request a fresh quote.');
-      return;
+  const execute = async () => {
+    if (!canReview || !canSubmitArcSwapQuote(quoteQuery, isNoRouteError, quoteFresh, matchesCurrentRequest) || !availableQuote || !amountForQuote || !isArcSwapQuoteFresh(quoteUpdatedAt)) {
+      setValidationError(quoteErrorText ?? 'No verified current quote is available. Review and submission are disabled.');
+      void refetchQuote();
+      throw new Error('A verified current Arc Swap quote is not available.');
     }
     setValidationError(null);
-    void execution.execute({
+    setCompletedAt(undefined);
+    setSuccessSnapshot({
+      quote: availableQuote,
+      inputAsset: { ...inputAsset, symbol: String(availableQuote.tokenIn) },
+      outputAsset: { ...outputAsset, symbol: String(availableQuote.estimatedOutput.token) },
+    });
+    await execution.execute({
       provider,
+      quote: availableQuote,
       tokenIn,
       tokenOut,
       amountIn: amountForQuote,
       slippageBps,
       quoteAmountIn: availableQuote.amountIn,
-      quoteExpiresAt,
-      quoteIsCurrent: !quoteQuery.isError && !quoteQuery.isFetching && quoteQuery.isSuccess && Boolean(availableQuote),
-    }).then(() => {
-      void Promise.all([inputBalance.refetch(), outputBalance.refetch()]);
-      void queryClient.invalidateQueries({ queryKey: ['balance'] });
-      void queryClient.invalidateQueries({ queryKey: ['prices'] });
+      quoteUpdatedAt,
+      quoteIsCurrent: !quoteQuery.isError && !quoteQuery.isFetching && quoteQuery.isSuccess && Boolean(availableQuote) && isArcSwapQuoteFresh(quoteUpdatedAt),
     });
+    void queryClient.invalidateQueries({ queryKey: ['prices'] });
   };
 
   const resetSwap = () => {
-    resetExecution();
-    setShowReview(false);
-    setValidationError(null);
+    clearSwapInputState();
+    setAmount('');
   };
 
+  const dismissSuccess = () => {
+    if (!address || !execution.transactionHash) {
+      setValidationError('Swap success details are unavailable; the confirmed transaction has been preserved.');
+      return;
+    }
+    const dismissalError = dismissArcSwapSuccess({
+      persistDismissal: () => persistArcSwapSuccessDismissal(
+        address,
+        execution.transactionHash!,
+        successSummary,
+      ),
+      resetExecution,
+      setAmount,
+      setShowReview,
+      setValidationError,
+      clearQuoteSnapshot: () => setSuccessSnapshot(undefined),
+      clearCompletedAt: () => setCompletedAt(undefined),
+      invalidateQuote: () => queryClient.removeQueries({ queryKey: quoteQuery.queryKey, exact: true }),
+    });
+    if (dismissalError) {
+      setValidationError(`Success popup could not be dismissed safely: ${dismissalError.message}`);
+    }
+  };
+  const successPopupActions = createArcSwapSuccessPopupActions(dismissSuccess);
+
   const quoteErrorText = isNoRouteError
-    ? 'No swap route is currently available for this pair on Arc Testnet. Please try again later.'
+    ? quoteQuery.error instanceof ArcSwapQuoteVerificationError
+      ? quoteQuery.error.message
+      : 'No swap route is currently available for this pair on Arc Testnet. Please try again later.'
     : quoteQuery.isError
-    ? 'Unable to get a swap quote right now. Please try again.'
+    ? quoteQuery.error instanceof ArcSwapQuoteVerificationError
+      ? quoteQuery.error.message
+      : 'Unable to get a swap quote right now. Please try again.'
     : null;
 
   const statusText = isNoRouteError
     ? quoteErrorText
     : validationError
       ?? execution.error?.message
+      ?? (execution.state === 'executing' ? 'Executing swap...' : null)
+      ?? (execution.state === 'confirming' || execution.state === 'pending' ? 'Confirming swap on Arc Testnet...' : null)
+      ?? (execution.state === 'confirmed' && !successDismissed && execution.receiptAccountingError
+        ? execution.receiptStatusVerified
+          ? 'Transaction confirmed, but token transfer logs could not verify the swap amounts. Actual amounts are not shown.'
+          : 'The transaction receipt could not be verified. Actual swap amounts are not shown.'
+        : null)
+      ?? (execution.state === 'confirmed' && execution.receiptAccountingLoading ? 'Retrying receipt verification...' : null)
+      ?? (execution.state === 'confirmed' && !successDismissed && !execution.receiptAccounting ? 'Checking the confirmed transaction receipt...' : null)
+      ?? (execution.state === 'confirmed' && !successDismissed ? 'Swap confirmed.' : null)
       ?? amountError
       ?? (chainId !== ARC_CHAIN_ID && isConnected ? 'Switch to Arc Testnet before swapping.' : null)
       ?? quoteErrorText
       ?? (!availableQuote && amountForQuote ? 'Requesting a live Arc Testnet quote...' : null)
-      ?? (availableQuote && !quoteFresh ? 'Swap quote expired. Request a fresh quote.' : null);
+      ?? (availableQuote && !quoteFresh ? 'Swap quote expired. Request a fresh quote.' : null)
+      ?? (execution.recovered && execution.state === 'confirmed' && !successDismissed ? 'Saved Arc Swap transaction receipt confirmed.' : null);
+  const canStartNewSwap = (execution.state === 'reverted' || (execution.state === 'confirmed' && successDismissed)) && Boolean(execution.transactionHash);
 
-  if (execution.state === 'confirmed' && execution.transactionHash && availableQuote) {
+  const successAcknowledgementLoaded = Boolean(
+    address &&
+    execution.transactionHash &&
+    currentReceiptAccounting !== null &&
+    execution.receiptAccountingIdentity?.generation === execution.receiptAccountingCurrentGeneration &&
+    persistedSuccess.error === null,
+  );
+  const completion = getArcSwapCompletionTransition(
+    execution.state,
+    execution.transactionHash,
+    successDismissed,
+    successAcknowledgementLoaded,
+  );
+  const reviewButtonDisabled = isArcSwapReviewButtonDisabled(
+    canReview,
+    canStartNewSwap,
+    swapLocked,
+    Boolean(execution.transactionHash),
+  );
+  if (completion) {
     return (
       <TransactionSuccessScreen
         title="Swap Successful!"
-        description="Your token swap was successfully confirmed on Arc Testnet."
+        description={(
+          <>
+            Your token swap was confirmed on Arc Testnet. Actual received amounts are decoded from verified token transfer logs.
+            <span className="mt-2 block">
+              Expected output (estimate): {successSummary?.expectedOutput ?? 'Quote estimate not retained'}.
+              Minimum received: {successSummary?.minimumReceived ?? 'Not available'}.
+              Provider fees: {successSummary?.providerFee ?? 'Not reported by route'}.
+            </span>
+            {validationError && <span className="mt-2 block text-amber-300">{validationError}</span>}
+            {successPersistenceError && (
+              <button
+                type="button"
+                className="mt-2 block text-amber-200 underline"
+                onClick={() => setSuccessPersistenceRetry((retry) => retry + 1)}
+              >
+                Retry saving verified swap details
+              </button>
+            )}
+          </>
+        )}
         amountLabel="Amount sold"
-        amount={availableQuote.amountIn}
-        token={inputAsset}
-        secondaryAmount={{ label: 'Amount received', amount: availableQuote.estimatedOutput.amount, token: outputAsset }}
+        amount={successSummary?.amountSold ?? 'Not verified'}
+        token={successSummary?.inputToken ?? inputAsset}
+        secondaryAmount={successSummary ? {
+          label: 'Received (actual)',
+          amount: successSummary.amountReceived ?? 'Not verified',
+          token: successSummary.outputToken,
+        } : undefined}
         networks={[{ label: 'Network', network: { id: ARC_CHAIN_ID, name: 'Arc Testnet' } }]}
-        transactionHash={execution.transactionHash}
-        successChimeKey={`swap:${execution.transactionHash}`}
-        explorerUrl={explorerTxUrl(execution.transactionHash, ARC_CHAIN_ID)}
-        gasFee="Unavailable"
-        completedAt={completedAt ?? Date.now()}
+        transactionHash={execution.transactionHash!}
+        transactionLabel="Transaction hash"
+        successChimeKey={`arc-swap:${execution.transactionHash}`}
+        explorerUrl={completion.explorerUrl}
+        networkGasFee={successSummary?.gasPaid ?? 'Not reported by receipt'}
+        completedAt={currentReceiptAccounting?.completedAt ?? null}
         primaryLabel="Back to Swap"
-        onBack={resetSwap}
-        onPrimary={resetSwap}
+        onBack={successPopupActions.onBack}
+        onPrimary={successPopupActions.onPrimary}
       />
     );
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="orbit-action-page orbit-arc-swap-page mx-auto max-w-4xl space-y-6">
       <div className="page-shell flex flex-wrap items-end justify-between gap-4 rounded-2xl px-4 py-3 sm:px-5">
         <div>
           <Label>Move / Swap / Arc Testnet</Label>
@@ -259,43 +495,98 @@ export function ArcSwapPage() {
               <span className="mb-2 block text-xs font-semibold text-slate-400">From</span>
               <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[.04] p-3">
                 <TokenIcon symbol={tokenIn} color={inputAsset.color} />
-                <select value={tokenIn} onChange={(event) => { setTokenIn(event.target.value as ArcSwapSymbol); setAmount(''); setShowReview(false); }} className="min-w-0 flex-1 bg-transparent font-bold text-white outline-none">
-                  {ARC_SWAP_ASSETS.map((asset) => <option key={asset.symbol} value={asset.symbol} className="bg-[#101725]">{asset.symbol}</option>)}
+                <select value={tokenIn} disabled={swapLocked} onChange={(event) => { clearSwapInputState(); setDirection((current) => ({ ...current, tokenIn: event.target.value as ArcSwapSymbol })); setAmount(''); }} className="min-w-0 flex-1 bg-transparent font-bold text-white outline-none">
+                  {ARC_SWAP_ASSETS.map((asset) => <option key={asset.symbol} value={asset.symbol} disabled={asset.symbol === tokenOut} className="bg-[#101725]">{asset.symbol}</option>)}
                 </select>
               </div>
-              <span className="mt-2 block font-mono text-[10px] text-slate-500">Balance {balance.isLoading ? '...' : formatUnits(balance.raw, inputAsset.decimals)} {tokenIn}</span>
+              <span className="mt-2 block font-mono text-[10px] text-slate-500">Balance {balance.isError ? 'Unavailable' : balance.isFetching ? '...' : formatUnits(balance.raw, inputAsset.decimals)} {tokenIn}</span>
             </label>
-            <button type="button" onClick={changeDirection} aria-label="Swap direction" className="mx-auto rounded-xl border border-white/10 bg-[#141d2e] px-3 py-2 text-cyan-300">⇄</button>
+            <button type="button" onClick={changeDirection} disabled={swapLocked} aria-label="Swap direction" className="mx-auto rounded-xl border border-white/10 bg-[#141d2e] px-3 py-2 text-cyan-300 disabled:opacity-50">⇄</button>
             <label className="block">
               <span className="mb-2 block text-xs font-semibold text-slate-400">To</span>
               <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[.04] p-3">
                 <TokenIcon symbol={tokenOut} color={outputAsset.color} />
-                <select value={tokenOut} onChange={(event) => { setTokenOut(event.target.value as ArcSwapSymbol); setAmount(''); setShowReview(false); }} className="min-w-0 flex-1 bg-transparent font-bold text-white outline-none">
+                <select value={tokenOut} disabled={swapLocked} onChange={(event) => { clearSwapInputState(); setDirection((current) => ({ ...current, tokenOut: event.target.value as ArcSwapSymbol })); setAmount(''); }} className="min-w-0 flex-1 bg-transparent font-bold text-white outline-none">
                   {ARC_SWAP_ASSETS.map((asset) => <option key={asset.symbol} value={asset.symbol} disabled={asset.symbol === tokenIn} className="bg-[#101725]">{asset.symbol}</option>)}
                 </select>
               </div>
-              <span className="mt-2 block font-mono text-[10px] text-slate-500">Balance {outputBalance.isLoading ? '...' : formatUnits(outputBalance.raw, outputAsset.decimals)} {tokenOut}</span>
+              <span className="mt-2 block font-mono text-[10px] text-slate-500">Balance {outputBalance.isError ? 'Unavailable' : outputBalance.isFetching ? '...' : formatUnits(outputBalance.raw, outputAsset.decimals)} {tokenOut}</span>
             </label>
           </div>
 
           <label className="mt-5 block">
-            <span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={() => setAmount(formatUnits(balance.raw, inputAsset.decimals))} className="orbit-form-max font-mono text-[10px]">MAX</button></span>
-            <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => { setAmount(event.target.value); setShowReview(false); }} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-2xl font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">{tokenIn}</span></div>
+            <span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" disabled={swapLocked} onClick={() => { clearSwapInputState(); setAmount(formatUnits(balance.raw, inputAsset.decimals)); }} className="orbit-form-max font-mono text-[10px] disabled:opacity-50">MAX</button></span>
+            <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} disabled={swapLocked} onChange={(event) => { clearSwapInputState(); setAmount(event.target.value); }} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-2xl font-bold text-white outline-none placeholder:text-slate-600 disabled:opacity-60" /><span className="font-mono text-xs text-slate-500">{tokenIn}</span></div>
           </label>
 
           <div className="mt-5 space-y-3 rounded-xl border border-white/10 bg-white/[.03] p-4 text-xs">
-            <div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-200">{isNoRouteError ? 'Unavailable' : quoteQuery.isLoading ? 'Loading...' : availableQuote?.estimatedOutput.amount ?? 'Unavailable'} {tokenOut}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-200">{availableQuote?.stopLimit.amount ?? 'Unavailable'} {tokenOut}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Fees</span><span className="font-mono text-slate-200">{isNoRouteError ? 'Unavailable' : availableQuote?.fees?.length ? availableQuote.fees.map((fee) => `${fee.amount} ${fee.token}`).join(', ') : 'Not provided by route'}</span></div>
-            <div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={slippageBps} onChange={(event) => setSlippageBps(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={10}>0.1%</option><option value={50}>0.5%</option><option value={100}>1%</option></select></div>
-            <div className="flex justify-between"><span className="text-slate-500">Quote expires</span><span className="font-mono text-slate-200">{quoteFresh ? `${Math.ceil((quoteExpiresAt - now) / 1000)}s` : 'Unavailable'}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Executable route</span><span className="font-mono text-slate-200">{quoteDetails?.route ?? 'Unavailable'}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Expected output</span><span className="font-mono text-slate-200">{isNoRouteError ? 'Unavailable' : quoteQuery.isLoading || quoteQuery.isFetching ? 'Loading...' : quoteDetails?.expectedOutput ?? 'Unavailable'}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span className="font-mono text-slate-200">{quoteDetails?.minimumReceived ?? 'Unavailable'}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Provider fees</span><span className="font-mono text-right text-slate-200">{isNoRouteError ? 'Unavailable' : quoteDetails?.providerFees ?? 'Unavailable'}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Estimated gas</span><span className="font-mono text-right text-slate-200">{isNoRouteError ? 'Unavailable' : quoteDetails?.estimatedGas ?? 'Unavailable'}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Quote expiry</span><span className="font-mono text-slate-200">{quoteExpiresInSeconds === undefined ? 'Unavailable' : `in ${quoteExpiresInSeconds}s`}</span></div>
+            <div className="flex items-center justify-between"><span className="text-slate-500">Slippage</span><select value={slippageBps} disabled={swapLocked} onChange={(event) => setSlippageBps(Number(event.target.value))} className="rounded border border-white/10 bg-[#101725] px-2 py-1 font-mono text-[10px] text-slate-300"><option value={10}>0.1%</option><option value={50}>0.5%</option><option value={100}>1%</option></select></div>
           </div>
 
-          {statusText && <p className={`mt-4 text-xs ${isNoRouteError || quoteQuery.isError || execution.error || validationError || amountError ? 'text-rose-300' : 'text-slate-400'}`}>{statusText}</p>}
-          <Button className="mt-5 w-full" onClick={() => setShowReview(true)} disabled={!canReview || execution.state === 'pending'} icon>{execution.state === 'pending' ? 'Swap pending...' : execution.state === 'confirmed' ? 'Swap confirmed' : 'Review Swap'}</Button>
-          {showReview && availableQuote && quoteFresh && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><Label>Final confirmation</Label><div className="mt-3 space-y-2"><div className="flex justify-between"><span className="text-slate-500">Route</span><span>{tokenIn} → {tokenOut}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{availableQuote.stopLimit.amount} {tokenOut}</span></div></div><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowReview(false)}>Cancel</Button><Button className="flex-1" onClick={execute} disabled={isNoRouteError || execution.state === 'pending'}>Confirm Swap</Button></div></div>}
-          {execution.transactionHash && <p className="mt-3 text-xs text-emerald-300">Transaction: <a className="underline" href={explorerTxUrl(execution.transactionHash, ARC_CHAIN_ID)} target="_blank" rel="noopener noreferrer">{execution.transactionHash.slice(0, 10)}...{execution.transactionHash.slice(-8)}</a></p>}
-          {(execution.state === 'failed' || isNoRouteError) && <Button variant="secondary" className="mt-3 w-full" onClick={() => { setShowReview(false); void quoteQuery.refetch(); }}><RefreshCw size={14} />Request fresh quote</Button>}
+          {statusText && (
+            <div className="mt-4 space-y-2 text-xs">
+              <p className={isNoRouteError || quoteQuery.isError || execution.error || validationError || amountError ? 'text-rose-300' : 'text-slate-400'}>{statusText}</p>
+              {execution.state === 'confirmed' && execution.receiptAccountingError && execution.transactionHash && (
+                <a
+                  href={`${ARC_TESTNET.blockExplorers.default.url}/tx/${execution.transactionHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="break-all font-mono text-cyan-300 underline"
+                >
+                  Transaction hash: {execution.transactionHash}
+                </a>
+              )}
+              {execution.state === 'confirmed' && execution.transactionHash &&
+                (execution.receiptAccountingError || execution.receiptAccountingLoading) && (
+                  <Button
+                    variant="secondary"
+                    className="w-full"
+                    disabled={execution.receiptAccountingLoading}
+                    onClick={() => void execution.retryReceiptAccounting()}
+                  >
+                    {execution.receiptAccountingLoading ? 'Verifying receipt...' : 'Retry verification'}
+                  </Button>
+                )}
+            </div>
+          )}
+          <Button className={`mt-5 w-full ${reviewButtonDisabled ? 'disabled:grayscale disabled:brightness-75 disabled:cursor-not-allowed' : ''}`} onClick={() => canStartNewSwap ? resetSwap() : setShowReview(true)} disabled={reviewButtonDisabled} icon>{canStartNewSwap ? 'Start a new swap' : execution.state === 'executing' ? 'Executing swap...' : execution.state === 'confirming' || execution.state === 'pending' ? 'Confirming swap...' : execution.state === 'confirmed' ? 'Swap confirmed' : 'Review Swap'}</Button>
+          {showReview && visibleQuote && quoteDetails && (
+            <div className="mt-4 space-y-3 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs">
+              <Label>Final confirmation</Label>
+              <div className="mt-3 space-y-2">
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Route</span><span>{tokenIn} → {tokenOut}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Provider</span><span>{quoteDetails.route}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">You pay</span><span>{visibleQuote.amountIn} {visibleQuote.tokenIn}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Expected output (estimate)</span><span>{quoteDetails.expectedOutput}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Minimum received</span><span>{quoteDetails.minimumReceived}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Provider fees</span><span>{quoteDetails.providerFees}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{quoteDetails.estimatedGas}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Slippage</span><span>{quoteDetails.slippage}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Quote expiry</span><span>{quoteExpiresInSeconds === undefined ? 'Unavailable' : `in ${quoteExpiresInSeconds}s`}</span></div>
+              </div>
+              <p className="rounded-lg border border-white/10 bg-white/[.025] px-3 py-2.5 leading-5 text-slate-400">
+                Review your wallet prompts. Approval and swap may require separate gas fees.
+              </p>
+              <SlideToConfirm
+                label="Slide to swap"
+                confirmationKey={`${address?.toLowerCase() ?? ''}:${chainId ?? ''}:${tokenIn}:${tokenOut}:${amount}:${slippageBps}:${quoteQuery.dataUpdatedAt}`}
+                phase={execution.state === 'executing' ? 'submitting' : execution.state === 'pending' || execution.state === 'confirming' ? 'pending' : execution.state === 'confirmed' ? 'success' : execution.state === 'failed' ? 'failed' : 'idle'}
+                disabled={!canReview || Boolean(execution.transactionHash) || !canSubmitArcSwapQuote(quoteQuery, isNoRouteError, quoteFresh, matchesCurrentRequest)}
+                onConfirm={execute}
+              />
+              <Button variant="secondary" className="w-full" disabled={swapLocked || Boolean(execution.transactionHash)} onClick={() => setShowReview(false)}>Cancel review</Button>
+            </div>
+          )}
+          {execution.transactionHash && !successDismissed && <p className="mt-3 text-xs text-emerald-300">Transaction: <a className="underline" href={getArcSwapCompletionTransition('confirmed', execution.transactionHash)?.explorerUrl} target="_blank" rel="noopener noreferrer">{execution.transactionHash.slice(0, 10)}...{execution.transactionHash.slice(-8)}</a></p>}
+          {execution.transactionHash && ['pending', 'timeout', 'rpc-error'].includes(execution.state) && <Button variant="secondary" className="mt-3 w-full" onClick={() => void execution.retryRecoveryCheck()}>Check saved transaction</Button>}
+          {(execution.state === 'failed' || quoteQuery.isError || isNoRouteError) && <Button variant="secondary" className="mt-3 w-full" onClick={() => { setShowReview(false); void refetchQuote(); }}><RefreshCw size={14} />Request fresh quote</Button>}
           <p className="mt-5 text-[10px] leading-4 text-slate-500">Circle Swap supports USDC, EURC, and cirBTC on Arc Testnet. cirBTC remains hidden until its current official Arc Testnet contract address is verified by ORBIT.</p>
         </Card>
       ))}

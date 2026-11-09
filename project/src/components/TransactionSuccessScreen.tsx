@@ -28,7 +28,8 @@ export interface TransactionSuccessScreenProps {
   explorerUrl: string | null;
   additionalTransactions?: { label: string; transactionHash?: string; explorerUrl?: string | null }[];
   gasFee?: string;
-  completedAt: number;
+  networkGasFee?: string;
+  completedAt: number | null;
   primaryLabel: string;
   onBack: () => void;
   onPrimary: () => void;
@@ -129,6 +130,7 @@ export function TransactionSuccessScreen({
   explorerUrl,
   additionalTransactions = [],
   gasFee,
+  networkGasFee,
   completedAt,
   primaryLabel,
   onBack,
@@ -138,7 +140,17 @@ export function TransactionSuccessScreen({
   useEffect(() => {
     if (successChimeKey) playSuccessChime(successChimeKey);
   }, [successChimeKey]);
-  const formattedTime = new Date(completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const formattedTime = completedAt === null
+    ? 'Block timestamp unavailable'
+    : new Date(completedAt).toLocaleString([], {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'short',
+    });
   const transactions = [{ label: transactionLabel, transactionHash, explorerUrl }, ...additionalTransactions];
 
   return (
@@ -197,9 +209,10 @@ export function TransactionSuccessScreen({
             <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-300"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />Confirmed</span>
           </div>
           <div className="orbit-success-row flex items-center justify-between gap-4 px-4 py-3 text-xs">
-            <span className="text-slate-500">Time</span>
+            <span className="text-slate-500">Confirmed at</span>
             <span className="font-mono text-slate-300">{formattedTime}</span>
           </div>
+          {networkGasFee && <div className="orbit-success-row flex items-center justify-between gap-4 px-4 py-3 text-xs"><span className="text-slate-500">Network gas paid</span><span className="font-mono text-slate-300">{networkGasFee}</span></div>}
           {gasFee && <div className="orbit-success-row flex items-center justify-between gap-4 px-4 py-3 text-xs"><span className="text-slate-500">Estimated gas fee</span><span className="font-mono text-slate-300">{gasFee}</span></div>}
         </div>
         <div className="orbit-success-action mt-5 flex justify-end">

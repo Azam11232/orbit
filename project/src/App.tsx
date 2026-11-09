@@ -16,26 +16,27 @@ import { getPortfolioAnalytics, getPortfolioAssetCountState, getPortfolioUsdStat
 import { useApprovals } from "./hooks/useApprovals";
 import { useRevokeApproval } from "./hooks/useRevokeApproval";
 import { useSendTransaction, validateSendRequest } from "./hooks/useSendTransaction";
+import { createFreshSendFormState, isCurrentSendFlow, shouldShowSendSuccess } from "./services/sendLifecycle";
 import { useTokenBalance } from "./hooks/useTokenBalance";
 import { useSwapQuote } from "./hooks/useSwapQuote";
 import { useSwapApproval } from "./hooks/useSwapApproval";
 import { useSwapExecution } from "./hooks/useSwapExecution";
 import { useBridgeTokens } from "./hooks/useBridgeTokens";
 import { useBridgeBalance } from "./hooks/useBridgeBalance";
-import { getBridgeQuoteFreshnessState, isBridgeQuoteCurrent, isBridgeReviewable, isSameBridgeQuoteSnapshot, useBridgeQuote } from "./hooks/useBridgeQuote";
+import { getBridgeNativeGasRequirement, getBridgeQuoteFreshnessState, isBridgeNativeGasReady, isBridgeQuoteCurrent, isBridgeReviewable, isSameBridgeQuoteSnapshot, useBridgeQuote } from "./hooks/useBridgeQuote";
 import { getBridgeApprovalActionState, getBridgeApprovalRequest, useBridgeApproval } from "./hooks/useBridgeApproval";
-import { canRetryDestinationMint, canRetryForwardingReconciliation, canShowBridgeSuccess, getCompactBridgeProgressSteps, getCompactBridgeStatus, getRequiredBridgeChainId, isBridgeExecutionStarted, shouldAutoCompleteBridge, shouldResetBridgeAmount, shouldResetBridgeExecution, shouldShowBridgeWrongNetwork, type BridgeExecutionStatus, useBridgeExecution } from "./hooks/useBridgeExecution";
-import { useBridgeStatus } from "./hooks/useBridgeStatus";
+import { canShowBridgeSuccess, getBridgeSelectedRoute, getCompactBridgeProgressSteps, getCompactBridgeStatus, getRequiredBridgeChainId, isBridgeExecutionStarted, shouldResetBridgeAmount, shouldResetBridgeExecution, shouldShowBridgeSourceConfirmation, shouldShowBridgeWrongNetwork, shouldShowCctpDestinationMintAction, type BridgeExecutionStatus, useBridgeExecution } from "./hooks/useBridgeExecution";
 import { beginArcForwardingTiming, getBridgeQuoteTiming, markArcForwardingTiming, type ArcForwardingTiming } from "./services/bridge/arcForwardingTiming";
 import { useTransactions } from "./hooks/useTransactions";
 import { useOrbitSettings } from "./hooks/useOrbitSettings";
 import { useWatchlist, type WatchlistItem } from "./hooks/useWatchlist";
 import { formatTransactionDate, getTimeAgo, shortAddr, explorerTxUrl, type ChainTransaction, type TxStatus } from "./services/transactions";
-import { calculateSecurityScore, canRevokeApproval, countLargeOutgoingTransfers, summarizeApprovalScanErrors } from "./services/security";
+import { calculateSecurityScore, canRevokeApproval, countLargeOutgoingTransfers, getApprovalCoveragePercent, getSecurityAssessment, getApprovalScanStatus, summarizeApprovalScanErrors, type TokenApproval } from "./services/security";
+import { getSecurityNavigationTarget } from "./services/securityNavigation";
 import { ARC_USDC, BASE_ASSETS, BASE_SWAP_ASSETS } from "./data/tokens";
-import { ARC_PRIMARY_NETWORK, ARC_TESTNET, CCTP_BRIDGE_NETWORKS, ETHEREUM_SEPOLIA, ORBIT_NETWORKS, getOrbitNetwork, isCctpRouteSupported } from "./data/networks";
+import { ARC_PRIMARY_NETWORK, ARC_TESTNET, CCTP_BRIDGE_NETWORKS, ETHEREUM_SEPOLIA, ORBIT_NETWORKS, getOrbitNetwork } from "./data/networks";
 import { usePrices } from "./hooks/usePrices";
-import { fetchPortfolioHistoricalCandles, PORTFOLIO_PRICES } from "./services/prices";
+import { PORTFOLIO_PRICES } from "./services/prices";
 import type { BridgeChain, BridgeQuote } from "./types/bridge";
 import { QRCodeSVG } from "qrcode.react";
 import {
@@ -49,10 +50,8 @@ import {
   CircleDollarSign,
   Compass,
   Copy,
-  CreditCard,
   Crosshair,
   ExternalLink,
-  Globe2,
   Landmark,
   LayoutDashboard,
   LockKeyhole,
@@ -83,6 +82,7 @@ import {
 import { ArcPayPage } from "./components/ArcPayPage";
 import { ArcSwapPage } from "./components/ArcSwapPage";
 import { TransactionSuccessScreen } from "./components/TransactionSuccessScreen";
+import { SlideToConfirm } from "./components/SlideToConfirm";
 import { UnifiedBalancePage } from "./components/UnifiedBalancePage";
 import { SecurityCenter } from "./components/SecurityCenter";
 import { OrbitBrand } from "./components/OrbitBrand";
@@ -168,17 +168,27 @@ export function isBridgeAllowanceVerifiedForAmount(allowance: bigint, requiredAm
   if (isAllowanceLoading) return false;
   return allowance >= requiredAmount;
 }
-export function getBridgeSuccessDestinationHash(executionHash?: Hash, statusHash?: string) {
-  return executionHash ?? statusHash as Hash | undefined;
+export function getBridgeSuccessDestinationHash(
+  executionHash?: Hash,
+  statusHash?: string,
+  statusChainId?: number,
+  expectedDestinationChainId?: number,
+) {
+  if (executionHash) return executionHash;
+  return expectedDestinationChainId !== undefined &&
+    statusChainId === expectedDestinationChainId &&
+    /^0x[a-f\d]{64}$/i.test(statusHash ?? '')
+    ? statusHash as Hash
+    : undefined;
 }
 
-export function shouldShowBridgeApprovalAction(input: { status: BridgeExecutionStatus; sourceHash?: Hash; approvalRequired: boolean }) {
+export function shouldShowBridgeApprovalAction(input: { status: BridgeExecutionStatus; sourceHash?: Hash; approvalRequired: boolean; sourceSubmissionAttempted?: boolean }) {
   if (!input.approvalRequired) return false;
-  return !isBridgeExecutionStarted(input.status, input.sourceHash);
+  return !input.sourceSubmissionAttempted && !isBridgeExecutionStarted(input.status, input.sourceHash);
 }
 
-export function shouldShowBridgeReviewAction(input: { status: BridgeExecutionStatus; sourceHash?: Hash; approvalRequired: boolean; bridgeReady: boolean }) {
-  return !input.approvalRequired && !isBridgeExecutionStarted(input.status, input.sourceHash) && input.bridgeReady;
+export function shouldShowBridgeReviewAction(input: { status: BridgeExecutionStatus; sourceHash?: Hash; approvalRequired: boolean; bridgeReady: boolean; sourceSubmissionAttempted?: boolean }) {
+  return !input.approvalRequired && !input.sourceSubmissionAttempted && !isBridgeExecutionStarted(input.status, input.sourceHash) && input.bridgeReady;
 }
 
 function formatRefreshMode(mode: "manual" | "balanced" | "live") {
@@ -1132,26 +1142,48 @@ export function NetworkIcon({ chainId, className = "" }: { chainId: number; clas
 function LiveBalanceValue({ children, valueKey }: { children: ReactNode; valueKey: number | string }) {
   const reduceMotion = useReducedMotion();
   const previousValue = useRef(valueKey);
+  const previousDisplay = useRef(children);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [outgoingDisplay, setOutgoingDisplay] = useState<ReactNode>(null);
 
   useEffect(() => {
     if (previousValue.current === valueKey) {
+      previousDisplay.current = children;
+      if (reduceMotion) {
+        setIsUpdating(false);
+        setOutgoingDisplay(null);
+      }
       return;
     }
 
     previousValue.current = valueKey;
+    const previousChildren = previousDisplay.current;
+    previousDisplay.current = children;
     if (reduceMotion) {
+      setIsUpdating(false);
+      setOutgoingDisplay(null);
       return;
     }
 
+    setOutgoingDisplay(previousChildren);
     setIsUpdating(true);
-    const timeout = window.setTimeout(() => setIsUpdating(false), 780);
+    const timeout = window.setTimeout(() => {
+      setIsUpdating(false);
+      setOutgoingDisplay(null);
+    }, 780);
     return () => window.clearTimeout(timeout);
-  }, [reduceMotion, valueKey]);
+  }, [children, reduceMotion, valueKey]);
 
   return (
     <span className={`orbit-live-balance-value${isUpdating ? " orbit-live-balance-value--updating" : ""}`}>
-      {children}
+      {isUpdating && outgoingDisplay !== null && (
+        <span className="orbit-live-balance-value__previous" aria-hidden="true">
+          {outgoingDisplay}
+        </span>
+      )}
+      <span className={`orbit-live-balance-value__current${isUpdating ? " orbit-live-balance-value__current--updating" : ""}`}>
+        {children}
+      </span>
     </span>
   );
 }
@@ -1289,7 +1321,7 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
 
   const svgWidth = 760;
   const svgHeight = 220;
-  const leftPad = 12;
+  const leftPad = 52;
   const rightPad = 12;
   const topPad = 18;
   const bottomPad = 24;
@@ -1325,6 +1357,20 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
   const latestPoint = points[points.length - 1];
   const currentLabel = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   const currentTime = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const xAxisPoints = [...new Set([
+    points[0],
+    points[Math.floor((points.length - 1) / 2)],
+    latestPoint,
+  ])];
+  const currentValueLabel = `$${latestPoint.value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+  const currentValueLabelWidth = Math.min(118, currentValueLabel.length * 6 + 12);
+  const currentValueLabelX = latestPoint.x > svgWidth * 0.72
+    ? latestPoint.x - currentValueLabelWidth - 8
+    : latestPoint.x + 8;
+  const currentValueLabelY = Math.max(2, latestPoint.y - 28);
   const hoverPoint = hoverIndex === null ? null : points[hoverIndex] ?? null;
   const handleChartMouseMove = (event: React.MouseEvent<SVGSVGElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -1383,7 +1429,17 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
             </defs>
             {[0, 1, 2, 3].map((line) => {
               const y = topPad + (usableHeight / 3) * line;
-              return <line key={line} className="orbit-chart-grid-line" x1={leftPad} x2={svgWidth - rightPad} y1={y} y2={y} />;
+              const axisValue = maxValue - (valueRange / 3) * line;
+              return (
+                <g key={line}>
+                  <line className="orbit-chart-grid-line" x1={leftPad} x2={svgWidth - rightPad} y1={y} y2={y} />
+                  {points.length > 1 && (
+                    <text className="orbit-chart-axis-label" x={leftPad - 8} y={y + 3} textAnchor="end">
+                      {axisValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    </text>
+                  )}
+                </g>
+              );
             })}
 
             {points.length > 1 && (
@@ -1425,15 +1481,34 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
               />
             ))}
 
-            {latestPoint && (
+            {points.length > 1 && xAxisPoints.map((point, index) => (
               <text
-                className="orbit-chart-now-label"
-                x={latestPoint.x > svgWidth * 0.75 ? latestPoint.x - 7 : latestPoint.x}
-                y={Math.max(topPad + 12, latestPoint.y - 16)}
-                textAnchor={latestPoint.x > svgWidth * 0.75 ? "end" : "middle"}
+                key={`time-${point.timestamp}`}
+                className="orbit-chart-axis-label"
+                x={point.x}
+                y={svgHeight - 4}
+                textAnchor={index === 0 ? "start" : index === xAxisPoints.length - 1 ? "end" : "middle"}
               >
-                Now
+                {new Date(point.timestamp).toLocaleTimeString(undefined, {
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })}
               </text>
+            ))}
+
+            {latestPoint && (
+              <g className="orbit-chart-current-marker">
+                <rect
+                  x={currentValueLabelX}
+                  y={currentValueLabelY}
+                  width={currentValueLabelWidth}
+                  height={20}
+                  rx={6}
+                />
+                <text x={currentValueLabelX + currentValueLabelWidth / 2} y={currentValueLabelY + 13} textAnchor="middle">
+                  {currentValueLabel}
+                </text>
+              </g>
             )}
           </svg>
 
@@ -1461,8 +1536,22 @@ function Chart({ portfolio }: { portfolio: ReturnType<typeof usePortfolio> }) {
     </div>
   );
 }
-function StatCards() {
-  const reduceMotion = useReducedMotion();
+function formatHomeUsdcAmount(amount: string): string {
+  const numericAmount = Number(amount);
+  return Number.isFinite(numericAmount)
+    ? numericAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : amount;
+}
+
+function StatCards({
+  setPage,
+  securityAssessment,
+  approvalCoverage,
+}: {
+  setPage: (page: Page) => void;
+  securityAssessment: ReturnType<typeof getSecurityAssessment>;
+  approvalCoverage: string | null;
+}) {
   const { chainId } = useAccount();
   const portfolio = usePortfolio();
   const isArcTestnet = chainId === arcTestnet.id;
@@ -1530,7 +1619,13 @@ function StatCards() {
                     {displayAsset?.isError
                       ? "Unavailable"
                       : displayAsset
-                        ? <LiveBalanceValue valueKey={`${displayAsset.symbol}:${displayAsset.raw.toString()}`}>{displayAsset.formatted ?? "0"}</LiveBalanceValue>
+                        ? (
+                          <LiveBalanceValue valueKey={`${displayAsset.symbol}:${displayAsset.raw.toString()}`}>
+                            {isArcTestnet
+                              ? formatHomeUsdcAmount(displayAsset.formatted ?? "0")
+                              : displayAsset.formatted ?? "0"}
+                          </LiveBalanceValue>
+                        )
                         : "0"}
                   </span>
                   <span className="orbit-balance-currency text-xl text-slate-500">{isArcTestnet ? "USDC" : "ETH"}</span>
@@ -1639,39 +1734,37 @@ function StatCards() {
           )}
         </div>
       </Card>
-      <Card className="orbit-home-stat-card orbit-home-stat-card--security p-5">
-        <div className="orbit-home-stat-heading flex items-center justify-between">
-          <Label>Security Score</Label>
-          <span className="orbit-home-stat-icon orbit-home-stat-icon--security rounded-xl bg-emerald-300/10 p-2 text-emerald-300 ring-1 ring-emerald-400/20" aria-hidden="true">
-            <ShieldCheck size={16} />
+      <Card className="orbit-home-stat-card orbit-home-stat-card--security orbit-home-security-score-card">
+        <div className="orbit-home-security-card__layout">
+          <span
+            className="orbit-home-security-card__icon"
+            aria-hidden="true"
+          >
+            <ShieldCheck size={18} strokeWidth={1.8} />
           </span>
-        </div>
-        <div className="orbit-security-system">
-          <div className="orbit-security-integrity" aria-hidden="true">
-            <svg className="orbit-security-score-ring" viewBox="0 0 104 104">
-              <circle className="orbit-security-score-ring__track" cx="52" cy="52" r="45" pathLength="100" />
-              <motion.circle
-                className="orbit-security-score-ring__progress"
-                cx="52"
-                cy="52"
-                r="45"
-                pathLength="100"
-                initial={{ strokeDashoffset: 100 }}
-                animate={{ strokeDashoffset: 100 }}
-                transition={{ duration: reduceMotion ? 0 : 0.9, ease: "easeOut" }}
-                transform="rotate(-90 52 52)"
-              />
-            </svg>
-            <span className="orbit-security-score-readout">
-              <strong className="orbit-security-score-value">Unknown</strong>
-            </span>
-          </div>
-          <span className="orbit-security-system-divider" aria-hidden="true" />
-          <div className="orbit-security-status">
-            <span className="orbit-security-status-pill"><Pill color="purple">Not assessed</Pill></span>
-            <p className="orbit-security-alert-copy">
-              Open the Security Center to run the bounded Arc Testnet scan
+          <div className="orbit-home-security-card__content">
+            <p className="orbit-home-security-card__title">Security Score</p>
+            <p className="orbit-home-security-card__status">Not scored</p>
+            <p className="orbit-home-security-card__description">
+              <span>
+                {securityAssessment.status}: {securityAssessment.description}
+              </span>
+              {approvalCoverage && (
+                <span className="orbit-home-security-card__coverage">
+                  {approvalCoverage}
+                </span>
+              )}
+              <span className="orbit-home-security-card__limitation">
+                Configured tokens only; this is not complete wallet history.
+              </span>
             </p>
+            <button
+              type="button"
+              onClick={() => setPage(getSecurityNavigationTarget("view-security-details"))}
+              className="orbit-home-security-card__link"
+            >
+              View security details
+            </button>
           </div>
         </div>
       </Card>
@@ -1792,7 +1885,7 @@ function getStatusClasses(status: TxStatus): string {
   }
 }
 
-function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
+export function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
   const { address, isConnected, chainId } = useAccount();
   const { transactions, isLoading, isError } = useTransactions(
     address,
@@ -1883,10 +1976,46 @@ function RecentActivity({ setPage }: { setPage: (p: Page) => void }) {
 function Home({ setPage }: { setPage: (p: Page) => void }) {
   const reduceMotion = useReducedMotion();
   const portfolio = usePortfolio();
-  const { chainId } = useAccount();
-  const discover = useDiscover();
-  const watchlist = useWatchlist();
-
+  const { address, chainId, isConnected } = useAccount();
+  const approvalsQuery = useApprovals(true);
+  const transactionsQuery = useTransactions(
+    address,
+    isConnected && chainId === arcTestnet.id && Boolean(address),
+    chainId,
+    false,
+    true,
+  );
+  const isArcConnected = isConnected && chainId === ARC_TESTNET.id && Boolean(address);
+  const providerPauseUntil = Math.max(
+    approvalsQuery.cooldownUntil ?? 0,
+    approvalsQuery.data?.retryAfterAt ?? 0,
+  );
+  const [assessmentClock, setAssessmentClock] = useState(Date.now());
+  useEffect(() => {
+    if (providerPauseUntil <= assessmentClock) return;
+    const timer = window.setTimeout(
+      () => setAssessmentClock(Date.now()),
+      Math.max(0, providerPauseUntil - Date.now() + 20),
+    );
+    return () => window.clearTimeout(timer);
+  }, [assessmentClock, providerPauseUntil]);
+  const securityAssessment = getSecurityAssessment({
+    walletConnected: isConnected && Boolean(address),
+    supportedNetwork: chainId === ARC_TESTNET.id,
+    isScanning: isArcConnected && (approvalsQuery.isFetching || transactionsQuery.isFetching),
+    providerRateLimited: isArcConnected &&
+      !approvalsQuery.data?.isComplete &&
+      providerPauseUntil > assessmentClock,
+    approvalScanStarted: approvalsQuery.data !== undefined,
+    approvalWindowComplete: Boolean(approvalsQuery.data?.isComplete),
+    approvalHistoryStartsAtGenesis: approvalsQuery.data?.scannedFromBlock === 0n,
+    approvalDataUnavailable: approvalsQuery.isError || Boolean(approvalsQuery.data?.errors.length),
+    activityScanStarted: transactionsQuery.lastScannedAt !== null,
+    activityDataUnavailable: transactionsQuery.isError,
+    activityHasUnresolvedTransactions: transactionsQuery.transactions.some(
+      (transaction) => transaction.status !== "success" && transaction.status !== "failed",
+    ),
+  });
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const networkLabel = supportedChains.find((item) => item.id === chainId)?.name ?? "Current network";
@@ -1930,15 +2059,21 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
       : portfolio.isError
         ? "DEGRADED"
         : "LIVE";
+  const topHoldings = portfolio.assets
+    .filter((asset) => asset.raw > 0n)
+    .sort((left, right) => (right.valueUsd ?? -1) - (left.valueUsd ?? -1))
+    .slice(0, 4);
 
   return (
     <div className="orbit-home">
-      <motion.div
-        initial={reduceMotion ? false : { opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, ease: 'easeOut' }}
-        className="orbit-home-hero page-shell relative overflow-hidden rounded-[28px] p-6 sm:p-8 lg:p-10"
-      >
+      <main className="orbit-home-main">
+      <div className="orbit-home-primary-grid">
+        <motion.div
+          initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, ease: 'easeOut' }}
+          className="orbit-home-hero page-shell relative overflow-hidden rounded-[28px] p-6 sm:p-8 lg:p-10"
+        >
         <div className="orbit-home-hero__wash absolute inset-0" />
         <div className="orbit-home-hero__ornaments absolute inset-0 opacity-80">
           <div className="absolute left-10 top-10 h-40 w-40 rounded-full border border-sky-400/20 bg-sky-400/5 blur-2xl" />
@@ -2014,65 +2149,25 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
             </div>
           </div>
 
-          <div className="orbit-security-summary rounded-3xl border border-slate-200 bg-slate-900 p-5 text-white shadow-[0_18px_40px_rgba(15,23,42,0.10)]">
-            <div className="flex items-center justify-between">
-              <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-300">Security status</p>
-              <span className="orbit-security-state rounded-full border border-slate-400/30 bg-slate-500/10 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-300">
-                Not assessed
-              </span>
-            </div>
-            <div className="mt-4 flex items-end justify-between gap-4">
-              <div>
-                <p className="orbit-security-score text-2xl font-bold">Unknown</p>
-              </div>
-              <div className="orbit-security-mark flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 ring-1 ring-white/10">
-                <svg className="orbit-security-score-ring" viewBox="0 0 104 104" aria-hidden="true">
-                  <circle className="orbit-security-score-ring__track" cx="52" cy="52" r="45" pathLength="100" />
-                  <motion.circle
-                    className="orbit-security-score-ring__progress"
-                    cx="52"
-                    cy="52"
-                    r="45"
-                    pathLength="100"
-                    initial={{ strokeDashoffset: 100 }}
-                    animate={{ strokeDashoffset: 100 }}
-                    transition={{ duration: reduceMotion ? 0 : 0.9, ease: "easeOut" }}
-                    transform="rotate(-90 52 52)"
-                  />
-                </svg>
-                <ShieldCheck size={20} className="text-sky-300" />
-              </div>
-            </div>
-          </div>
         </div>
-      </motion.div>
+        </motion.div>
+        <QuickActions setPage={setPage} />
+      </div>
 
-      <StatCards />
-      <QuickActions setPage={setPage} />
-
-      <div className="orbit-home-chart-section grid gap-4 lg:grid-cols-1">
+      <div className="orbit-home-chart-section grid gap-4">
         <motion.div
-          initial={{ opacity: 0, y: 12 }}
+          initial={reduceMotion ? false : { opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.25, delay: 0.05 }}
+          transition={{ duration: reduceMotion ? 0 : 0.25, delay: reduceMotion ? 0 : 0.05 }}
         >
           <Card className="orbit-chart-card p-5">
             <div className="flex items-start justify-between gap-4">
-              <div>
-                <Label>Portfolio snapshot</Label>
-                <div className="orbit-chart-value-row mt-3 flex items-baseline gap-3">
-                  <h2 className="orbit-chart-current-value text-2xl font-extrabold tracking-[-0.06em] md:text-3xl">
-                    {shouldAnimatePortfolioValue ? <LiveBalanceValue valueKey={portfolio.totalValueUsd}>{value}</LiveBalanceValue> : value}
-                  </h2>
-                  <span className="orbit-chart-value-context text-xs font-medium text-slate-500">
-                    {portfolio.isDisconnected
-                      ? 'Awaiting wallet'
-                      : portfolio.isWrongNetwork
-                        ? 'Wallet on unsupported network'
-                        : portfolio.hasUnavailablePrices
-                          ? 'Live pricing unavailable'
-                          : 'Current Arc Testnet value'}
-                  </span>
+              <div className="orbit-chart-heading">
+                <span className="orbit-chart-heading-icon" aria-hidden="true">
+                  <Activity size={16} strokeWidth={1.8} />
+                </span>
+                <div>
+                  <Label>Portfolio history</Label>
                 </div>
               </div>
               <div className="orbit-chart-status flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-900/80 p-1.5">
@@ -2102,77 +2197,123 @@ function Home({ setPage }: { setPage: (p: Page) => void }) {
           </Card>
         </motion.div>
       </div>
+      </main>
 
-      <div className="orbit-signal-grid grid gap-4 md:grid-cols-3">
-        {[
-          {
-            label: 'Security overview',
-              value: 'Unknown',
-              metricLabel: 'risk indicator',
-              meta: 'Run a live scan in the Security Center',
-              tone: 'purple',
-              badge: 'UNKNOWN',
-            preview: null as string[] | null,
-            emptyMessage: null as string | null,
-          },
-          {
-            label: 'Opportunity feed',
-            value: discover.data?.opportunities.length ?? 0,
-            metricLabel: 'live Arc opportunities',
-            meta: discover.isLoading ? 'Refreshing public market data...' : discover.isError ? 'Discover feed unavailable' : 'Public yield opportunities loaded',
-            tone: 'cyan',
-            badge: 'LIVE',
-            preview: discover.data?.opportunities.slice(0, 2).map((opportunity) => `${opportunity.name} · ${opportunity.symbol}`) ?? [],
-            emptyMessage: discover.isLoading ? 'Loading live opportunities' : discover.isError ? 'Live opportunities unavailable' : 'No eligible opportunities currently available',
-          },
-          {
-            label: 'Watchlist',
-            value: watchlist.items.length,
-            metricLabel: 'tracked items',
-            meta: watchlist.items.length > 0 ? 'Saved and ready for quick review' : 'No items saved yet',
-            tone: 'purple',
-            badge: 'TRACKED',
-            preview: watchlist.items.slice(0, 2).map((item) => {
-              if (item.kind === 'asset') {
-                return `${item.id === ARC_USDC.symbol ? ARC_USDC.name : item.id} · ${item.id}`;
-              }
-              const opportunity = discover.data?.opportunities.find((candidate) => candidate.id === item.id);
-              return opportunity ? `${opportunity.name} · ${opportunity.symbol}` : item.id;
-            }),
-            emptyMessage: watchlist.items.length > 0 ? null : 'Add assets or protocols to track them here',
-          },
-        ].map((tile, index) => (
-          <motion.div
-            key={tile.label}
-            initial={reduceMotion ? false : { opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.28, delay: reduceMotion ? 0 : 0.06 + index * 0.05, ease: 'easeOut' }}
-          >
-            <Card className={`orbit-signal-card orbit-signal-card--${tile.label === 'Security overview' ? 'security' : tile.label === 'Opportunity feed' ? 'opportunities' : 'watchlist'} p-5`}>
-              <div className="orbit-signal-card__header flex items-start justify-between gap-3">
-                <div>
-                  <Label>{tile.label}</Label>
-                  <div className="mt-3">
-                    <p className="text-2xl font-extrabold tracking-[-0.06em]">{tile.value}</p>
-                    <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{tile.metricLabel}</p>
-                  </div>
-                </div>
-                <Pill color={tile.tone as 'green' | 'amber' | 'red' | 'cyan' | 'purple'}>{tile.badge}</Pill>
+      <aside className="orbit-home-sidebar">
+      <StatCards
+        setPage={setPage}
+        securityAssessment={securityAssessment}
+        approvalCoverage={approvalsQuery.data
+          ? `${approvalsQuery.data.historyWindowBlocks.toLocaleString()}-block window · ${getApprovalCoveragePercent(
+            approvalsQuery.data.coveredBlocks,
+            approvalsQuery.data.totalBlocks,
+          ).toFixed(1)}% covered`
+          : null}
+      />
+
+        <div className="orbit-home-data-stack">
+          <Card className="orbit-home-data-card orbit-home-holdings-card p-5">
+            <div className="orbit-home-data-card__header">
+              <div>
+                <Label>Portfolio</Label>
+                <h2>Top Holdings</h2>
               </div>
-              {tile.preview && tile.preview.length > 0 ? (
-                <ul className="orbit-signal-card__preview" aria-label={`${tile.label} items`}>
-                  {tile.preview.map((item) => <li key={item}>{item}</li>)}
-                </ul>
-              ) : tile.emptyMessage ? (
-                <p className="orbit-signal-card__empty">{tile.emptyMessage}</p>
-              ) : null}
-              {(tile.label === 'Security overview' || (tile.preview?.length ?? 0) > 0) && (
-                <p className="orbit-signal-card__meta">{tile.meta}</p>
-              )}
-            </Card>
-          </motion.div>
-        ))}
-      </div>
+              <button type="button" className="orbit-home-data-card__link" onClick={() => setPage("portfolio")}>
+                View all
+              </button>
+            </div>
+            {portfolio.isDisconnected ? (
+              <p className="orbit-home-data-card__message">Connect your wallet to see current holdings.</p>
+            ) : portfolio.isWrongNetwork ? (
+              <p className="orbit-home-data-card__message">Switch to Arc Testnet to view these holdings.</p>
+            ) : portfolio.isLoading ? (
+              <div className="orbit-home-data-list" aria-label="Loading holdings">
+                {[...Array(3)].map((_, index) => <div key={index} className="orbit-home-data-skeleton" />)}
+              </div>
+            ) : portfolio.isError ? (
+              <p className="orbit-home-data-card__message orbit-home-data-card__message--error">Holdings could not be loaded. Try again later.</p>
+            ) : portfolio.assets.some((asset) => asset.isLoading) ? (
+              <div className="orbit-home-data-list" aria-label="Loading holdings">
+                {[...Array(3)].map((_, index) => <div key={index} className="orbit-home-data-skeleton" />)}
+              </div>
+            ) : (
+              <>
+                {portfolio.assets.some((asset) => asset.isError) && (
+                  <p className="orbit-home-data-card__notice">Some asset balances are temporarily unavailable.</p>
+                )}
+                {topHoldings.length > 0 ? (
+                  <div className="orbit-home-data-list">
+                    {topHoldings.slice(0, 3).map((asset) => (
+                        <div className="orbit-home-holding-row" key={asset.symbol}>
+                          <span className="orbit-home-holding-row__icon" style={{ background: asset.color }} aria-hidden="true">
+                            {asset.symbol.slice(0, 1)}
+                          </span>
+                          <span className="orbit-home-holding-row__asset">
+                            <strong>{asset.symbol}</strong>
+                            <span>{asset.symbol === "USDC" ? formatHomeUsdcAmount(asset.formatted) : asset.formatted}</span>
+                          </span>
+                          <span className="orbit-home-holding-row__value">
+                            {asset.valueUsd === null
+                              ? 'Unavailable'
+                              : `$${asset.valueUsd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                          </span>
+                        </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="orbit-home-data-card__message">No funded holdings are currently detected.</p>
+                )}
+              </>
+            )}
+          </Card>
+
+          <Card className="orbit-home-data-card orbit-home-activity-card p-5">
+            <div className="orbit-home-data-card__header">
+              <div>
+                <Label>Wallet</Label>
+                <h2>Recent Activity</h2>
+              </div>
+              <button type="button" className="orbit-home-data-card__link" onClick={() => setPage("activity")}>
+                View all
+              </button>
+            </div>
+            {transactionsQuery.isLoading ? (
+              <div className="orbit-home-data-list" aria-label="Loading recent activity">
+                {[...Array(3)].map((_, index) => <div key={index} className="orbit-home-data-skeleton" />)}
+              </div>
+            ) : transactionsQuery.isError ? (
+              <p className="orbit-home-data-card__message orbit-home-data-card__message--error">Recent activity could not be loaded.</p>
+            ) : transactionsQuery.transactions.length > 0 ? (
+              <div className="orbit-home-data-list">
+                {transactionsQuery.transactions.slice(0, 3).map((transaction) => (
+                  <div className="orbit-home-activity-row" key={transaction.hash}>
+                    <span className={`orbit-home-activity-row__marker orbit-home-activity-row__marker--${transaction.status}`} aria-hidden="true" />
+                    <span className="orbit-home-activity-row__details">
+                      <strong>{transaction.category}</strong>
+                      <span>{formatTransactionDate(transaction.timestamp)} · {transaction.status}</span>
+                    </span>
+                    <a
+                      className="orbit-home-activity-row__link"
+                      href={explorerTxUrl(transaction.hash, arcTestnet.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={transaction.hash}
+                    >
+                      {shortAddr(transaction.hash)}
+                    </a>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="orbit-home-data-card__message">
+                {isArcConnected
+                  ? 'No recent Arc Testnet activity was found for this wallet.'
+                  : 'Connect on Arc Testnet to view recent activity.'}
+              </p>
+            )}
+          </Card>
+        </div>
+      </aside>
 
     </div>
   );
@@ -2303,7 +2444,7 @@ function Portfolio() {
           No supported asset balance is currently detected on {portfolioNetwork} for this wallet.
         </Card>
       )}
-      <div className="grid gap-4 lg:grid-cols-[1.35fr_1fr]">
+      <div className="grid items-start gap-4 lg:grid-cols-[1.35fr_1fr]">
         <Card className="p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -2349,20 +2490,25 @@ function Portfolio() {
             </p>
           </div>
         </Card>
-        <Card className="p-5">
+        <Card className="h-fit p-5">
           <Label>Allocation</Label>
           <h2 className="mt-2 text-xl font-bold">By asset</h2>
-          <div className="mt-6 space-y-4">
+          <div className="mt-4 space-y-3">
             {portfolio.assets.map((a) => (
-              <div key={a.symbol}>
-                <div className="flex justify-between text-xs">
-                  <span className="flex items-center gap-2 font-semibold text-slate-200">
+              <div key={a.symbol} className="rounded-xl border border-white/[.06] bg-white/[.02] p-3">
+                <div className="flex min-w-0 items-center justify-between gap-4">
+                  <span className="flex min-w-0 items-center gap-2 font-semibold text-slate-200">
                     <i className="h-2.5 w-2.5 rounded-full" style={{ background: a.color }} />
-                    {a.symbol}
+                    <span className="truncate">{a.symbol}</span>
                   </span>
-                  <span className="font-mono text-slate-400">
-                    {portfolioUnavailable ? unavailableLabel : analytics.valuationUnavailable ? 'Unavailable' : a.isLoading ? '...' : `${a.allocationPercent.toFixed(1)}%`}
-                  </span>
+                  <div className="min-w-0 text-right">
+                    <p className="truncate font-mono text-xs tabular-nums text-slate-200" title={`${a.formatted} ${a.symbol}`}>
+                      {portfolioUnavailable ? unavailableLabel : `${a.formatted} ${a.symbol}`}
+                    </p>
+                    <p className="mt-1 font-mono text-[10px] tabular-nums text-slate-400">
+                      {portfolioUnavailable ? unavailableLabel : analytics.valuationUnavailable ? 'Unavailable' : a.isLoading ? '...' : `${a.allocationPercent.toFixed(1)}%`}
+                    </p>
+                  </div>
                 </div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-900/80">
                   <div
@@ -2568,7 +2714,7 @@ function PageTitle({
     </div>
   );
 }
-function Security({ setPage }: { setPage: (p: Page) => void }) {
+export function Security({ setPage }: { setPage: (p: Page) => void }) {
   const { address, isConnected, chainId } = useAccount();
   const approvalsQuery = useApprovals(true);
   const transactionsQuery = useTransactions(address, isConnected && chainId === arcTestnet.id && Boolean(address), chainId, false, true);
@@ -2579,22 +2725,30 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
   const scanErrors = approvalsQuery.data?.errors ?? [];
   const approvalsAvailable = approvalsQuery.data !== undefined && !approvalsQuery.isError;
   const activityAvailable = transactionsQuery.lastScannedAt !== null && !transactionsQuery.isError;
-  const isComplete = Boolean(
-    isArcConnected &&
-    approvalsQuery.data?.isComplete &&
-    transactionsQuery.lastScannedAt !== null &&
-    transactions.every((transaction) => transaction.status !== 'unknown') &&
-    !approvalsQuery.isFetching &&
-    !transactionsQuery.isFetching &&
-    !approvalsQuery.isError &&
-    !transactionsQuery.isError,
-  );
-  const score = address
+  const assessment = getSecurityAssessment({
+    walletConnected: isConnected && Boolean(address),
+    supportedNetwork: chainId === ARC_TESTNET.id,
+    isScanning: isArcConnected && (approvalsQuery.isFetching || transactionsQuery.isFetching),
+    providerRateLimited: !approvalsQuery.data?.isComplete && Boolean(
+      (approvalsQuery.data?.retryAfterAt ?? 0) > Date.now() ||
+      (approvalsQuery.cooldownUntil ?? 0) > Date.now(),
+    ),
+    approvalScanStarted: approvalsQuery.data !== undefined,
+    approvalWindowComplete: Boolean(approvalsQuery.data?.isComplete),
+    approvalHistoryStartsAtGenesis: approvalsQuery.data?.scannedFromBlock === 0n,
+    approvalDataUnavailable: approvalsQuery.isError || Boolean(approvalsQuery.data?.errors.length),
+    activityScanStarted: activityAvailable,
+    activityDataUnavailable: transactionsQuery.isError,
+    activityHasUnresolvedTransactions: transactions.some(
+      (transaction) => transaction.status !== 'success' && transaction.status !== 'failed',
+    ),
+  });
+  const score = assessment.canCalculateScore && address
     ? calculateSecurityScore({
         approvals,
         transactions,
         walletAddress: address,
-        isComplete,
+        isComplete: true,
       })
     : null;
   const scoreColor = score === null ? 'purple' : score >= 70 ? 'green' : score >= 40 ? 'amber' : 'red';
@@ -2697,24 +2851,23 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
         <>
           <Card className="relative overflow-hidden p-6" glow>
             <div className="relative flex flex-wrap items-center gap-6">
-              <div className={`flex h-32 w-32 shrink-0 flex-col items-center justify-center rounded-full border-4 ${score === null ? 'border-slate-600' : score >= 70 ? 'border-emerald-400' : score >= 40 ? 'border-amber-400' : 'border-rose-400'}`}>
-                <span className="text-3xl font-extrabold">{score ?? 'Unknown'}</span>
-                <span className="mt-1 font-mono text-[9px] text-slate-500">{score === null ? 'SCAN INCOMPLETE' : 'OUT OF 100'}</span>
+              <div className={`grid h-12 w-12 shrink-0 place-items-center text-[#d2b779] ${score === null ? 'rounded-xl border border-[#c6a76a]/25 bg-[#c6a76a]/[.07]' : `rounded-full border-4 ${score >= 70 ? 'border-emerald-400' : score >= 40 ? 'border-amber-400' : 'border-rose-400'}`}`}>
+                {score === null
+                  ? <ShieldCheck size={22} strokeWidth={1.7} aria-hidden="true" />
+                  : <span className="font-mono text-base font-semibold tabular-nums">{score}</span>}
               </div>
               <div className="min-w-[240px] flex-1">
-                <Pill color={scoreColor}>{score === null ? 'Unknown' : 'Limited risk indicator'}</Pill>
+                <Pill color={scoreColor}>{score === null ? assessment.status : 'Limited risk indicator'}</Pill>
                 <h2 className="mt-3 text-xl font-bold">Arc Testnet · {address ? shortAddr(address) : ''}</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
                   {score === null
-                    ? approvalsQuery.data?.errors.length || approvalsQuery.isError || transactionsQuery.isError
-                      ? 'No score is shown because one or more required checks failed or approval coverage does not include the wallet’s full approval history.'
-                      : 'No score is shown because the approval index covers only a recent block window, not the wallet’s full approval history.'
+                    ? assessment.description
                     : 'This deterministic score reflects only the completed checks and observed data window; it is not a guarantee that the wallet is safe.'}
                 </p>
                 <p className="mt-3 text-xs text-slate-500">
                   Last activity refresh: {transactionsQuery.lastScannedAt ? new Date(transactionsQuery.lastScannedAt).toLocaleString() : 'Not scanned'}
                   {' · '}Approval snapshot block: {approvalsQuery.data?.scannedToBlock.toString() ?? 'Not scanned'}
-                  {approvalsQuery.data && ` · Approval refresh: ${new Date(approvalsQuery.data.lastScannedAt).toLocaleString()}`}
+                  {approvalsQuery.data && ` · Approval scan attempt: ${new Date(approvalsQuery.data.lastScanAttemptAt).toLocaleString()}`}
                 </p>
               </div>
             </div>
@@ -2723,10 +2876,10 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
           <Card className="p-5">
             <Label>Scoring method and coverage</Label>
             <p className="mt-2 text-sm leading-6 text-slate-300">
-              If every check is complete: unlimited allowances subtract 25 points each (maximum 60); finite allowances of at least 1,000,000 token units subtract 15 each (maximum 30); failed recent transactions subtract 5 each (maximum 20); outgoing native Arc USDC or supported USDC transfers of at least 100 units subtract 10 each (maximum 20). Unrecognized contracts and spenders are informational only and never treated as malicious. Unknown stays Unknown when coverage or a data source is incomplete.
+              If every required check is complete, the model starts at 100 and subtracts 25 per unlimited allowance (maximum 60); 15 per verified finite allowance of at least 1,000,000 token units (maximum 30); 5 per failed recent transaction (maximum 20); and 10 per successful transaction with at least one outgoing native Arc USDC or supported USDC transfer of at least 100 units (maximum 20). The result is clamped at 0. Unrecognized contracts and spenders are informational only and never treated as malicious. A numeric score is withheld unless supported approval history begins at block 0 and every required data source is available.
             </p>
             <p className="mt-2 text-xs leading-5 text-slate-500">
-              Approval source: Arc Testnet RPC Approval logs and allowance() at one snapshot block. The initial scan is bounded to the latest 1,000,000 blocks; successful ranges are cached locally and later scans resume from saved coverage. A scan beginning after block 0 is not a complete lifetime approval inventory. Activity source: ArcScan recent transactions and token transfers (up to 20 items each).
+              Approval source: Arc Testnet RPC Approval logs and allowance() at one snapshot block, limited to configured tokens. The default recent-history window is 50,000 blocks, configurable up to 250,000; successful ranges are cached locally and resumed incrementally. The exact covered boundary is blocks {approvalsQuery.data?.scannedFromBlock.toString() ?? '—'}–{approvalsQuery.data?.scannedToBlock.toString() ?? '—'} per token. A scan beginning after block 0 is a selected-window assessment, not a lifetime audit or complete security guarantee. Activity source: ArcScan recent transactions and token transfers (up to 20 items each).
             </p>
           </Card>
 
@@ -2737,7 +2890,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
                 {!approvalsAvailable
                   ? 'Approval state Unknown'
                   : approvalsQuery.data?.isComplete
-                    ? `${activeApprovals.length} active · ${approvals.length - activeApprovals.length} zero`
+                    ? `${activeApprovals.length} active · ${approvals.length - activeApprovals.length} zero in window`
                     : approvals.length === 0
                       ? 'Approval count Unknown'
                       : `${activeApprovals.length} active found · partial scan`}
@@ -2752,7 +2905,7 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
               ) : approvals.length === 0 ? (
                 <p className="mt-4 text-sm text-slate-400">
                   {approvalsQuery.data.isComplete
-                    ? 'No Approval events were found in the configured token set and scanned block window; older approvals may not be included.'
+                    ? `No Approval events were found in the configured token set and block window ${approvalsQuery.data.scannedFromBlock.toString()}–${approvalsQuery.data.scannedToBlock.toString()}; older approvals may not be included.`
                     : 'No approvals were returned in the successfully scanned ranges, but coverage is incomplete. Do not interpret this as zero approvals.'}
                 </p>
               ) : (
@@ -2871,10 +3024,66 @@ function Security({ setPage }: { setPage: (p: Page) => void }) {
   );
 }
 function Approvals() {
-  const { isConnected, chainId } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const approvalsQuery = useApprovals(true);
-  const { revoke, activeApprovalId, status, transactionHash, error } = useRevokeApproval();
+  const { revoke, activeApprovalId, status, transactionHash, error, retryRevokeCheck } = useRevokeApproval();
+  const [cooldownClock, setCooldownClock] = useState(Date.now());
+  const [approvalToConfirm, setApprovalToConfirm] = useState<TokenApproval | null>(null);
+  const [searchText, setSearchText] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [riskFilter, setRiskFilter] = useState('all');
+  const [copiedApprovalAddress, setCopiedApprovalAddress] = useState<string | null>(null);
+  const [approvalCopyError, setApprovalCopyError] = useState<string | null>(null);
   const approvals = approvalsQuery.data?.approvals ?? [];
+  const copyApprovalAddress = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedApprovalAddress(value);
+      setApprovalCopyError(null);
+    } catch (caughtError) {
+      setApprovalCopyError(caughtError instanceof Error ? caughtError.message : 'Unable to copy address.');
+    }
+  };
+  const filteredApprovals = approvals.filter((approval) => {
+    const query = searchText.trim().toLowerCase();
+    const matchesSearch = !query || [
+      approval.token.name,
+      approval.token.symbol,
+      approval.token.address,
+      approval.spenderAddress,
+    ].some((value) => value.toLowerCase().includes(query));
+    const matchesStatus = statusFilter === 'all' ||
+      (statusFilter === 'active' ? approval.allowance > 0n : approval.allowance === 0n);
+    return matchesSearch && matchesStatus && (riskFilter === 'all' || approval.risk === riskFilter);
+  });
+  const activeAllowanceCount = approvals.filter((approval) => approval.allowance > 0n).length;
+  const approvalCoverage = approvalsQuery.data
+    ? getApprovalCoveragePercent(approvalsQuery.data.coveredBlocks, approvalsQuery.data.totalBlocks)
+    : 0;
+  const cooldownActive = approvalsQuery.cooldownUntil !== null &&
+    approvalsQuery.cooldownUntil > cooldownClock;
+  const approvalScanStatus = getApprovalScanStatus({
+    isFetching: approvalsQuery.isFetching,
+    isError: approvalsQuery.isError,
+    data: approvalsQuery.data,
+    now: cooldownClock,
+  });
+  const providerLimitEncountered = !approvalsQuery.data?.isComplete && (
+    approvalScanStatus === 'Partial scan — provider limit' || cooldownActive
+  );
+  const approvalScanStatusLabel = approvalScanStatus ?? (
+    providerLimitEncountered
+      ? 'Partial scan — provider limit'
+      : !isConnected ? 'Connect wallet' : chainId !== arcTestnet.id ? 'Assessment unavailable' : 'Scan required'
+  );
+  useEffect(() => {
+    if (!cooldownActive || approvalsQuery.cooldownUntil === null) return;
+    const timer = window.setTimeout(
+      () => setCooldownClock(Date.now()),
+      Math.max(0, approvalsQuery.cooldownUntil - Date.now() + 20),
+    );
+    return () => window.clearTimeout(timer);
+  }, [approvalsQuery.cooldownUntil, cooldownActive]);
   const explorerUrl = ARC_TESTNET.blockExplorers.default.url;
   return (
     <div className="space-y-6">
@@ -2882,9 +3091,9 @@ function Approvals() {
         label="Protect / Approvals & Revoke"
         title="Take back control."
         action={
-          <Button variant="secondary" onClick={approvalsQuery.refetch} disabled={!isConnected || chainId !== arcTestnet.id || approvalsQuery.isFetching || status === "pending"}>
-            <RefreshCw size={15} />
-            {approvalsQuery.isFetching ? "Scanning..." : "Refresh scan"}
+          <Button variant="secondary" onClick={approvalsQuery.refetch} disabled={!isConnected || chainId !== arcTestnet.id || approvalsQuery.isFetching || cooldownActive || status === "pending" || status === 'checking' || status === 'confirmation-pending' || status === 'verification-pending'}>
+            <RefreshCw size={15} className={approvalsQuery.isFetching ? 'animate-spin' : ''} />
+            {approvalsQuery.isFetching ? "Scanning..." : cooldownActive ? "Provider cooldown" : "Refresh scan"}
           </Button>
         }
       />
@@ -2895,29 +3104,71 @@ function Approvals() {
             <p className="mt-2 text-sm text-slate-400">
               {!isConnected
                 ? "Connect your wallet to scan approvals."
-                : approvalsQuery.isFetching
+                : approvalsQuery.isFetching && !approvalsQuery.data
                   ? "Scanning configured Arc Testnet token Approval events..."
-                  : approvalsQuery.isError
+                  : approvalsQuery.isError && !approvalsQuery.data
                     ? "Approval scan unavailable."
                     : approvalsQuery.data === undefined
                       ? "Waiting for the connected Arc Testnet wallet scan."
-                      : `${approvals.length} spender records from configured Arc tokens, block ${approvalsQuery.data.scannedFromBlock.toString()} to ${approvalsQuery.data.scannedToBlock.toString()}.`}
+                      : `${approvals.length} discovered spender records; ${activeAllowanceCount} currently have nonzero allowance among those checked records. Blocks ${approvalsQuery.data.scannedFromBlock.toString()}–${approvalsQuery.data.scannedToBlock.toString()}.`}
             </p>
             {approvalsQuery.data && (
               <p className="mt-1 text-xs text-slate-500">
-                Last checked {new Date(approvalsQuery.data.lastScannedAt).toLocaleString()}. Bounded recent event history; this is not a lifetime inventory.
+                Last successful log range {approvalsQuery.data.lastSuccessfulAt === null
+                  ? 'not yet recorded'
+                  : new Date(approvalsQuery.data.lastSuccessfulAt).toLocaleString()}.
+                {approvalsQuery.data.historyWindowBlocks.toLocaleString()}-block configured-token window, blocks {approvalsQuery.data.scannedFromBlock.toString()}–{approvalsQuery.data.scannedToBlock.toString()}; this is not a lifetime inventory.
+              </p>
+            )}
+            {cooldownActive && approvalsQuery.cooldownUntil !== null && (
+              <p className="mt-1 text-xs text-amber-200">
+                Provider cooldown until {new Date(approvalsQuery.cooldownUntil).toLocaleTimeString()}; refresh is disabled and no log requests will be sent before then.
               </p>
             )}
           </div>
-          {approvalsQuery.data && (
-            <Pill color={approvalsQuery.data.isComplete ? 'green' : 'amber'}>
-              {approvalsQuery.data.isComplete ? 'FULL COVERAGE' : 'SCAN INCOMPLETE'}
-            </Pill>
-          )}
+          <Pill color={approvalScanStatusLabel === 'Window complete' ? 'green' : approvalScanStatusLabel === 'Scanning' ? 'cyan' : 'amber'}>
+            {approvalScanStatusLabel}
+          </Pill>
         </div>
+        {approvalsQuery.data && (
+          <div className="border-b border-white/[.06] px-5 py-3 text-xs text-slate-400">
+            <p>{approvalCoverage.toFixed(2)}% of the selected {approvalsQuery.data.historyWindowBlocks.toLocaleString()}-block window checked · {activeAllowanceCount} active allowance{activeAllowanceCount === 1 ? '' : 's'} among {approvals.length} discovered spender records whose current allowance was checked. A 0 count is limited to these records; this is not full historical wallet coverage.</p>
+            {approvalsQuery.isFetching && <p className="mt-1 text-cyan-200">Continuing scan; previous successful results remain visible.</p>}
+            {approvalsQuery.isError && <p role="alert" className="mt-1 text-amber-200">Refresh failed; showing the last successful scan. Retry with Refresh scan.</p>}
+          </div>
+        )}
+        {approvalsQuery.isError && !approvalsQuery.data && (
+          <div role="alert" className="border-b border-rose-300/10 px-5 py-3 text-xs text-rose-200">
+            Approval scan unavailable. <details className="mt-1"><summary className="cursor-pointer">Technical diagnostics</summary>{approvalsQuery.error?.message}</details>
+          </div>
+        )}
         <p className="border-b border-white/[.06] px-5 py-3 text-xs leading-5 text-slate-400">
-          Revoke is enabled only when ArcScan reports both the configured token and spender as verified contracts. Unknown or unverified spenders are not labeled malicious.
+          Approval coverage is always bounded to the selected block range and configured tokens; it is not full historical wallet coverage. Revoke is enabled only when ArcScan reports both the configured token and spender as verified contracts; that explorer metadata is not an independent audit or a safety guarantee. “UNKNOWN” risk is separate from ArcScan verification: even a contract marked verified can have UNKNOWN risk when its allowance is zero and not risk-rated, or when the paired token/spender verification is incomplete or unavailable. “Already zero” means a current allowance read returned zero before any revoke was sent; it is not a confirmed revoke transaction. A revoke is confirmed only after a successful receipt and a post-transaction zero-allowance check.
         </p>
+        {approvalsQuery.data && (
+          <div className="flex flex-col gap-2 border-b border-white/[.06] px-5 py-3 sm:flex-row">
+            <input
+              type="search"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Search token or spender"
+              aria-label="Search approval records"
+              className="h-9 min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[.03] px-3 text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-emerald-300/40"
+            />
+            <select aria-label="Filter allowance status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="h-9 rounded-lg border border-white/10 bg-[#0b1212] px-3 text-xs text-slate-300">
+              <option value="all">All allowance states</option>
+              <option value="active">Nonzero / active</option>
+              <option value="zero">Zero / revoked</option>
+            </select>
+            <select aria-label="Filter approval risk" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)} className="h-9 rounded-lg border border-white/10 bg-[#0b1212] px-3 text-xs text-slate-300">
+              <option value="all">All risk labels</option>
+              <option value="High">High</option>
+              <option value="Medium">Medium</option>
+              <option value="Low">Low</option>
+              <option value="Unknown">Unassessed</option>
+            </select>
+          </div>
+        )}
         {approvalsQuery.data && approvalsQuery.data.errors.length > 0 && (
           <div className="border-b border-white/[.06] px-5 py-3 text-xs text-amber-200">
             {summarizeApprovalScanErrors(approvalsQuery.data.errors).map((scanError) => <p key={scanError}>{scanError}</p>)}
@@ -2931,26 +3182,38 @@ function Approvals() {
         )}
         {status === "success" && transactionHash && (
           <p className="border-b border-white/[.06] px-5 py-3 text-xs text-emerald-300">
-            Approval revoked. <a href={explorerTxUrl(transactionHash)} target="_blank" rel="noopener noreferrer" className="underline">View on ArcScan</a>
+            Revoke receipt confirmed and a fresh on-chain read verified zero allowance. <a href={explorerTxUrl(transactionHash)} target="_blank" rel="noopener noreferrer" className="underline">View on ArcScan</a>
           </p>
+        )}
+        {status === 'already-zero' && <p role="status" className="border-b border-white/[.06] px-5 py-3 text-xs text-slate-300">A fresh on-chain read found zero allowance; no transaction was submitted.</p>}
+        {(status === 'confirmation-pending' || status === 'verification-pending') && error && (
+          <div role="status" className="flex flex-wrap items-center gap-2 border-b border-amber-300/10 px-5 py-3 text-xs text-amber-200">
+            <span>{error.message}</span>
+            {transactionHash && <a href={explorerTxUrl(transactionHash)} target="_blank" rel="noopener noreferrer" className="underline">View on ArcScan</a>}
+            <button type="button" onClick={() => void retryRevokeCheck()} className="underline">
+              {status === 'confirmation-pending' ? 'Retry confirmation check' : 'Retry allowance check'}
+            </button>
+          </div>
         )}
         {status === "error" && error && <p className="border-b border-white/[.06] px-5 py-3 text-xs text-rose-300">{error.message}</p>}
         {!isConnected ? (
           <p className="p-12 text-center text-xs text-slate-500">Connect your wallet to scan token approvals.</p>
         ) : chainId !== arcTestnet.id ? (
           <p className="p-12 text-center text-xs text-amber-300">Switch to Arc Testnet to view Arc approvals.</p>
-        ) : approvalsQuery.isFetching ? (
+        ) : approvalsQuery.isFetching && !approvalsQuery.data ? (
           <p className="p-12 text-center text-xs text-slate-500">Scanning Arc token approvals...</p>
-        ) : approvalsQuery.isError ? (
+        ) : approvalsQuery.isError && !approvalsQuery.data ? (
           <p className="p-12 text-center text-xs text-rose-300">Unable to scan approvals. Try refreshing.</p>
         ) : approvalsQuery.data === undefined ? (
           <p className="p-12 text-center text-xs text-slate-400">Run a scan to check your approvals.</p>
         ) : approvals.length === 0 ? (
           <p className="p-12 text-center text-xs text-slate-400">
             {approvalsQuery.data.isComplete
-              ? `No Approval events found for configured tokens in this block window. Approvals created before block ${approvalsQuery.data.scannedFromBlock.toString()} may not be represented.`
+              ? `No Approval event records found for configured tokens in the selected block window ${approvalsQuery.data.scannedFromBlock.toString()}–${approvalsQuery.data.scannedToBlock.toString()}. Allowances predating that window may not be represented.`
               : 'Approval scan coverage is incomplete. No approval events were returned in the successful ranges, so this is not a definitive zero-approval result.'}
           </p>
+        ) : filteredApprovals.length === 0 ? (
+          <p className="p-10 text-center text-xs text-slate-400">No observed spender records match these filters.</p>
         ) : <div className="overflow-x-auto">
           <table className="w-full min-w-[700px] text-left">
             <thead className="border-b border-white/[.06] font-mono text-[9px] uppercase tracking-widest text-slate-600">
@@ -2963,7 +3226,7 @@ function Approvals() {
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[.05]">
-              {approvals.map((a) => (
+              {filteredApprovals.map((a) => (
                 <tr
                   key={a.id}
                   className="text-xs hover:bg-white/[.025]"
@@ -2974,11 +3237,15 @@ function Approvals() {
                       <div>
                         <b>{a.token.name}</b>
                         <p className="font-mono text-[9px] text-slate-600">{a.token.symbol}</p>
+                        <p className="text-[9px] text-slate-500">Arc Testnet</p>
                         <a className="font-mono text-[8px] text-cyan-300 hover:underline" href={`${explorerUrl}/address/${a.token.address}`} target="_blank" rel="noreferrer">
-                          {a.token.address} <ExternalLink className="inline" size={10} />
+                          {shortAddr(a.token.address)} <ExternalLink className="inline" size={10} />
                         </a>
+                        <button type="button" onClick={() => void copyApprovalAddress(a.token.address)} className="ml-2 text-[9px] text-slate-500 underline">
+                          {copiedApprovalAddress === a.token.address ? 'Copied' : 'Copy'}
+                        </button>
                         <p className="text-[9px] text-slate-500">
-                          {a.tokenVerified === true ? 'Verified by ArcScan' : a.tokenVerified === false ? 'Not verified by ArcScan' : 'Verification unavailable'}
+                          {a.tokenVerified === true ? 'Verified on ArcScan' : a.tokenVerified === false ? 'Not verified on ArcScan' : 'Verification unavailable'}
                         </p>
                       </div>
                     </div>
@@ -2987,39 +3254,47 @@ function Approvals() {
                     <a className="font-mono text-[10px] text-cyan-300 hover:underline" href={`${explorerUrl}/address/${a.spenderAddress}`} target="_blank" rel="noreferrer">
                       {shortAddr(a.spenderAddress)} <ExternalLink className="inline" size={10} />
                     </a>
+                    <button type="button" onClick={() => void copyApprovalAddress(a.spenderAddress)} className="ml-2 text-[9px] text-slate-500 underline">
+                      {copiedApprovalAddress === a.spenderAddress ? 'Copied' : 'Copy'}
+                    </button>
                     <p className="break-all font-mono text-[9px] text-slate-600">{a.spenderAddress}</p>
                     <p className="mt-1 text-[9px] text-slate-500">
                       {a.spenderVerified === true
-                        ? 'Verified contract on ArcScan'
+                        ? 'Verified on ArcScan'
                         : a.spenderVerified === false
-                          ? 'Unknown / not verified by ArcScan'
+                          ? 'Not verified on ArcScan'
                           : 'Verification unavailable'}
                     </p>
                   </td>
                   <td className="px-5 py-4 font-mono text-slate-400">
                     {a.allowance === 0n ? '0' : a.isUnlimited ? 'Unlimited' : a.allowanceFormatted}
-                    <p className="mt-1 text-[9px] text-slate-600">{a.status} · checked at block {approvalsQuery.data?.scannedToBlock.toString()}</p>
+                    <p className="mt-1 text-[9px] text-slate-500">{a.status} · {a.allowance === 0n ? 'zero / revoked' : 'current allowance'}</p>
+                    <p className="mt-1 text-[9px] text-slate-600">Verified at block {a.allowanceCheckedBlock.toString()} · {new Date(a.allowanceCheckedAt).toLocaleString()}</p>
                   </td>
                   <td className="px-5 py-4">
-                    <Pill
-                      color={
+                    <span title={a.risk === 'Unknown' ? 'UNKNOWN can mean the allowance is zero and not risk-rated, or token/spender verification is incomplete or unavailable. This is separate from whether ArcScan marks either contract verified.' : a.status}>
+                      <Pill
+                        color={
                         a.risk === "High"
                           ? "red"
                           : a.risk === "Medium"
                             ? "amber"
                             : a.risk === "Low" ? "green" : "purple"
-                      }
-                    >
-                      {a.risk}
-                    </Pill>
+                        }
+                      >
+                        {a.risk}
+                      </Pill>
+                    </span>
                   </td>
                   <td className="px-5 py-4 text-right">
                     <Button
                       variant="secondary"
-                      onClick={() => void revoke(a)}
-                      disabled={status === "pending" || !canRevokeApproval(a)}
+                      onClick={() => setApprovalToConfirm(a)}
+                      disabled={status === "pending" || status === 'checking' || status === 'confirmation-pending' || status === 'verification-pending' || !canRevokeApproval(a)}
                     >
-                      {status === "pending" && activeApprovalId === a.id
+                      {status === "checking" && activeApprovalId === a.id
+                        ? "Checking allowance..."
+                        : status === "pending" && activeApprovalId === a.id
                         ? "Confirm in wallet..."
                         : a.allowance === 0n
                           ? "Already zero"
@@ -3035,6 +3310,8 @@ function Approvals() {
             </tbody>
           </table>
         </div>}
+        {approvalToConfirm && <div className="space-y-3 border-t border-rose-300/10 bg-rose-300/[.025] p-5" aria-label="Review approval revocation"><div><p className="text-sm font-semibold text-slate-100">Review permission change</p><p className="mt-1 text-xs leading-5 text-slate-400">This transaction sets the allowance to zero. Your wallet will still request its own signature.</p></div><dl className="grid gap-3 text-xs sm:grid-cols-3"><div><dt className="text-slate-500">Token</dt><dd className="mt-1 text-slate-200">{approvalToConfirm.token.symbol}</dd></div><div><dt className="text-slate-500">Current permission</dt><dd className="mt-1 text-slate-200">{approvalToConfirm.isUnlimited ? 'Unlimited' : `${approvalToConfirm.allowanceFormatted} ${approvalToConfirm.token.symbol}`}</dd></div><div><dt className="text-slate-500">Spender</dt><dd className="mt-1 break-all font-mono text-slate-200">{approvalToConfirm.spenderAddress}</dd></div></dl>{activeApprovalId === approvalToConfirm.id && status === "already-zero" && <p role="status" className="text-xs text-slate-300">A fresh on-chain read found zero allowance. No transaction was submitted.</p>}{activeApprovalId === approvalToConfirm.id && error && <p role="alert" className="text-xs text-rose-200">{error.message}</p>}<SlideToConfirm label="Slide to revoke" confirmationKey={`${address?.toLowerCase() ?? ''}:${chainId ?? ''}:${approvalToConfirm.id}:${approvalToConfirm.allowance.toString()}`} phase={activeApprovalId !== approvalToConfirm.id ? 'idle' : status === 'checking' || status === 'confirmation-pending' ? 'submitting' : status === 'pending' || status === 'verification-pending' ? 'pending' : status === 'success' ? 'success' : status === 'error' ? 'failed' : 'idle'} disabled={!canRevokeApproval(approvalToConfirm) || (activeApprovalId === approvalToConfirm.id && Boolean(transactionHash))} onConfirm={() => revoke(approvalToConfirm)} /><Button variant="secondary" className="w-full" disabled={status === 'checking' || status === 'confirmation-pending' || status === 'pending' || status === 'verification-pending'} onClick={() => setApprovalToConfirm(null)}>Cancel</Button></div>}
+        {approvalCopyError && <p role="status" className="border-t border-white/[.06] px-5 py-2 text-[10px] text-amber-200">{approvalCopyError}</p>}
       </Card>
     </div>
   );
@@ -3104,6 +3381,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   try { rawBridgeAmount = bridgeAmount && bridgeFromToken ? parseUnits(bridgeAmount, bridgeFromToken.decimals) : null; } catch { rawBridgeAmount = null; }
   const bridgeBalance = useBridgeBalance(bridgeFromToken, address, isConnected);
   const bridgeAmountError = bridgeAmount && rawBridgeAmount === null ? "Invalid amount" : rawBridgeAmount !== null && rawBridgeAmount <= 0n ? "Amount must be greater than zero" : rawBridgeAmount !== null && !bridgeBalance.isWrongNetwork && BridgeBalanceHasEnough(bridgeBalance.raw, rawBridgeAmount) === false ? "Insufficient balance" : null;
+  const bridgeHasPositiveAmount = rawBridgeAmount !== null && rawBridgeAmount > 0n;
   const bridgeExecutionStartedRef = useRef(false);
   const bridgeQuoteState = useBridgeQuote(bridgeFromChain, bridgeToChain, bridgeFromToken, bridgeToToken, isBridge && rawBridgeAmount && rawBridgeAmount > 0n && !bridgeAmountError && !bridgeSameNetwork ? rawBridgeAmount : null, address, undefined, false, connector, bridgeExecutionStartedRef.current, bridgeRoutePreference);
   const selectedBridgeRoute = bridgeRouteSelectable
@@ -3113,6 +3391,11 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     address,
     chainId: bridgeToChainId,
     query: { enabled: Boolean(isConnected && selectedBridgeRoute === "cctp" && address) },
+  });
+  const { data: sourceNativeBalance, isLoading: sourceBalanceLoading, isError: sourceBalanceError, refetch: refetchSourceNativeBalance } = useBalance({
+    address,
+    chainId: bridgeFromChainId,
+    query: { enabled: Boolean(isConnected && address && bridgeQuoteState.quote?.selectedRoute && bridgeFromChainId === ARC_PRIMARY_NETWORK.id) },
   });
   const standardMintGasEstimate = bridgeQuoteState.quote?.gasEstimates
     ?.filter((gas) => gas.chainId === bridgeToChainId && gas.step.toLowerCase() === "mint")
@@ -3150,6 +3433,30 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     selectedRoute: selectedBridgeRoute,
     now: bridgeQuoteState.freshnessNow,
   });
+  const bridgeApprovalRequest = getBridgeApprovalRequest(bridgeQuoteState.quote, bridgeQuoteCurrent);
+  const bridgeApproval = useBridgeApproval(bridgeFromToken, address, bridgeApprovalRequest.spender, bridgeApprovalRequest.amount, bridgeTiming);
+  const sourceGasRequirement = getBridgeNativeGasRequirement(bridgeQuoteState.quote, bridgeFromChainId, bridgeApproval.required);
+  const sourceNativeGasReady = isBridgeNativeGasReady({
+    applicable: bridgeFromChainId === ARC_PRIMARY_NETWORK.id && Boolean(bridgeQuoteState.quote),
+    quoteCurrent: bridgeQuoteCurrent,
+    loading: sourceBalanceLoading,
+    balance: sourceNativeBalance?.value ?? null,
+    error: sourceBalanceError,
+    requirement: sourceGasRequirement,
+  });
+  const sourceNativeGasError = bridgeFromChainId !== ARC_PRIMARY_NETWORK.id || !bridgeQuoteState.quote
+    ? null
+    : !bridgeQuoteCurrent
+      ? "Arc gas estimate is stale. Refresh the quote before bridging."
+      : "error" in sourceGasRequirement
+        ? sourceGasRequirement.error
+        : sourceBalanceLoading
+          ? `Checking available native ${sourceGasRequirement.tokenSymbol} gas balance...`
+          : sourceBalanceError
+            ? `Unable to verify native ${sourceGasRequirement.tokenSymbol} gas balance. Retry the balance check before bridging.`
+            : !sourceNativeBalance || sourceNativeBalance.value < sourceGasRequirement.amount
+              ? `Insufficient native ${sourceGasRequirement.tokenSymbol} gas balance. Estimated source fee: ${formatUnits(sourceGasRequirement.amount, sourceGasRequirement.decimals)} ${sourceGasRequirement.tokenSymbol}; available: ${sourceNativeBalance ? formatUnits(sourceNativeBalance.value, sourceGasRequirement.decimals) : "unavailable"} ${sourceGasRequirement.tokenSymbol}.`
+              : null;
   const bridgeQuoteFreshnessState = getBridgeQuoteFreshnessState({
     hasQuote: Boolean(bridgeQuoteState.quote),
     quoteCurrent: bridgeQuoteCurrent,
@@ -3157,17 +3464,35 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     isFetching: bridgeQuoteState.isFetching,
     isError: bridgeQuoteState.isError,
   });
-  const bridgeApprovalRequest = getBridgeApprovalRequest(bridgeQuoteState.quote, bridgeQuoteCurrent);
-  const bridgeApproval = useBridgeApproval(bridgeFromToken, address, bridgeApprovalRequest.spender, bridgeApprovalRequest.amount, bridgeTiming);
   const bridgeApprovalAction = getBridgeApprovalActionState({
     required: bridgeApproval.required,
     isReady: bridgeApproval.isReady,
     sourceNetworkReady: isConnected && chainId === bridgeFromChainId,
     status: bridgeApproval.status,
   });
-  const bridgeExecution = useBridgeExecution(bridgeQuoteState.quote, bridgeExecutionStartedRef);
+  const bridgeExecution = useBridgeExecution(bridgeQuoteState.quote);
   const bridgeExecutionStarted = isBridgeExecutionStarted(bridgeExecution.status, bridgeExecution.sourceHash);
-  const bridgeInputsLocked = bridgeExecutionStarted || bridgeApproval.status === "checking" || bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending";
+  const bridgeExecutionWalletMatches = Boolean(
+    address &&
+    bridgeExecution.executionWalletAddress &&
+    address.toLowerCase() === bridgeExecution.executionWalletAddress.toLowerCase(),
+  );
+  bridgeExecutionStartedRef.current = bridgeExecutionStarted;
+  const restoredBridgeKey = bridgeExecutionWalletMatches && bridgeExecution.sourceHash && bridgeExecution.quote?.id.startsWith("recovered-cctp-")
+    ? `${address?.toLowerCase() ?? ""}:${bridgeExecution.sourceHash.toLowerCase()}`
+    : null;
+  const hydratedBridgeRecoveryRef = useRef<string | null>(null);
+  useEffect(() => {
+    const recoveredQuote = bridgeExecution.quote;
+    if (!restoredBridgeKey || !recoveredQuote || hydratedBridgeRecoveryRef.current === restoredBridgeKey) return;
+    hydratedBridgeRecoveryRef.current = restoredBridgeKey;
+    setBridgeFromChainId(recoveredQuote.fromChain.id);
+    setBridgeToChainId(recoveredQuote.toChain.id);
+    setBridgeAmount(formatUnits(recoveredQuote.fromAmount, recoveredQuote.fromToken.decimals));
+    setShowBridgeConfirmation(false);
+    setReviewedBridgeQuote(null);
+  }, [bridgeExecution.quote, restoredBridgeKey]);
+  const bridgeInputsLocked = bridgeExecutionStarted || bridgeExecution.isSubmitting || bridgeExecution.sourceSubmissionAttempted || bridgeApproval.status === "checking" || bridgeApproval.status === "confirmation" || bridgeApproval.status === "pending";
   const resetBridgeExecution = bridgeExecution.reset;
   const previousBridgeAddressRef = useRef(address);
   useEffect(() => {
@@ -3176,25 +3501,32 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     if (shouldResetBridgeExecution({
       status: bridgeExecution.status,
       sourceHash: bridgeExecution.sourceHash,
+      sourceSubmissionAttempted: bridgeExecution.sourceSubmissionAttempted,
       routeChanged: false,
       amountChanged: false,
       accountChanged,
       sourceNetworkChanged: false,
     })) resetBridgeExecution();
-  }, [address, bridgeExecution.sourceHash, bridgeExecution.status, resetBridgeExecution]);
+  }, [address, bridgeExecution.sourceHash, bridgeExecution.sourceSubmissionAttempted, bridgeExecution.status, resetBridgeExecution]);
   const bridgeLifecycleQuote = bridgeExecution.quote ?? bridgeQuoteState.quote;
   const bridgeDisplayQuote = bridgeExecutionStarted
     ? bridgeLifecycleQuote
     : bridgeQuoteCurrent ? bridgeQuoteState.quote : undefined;
+  const bridgeHasLiveQuote = Boolean(bridgeDisplayQuote);
+  const displaySourceGasRequirement = getBridgeNativeGasRequirement(bridgeDisplayQuote, bridgeFromChainId);
   const bridgeProgressSteps = getCompactBridgeProgressSteps(bridgeExecution.status, bridgeLifecycleQuote?.selectedRoute, {
     sourceHash: Boolean(bridgeExecution.sourceHash),
     destinationHash: Boolean(bridgeExecution.destinationHash),
     destinationVerified: bridgeExecution.destinationVerified,
-    destinationSubmissionAttempted: bridgeExecution.destinationSubmissionAttempted,
   });
   const bridgeLifecycleTiming = getBridgeQuoteTiming(bridgeLifecycleQuote);
-  const bridgeStatus = useBridgeStatus(bridgeLifecycleQuote, bridgeExecution.sourceHash?.toString(), bridgeExecution.status === "source-confirmed" || bridgeExecution.status === "attestation-pending" || bridgeExecution.status === "attestation-ready" || bridgeExecution.status === "destination-pending" || bridgeExecution.status === "destination-confirmed" || bridgeExecution.status === "verification-pending" || Boolean(bridgeExecution.sourceHash), bridgeLifecycleTiming);
-  const finalDestinationHash = getBridgeSuccessDestinationHash(bridgeExecution.destinationHash, bridgeStatus.status?.receiving?.txHash);
+  const bridgeStatus = { status: bridgeExecution.bridgeStatus };
+  const finalDestinationHash = getBridgeSuccessDestinationHash(
+    bridgeExecution.destinationHash,
+    bridgeStatus.status?.receiving?.txHash,
+    bridgeStatus.status?.receiving?.chainId,
+    bridgeLifecycleQuote?.toChain.id,
+  );
   const bridgeIsComplete = canShowBridgeSuccess({
     status: bridgeExecution.status,
     sourceHash: bridgeExecution.sourceHash,
@@ -3204,13 +3536,6 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
   useLayoutEffect(() => {
     if (bridgeIsComplete) markArcForwardingTiming(bridgeTimingRef.current, "success popup rendered");
   }, [bridgeIsComplete]);
-  const autoCompleteBridgeReady = shouldAutoCompleteBridge({
-    status: bridgeExecution.status,
-    attestationReady: Boolean(bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation),
-    message: bridgeStatus.status?.message,
-    attestation: bridgeStatus.status?.attestation,
-    destinationHash: bridgeExecution.destinationHash,
-  });
   const bridgeSourceActionReady = Boolean(
     isConnected &&
     bridgeQuoteCurrent &&
@@ -3227,8 +3552,9 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     status: bridgeExecution.status,
     sourceChainId: bridgeFromChainId,
     destinationChainId: bridgeToChainId,
+    selectedRoute: getBridgeSelectedRoute(bridgeLifecycleQuote),
     sourceHash: bridgeExecution.sourceHash,
-    forwarding: bridgeLifecycleQuote?.selectedRoute === "forwarding",
+    destinationHash: bridgeExecution.destinationHash,
     verifiedComplete: bridgeIsComplete,
     sourceActionReady: bridgeSourceActionReady,
   });
@@ -3257,24 +3583,26 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     markArcForwardingTiming(bridgeTimingRef.current, "verified success amount and quote reset");
   }, [bridgeExecution.destinationVerified, bridgeExecution.sourceHash, bridgeExecution.status, finalDestinationHash, queryClient]);
   const resetBridgeRouteState = useCallback(() => {
+    bridgeExecutionStartedRef.current = false;
     resetBridgeExecution();
-    queryClient.removeQueries({ queryKey: ['bridge-status'] });
     queryClient.removeQueries({ queryKey: ['bridge-quote'] });
+    setBridgeAmount("");
     setShowBridgeConfirmation(false);
     setReviewedBridgeQuote(null);
+    setBridgeNetworkSwitchError(null);
   }, [queryClient, resetBridgeExecution]);
   useEffect(() => {
-    resetBridgeRouteState();
-  }, [bridgeFromChainId, bridgeToChainId, resetBridgeRouteState]);
-  const autoCompleteAttemptKeyRef = useRef<string | null>(null);
+    if (!bridgeIsComplete) return;
+    const timer = window.setTimeout(resetBridgeRouteState, 5_000);
+    return () => window.clearTimeout(timer);
+  }, [bridgeIsComplete, resetBridgeRouteState]);
+  const bridgeRouteSelectionRef = useRef(`${bridgeFromChainId}:${bridgeToChainId}`);
   useEffect(() => {
-    if (!autoCompleteBridgeReady || !bridgeStatus.status?.message || !bridgeStatus.status.attestation) return;
-    if (bridgeExecution.status === "destination-pending" || bridgeExecution.status === "verification-pending" || bridgeExecution.status === "completed") return;
-    const completionKey = `${bridgeExecution.sourceHash ?? "no-source"}:${bridgeStatus.status.message}:${bridgeStatus.status.attestation}`;
-    if (autoCompleteAttemptKeyRef.current === completionKey) return;
-    autoCompleteAttemptKeyRef.current = completionKey;
-    void bridgeExecution.complete(bridgeStatus.status.message, bridgeStatus.status.attestation);
-  }, [autoCompleteBridgeReady, bridgeExecution.sourceHash, bridgeExecution.status, bridgeStatus.status?.attestation, bridgeStatus.status?.message]);
+    const routeKey = `${bridgeFromChainId}:${bridgeToChainId}`;
+    if (bridgeRouteSelectionRef.current === routeKey) return;
+    bridgeRouteSelectionRef.current = routeKey;
+    resetBridgeRouteState();
+  }, [address, bridgeFromChainId, bridgeToChainId, resetBridgeRouteState]);
   const bridgeReady = isBridgeReviewable({
     isConnected,
     wrongNetwork: bridgeWrongNetwork,
@@ -3286,7 +3614,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     hasAmountError: Boolean(bridgeAmountError),
     quoteFresh: bridgeQuoteCurrent,
     feeValid: !bridgeQuoteState.quote?.feeError,
-  }) && bridgeApproval.isReady && !bridgeApproval.required && standardDestinationGasReady;
+  }) && bridgeApproval.isReady && !bridgeApproval.required && standardDestinationGasReady && sourceNativeGasReady;
   const reviewedBridgeQuoteCurrent = Boolean(
     reviewedBridgeQuote &&
     bridgeQuoteCurrent &&
@@ -3319,18 +3647,20 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     ?? (bridgeWrongNetwork ? `Switch to ${requiredBridgeChain.name} to continue.` : null)
     ?? bridgeQuoteState.quote?.feeError
     ?? (bridgeExecutionStarted
-      ? getCompactBridgeStatus(bridgeExecution.status, bridgeLifecycleQuote?.selectedRoute === "forwarding", {
-          source: Boolean(bridgeExecution.sourceHash),
-          destination: Boolean(bridgeExecution.destinationHash),
-          destinationVerified: bridgeExecution.destinationVerified,
-        }) ?? "Bridge is processing."
+      ? getCompactBridgeStatus(bridgeExecution.status, getBridgeSelectedRoute(bridgeLifecycleQuote) === "forwarding", {
+            source: Boolean(bridgeExecution.sourceHash),
+            destination: Boolean(bridgeExecution.destinationHash),
+            destinationVerified: bridgeExecution.destinationVerified,
+          }) ?? "Bridge is processing."
         : bridgeApproval.required
           ? `Approve ${formatUnits(bridgeApprovalRequest.amount ?? 0n, bridgeFromToken?.decimals ?? 6)} USDC to continue.`
           : ["refreshing", "refresh-failed", "stale"].includes(bridgeQuoteFreshnessState)
             ? ""
             : bridgeQuoteCurrent
               ? "Quote ready to review."
-              : "Enter an amount to get a live quote.");
+                : bridgeHasPositiveAmount && bridgeQuoteState.isFetching
+                  ? "Getting a live quote…"
+                  : null);
   const switchBridgeNetwork = async () => {
     if (requiredBridgeChainId === undefined) return;
     setBridgeNetworkSwitchError(null);
@@ -3341,7 +3671,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
     }
   };
   return (
-    <div className={`mx-auto ${isBridge ? "max-w-4xl space-y-7" : "max-w-5xl space-y-8"}`}>
+    <div className={`orbit-action-page ${isBridge ? "orbit-action-page--bridge mx-auto max-w-4xl space-y-7" : "orbit-action-page--swap mx-auto max-w-5xl space-y-8"}`}>
       <PageTitle
         label={`${isSwap ? "Move / Swap" : "Move / Bridge"}`}
         title={
@@ -3351,7 +3681,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
         }
       />
       <div className={`grid gap-5 ${isSwap ? "lg:grid-cols-[1fr_1fr]" : ""}`}>
-        <Card className={isBridge ? "p-[18px]" : "p-5"} glow>
+        <Card className={isBridge ? "orbit-bridge-card p-[18px]" : "p-5"} glow>
           {isSwap ? (
             <>
               <div className="mb-5 flex items-center justify-between">
@@ -3393,11 +3723,11 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                 </div>
               </div>
               <p className={`mt-4 text-xs ${swapAmountError || isQuoteError || swapExecution.status === "failed" ? "text-rose-300" : swapExecution.status === "confirmed" ? "text-emerald-300" : "text-slate-500"}`}>{swapAmountError ?? swapExecution.error?.message ?? (fromSymbol === toSymbol ? "Select two different assets." : !swapAmountValid ? "Enter an amount to request a quote." : isQuoteError ? `${quoteProvider} quote error: ${quoteError instanceof Error ? quoteError.message : "provider unavailable"}` : swapApproval.isApprovalRequired ? "Approval required for this router." : !quote ? "Quote unavailable." : !quoteFresh ? "Quote expired. Refresh the quote." : "Ready to review route.")}</p>
-              {swapApproval.isApprovalRequired ? <Button className="mt-4 w-full" onClick={() => void swapApproval.approve()} disabled={swapApproval.approvalStatus === "confirmation" || swapApproval.approvalStatus === "pending" || !quote} icon>{swapApproval.approvalStatus === "pending" ? "Approval pending..." : swapApproval.approvalStatus === "confirmation" ? "Confirm in wallet" : "Approve exact amount"}</Button> : <Button className="mt-4 w-full" onClick={() => setShowSwapConfirmation(true)} icon disabled={!swapReady || swapExecution.status === "pending" || swapExecution.status === "confirmation"}>{swapExecution.status === "pending" ? "Swap pending..." : swapExecution.status === "confirmed" ? "Swap confirmed" : "Review swap"}</Button>}
+              {swapApproval.isApprovalRequired ? <div className="mt-4 space-y-3 rounded-xl border border-amber-300/15 bg-amber-300/[.04] p-3"><p className="text-xs text-slate-300">Approve {fromAsset.symbol} for spender <span className="break-all font-mono text-slate-200">{quote?.routerAddress ?? "Unavailable"}</span>, up to {quote ? formatUnits(quote.amountIn, fromAsset.decimals) : "Unavailable"} {fromAsset.symbol}.</p><SlideToConfirm label="Slide to approve" confirmationKey={`${address?.toLowerCase() ?? ""}:${chainId ?? ""}:${fromAsset.address ?? fromAsset.symbol}:${quote?.routerAddress ?? ""}:${quote?.amountIn.toString() ?? ""}`} phase={swapApproval.approvalStatus === "confirmation" ? "submitting" : swapApproval.approvalStatus === "pending" ? "pending" : swapApproval.approvalStatus === "confirmed" ? "success" : swapApproval.approvalStatus === "failed" ? "failed" : "idle"} disabled={!quote || Boolean(swapApproval.approvalHash)} onConfirm={swapApproval.approve} /></div> : <Button className="mt-4 w-full" onClick={() => setShowSwapConfirmation(true)} icon disabled={!swapReady || swapExecution.status === "pending" || swapExecution.status === "confirmation"}>{swapExecution.status === "pending" ? "Swap pending..." : swapExecution.status === "confirmed" ? "Swap confirmed" : "Review swap"}</Button>}
               {swapApproval.approvalStatus === "failed" && swapApproval.approvalError && <p className="mt-3 text-xs text-rose-300">Approval failed: {swapApproval.approvalError.message}</p>}
               {swapApproval.approvalHash && <p className="mt-2 text-xs text-cyan-300">Approval transaction submitted.</p>}
               {swapExecution.transactionHash && <p className="mt-2 text-xs text-emerald-300">Swap hash: <a className="underline" href={explorerTxUrl(swapExecution.transactionHash)} target="_blank" rel="noopener noreferrer">{shortAddr(swapExecution.transactionHash)}</a></p>}
-              {showSwapConfirmation && quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{formatUnits(quote.amountIn, fromAsset.decimals)} {fromAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span>{formatUnits(quote.amountOut, toAsset.decimals)} {toAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{minimumReceived !== null ? `${formatUnits(minimumReceived, toAsset.decimals)} ${toAsset.symbol}` : "Not available from quote"}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Base Mainnet</span></div><div className="flex justify-between"><span className="text-slate-500">Deadline</span><span>5 minutes</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the route and transaction in your wallet before signing. Digital assets can lose value.</p><div className="mt-4 flex gap-2"><Button variant="secondary" className="flex-1" onClick={() => setShowSwapConfirmation(false)}>Cancel</Button><Button className="flex-1" onClick={() => { setShowSwapConfirmation(false); void swapExecution.execute(quote, address as Address, slippageBps); }} disabled={!swapReady} icon>Confirm swap</Button></div></div>}
+              {showSwapConfirmation && quote && <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4"><Label>Final confirmation</Label><div className="mt-3 space-y-2 text-xs"><div className="flex justify-between"><span className="text-slate-500">Input</span><span>{formatUnits(quote.amountIn, fromAsset.decimals)} {fromAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Expected output</span><span>{formatUnits(quote.amountOut, toAsset.decimals)} {toAsset.symbol}</span></div><div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{minimumReceived !== null ? `${formatUnits(minimumReceived, toAsset.decimals)} ${toAsset.symbol}` : "Not available from quote"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Route</span><span className="text-right">{quote.routeLabel}</span></div><div className="flex justify-between"><span className="text-slate-500">Price impact</span><span>{formatPercent(quote.priceImpact)}</span></div><div className="flex justify-between"><span className="text-slate-500">Network</span><span>Base Mainnet</span></div><div className="flex justify-between"><span className="text-slate-500">Network fee</span><span>{quote.gasUsd !== null ? `$${quote.gasUsd.toFixed(2)}` : "Not provided by route"}</span></div><div className="flex justify-between"><span className="text-slate-500">Deadline</span><span>5 minutes</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-300">Review the route and transaction in your wallet before signing. Digital assets can lose value.</p><div className="mt-4 space-y-3"><Button variant="secondary" className="w-full" onClick={() => setShowSwapConfirmation(false)}>Cancel</Button><SlideToConfirm label="Slide to swap" confirmationKey={`${address?.toLowerCase() ?? ""}:${chainId ?? ""}:${quote.routerAddress}:${quote.amountIn}:${quote.amountOut}:${slippageBps}:${quote.quotedAt}`} phase={swapExecution.status === "preparing" || swapExecution.status === "confirmation" ? "submitting" : swapExecution.status === "pending" ? "pending" : swapExecution.status === "confirmed" ? "success" : swapExecution.status === "failed" ? "failed" : "idle"} disabled={!swapReady || Boolean(swapExecution.transactionHash)} onConfirm={() => swapExecution.execute(quote, address as Address, slippageBps)} /></div></div>}
             </>
           ) : isBridge ? (
             <>
@@ -3417,20 +3747,28 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                   <BridgeNetworkPicker label="Bridge destination network" value={bridgeToChainId} options={allBridgeNetworks.filter((chain) => chain.id !== bridgeFromChainId)} onChange={setBridgeToChainId} disabled={bridgeInputsLocked} />
                 </div>
               </div>
-              {bridgeSameNetwork && <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Source and destination networks must be different.</span></div>}
-              {bridgeWrongNetwork && requiredBridgeChainId !== undefined && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Wrong network. Switch to {requiredBridgeChain.name} to continue the current Bridge action.</span><Button variant="secondary" onClick={() => void switchBridgeNetwork()} disabled={bridgeNetworkSwitchPending}>{bridgeNetworkSwitchPending ? `Switching to ${requiredBridgeChain.name}...` : `Switch to ${requiredBridgeChain.name}`}</Button>{bridgeNetworkSwitchError && <span className="basis-full text-rose-300">{bridgeNetworkSwitchError.message}</span>}</div>}
+              {bridgeHasPositiveAmount && bridgeSameNetwork && <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Source and destination networks must be different.</span></div>}
+              {bridgeHasPositiveAmount && bridgeWrongNetwork && requiredBridgeChainId !== undefined && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs text-amber-200"><span>Wrong network. Switch to {requiredBridgeChain.name} to continue the current Bridge action.</span><Button variant="secondary" onClick={() => void switchBridgeNetwork()} disabled={bridgeNetworkSwitchPending}>{bridgeNetworkSwitchPending ? `Switching to ${requiredBridgeChain.name}...` : `Switch to ${requiredBridgeChain.name}`}</Button>{bridgeNetworkSwitchError && <span className="basis-full text-rose-300">{bridgeNetworkSwitchError.message}</span>}</div>}
               <div className="orbit-bridge-asset-card mt-3.5 rounded-xl border border-white/10 bg-white/[.03] p-3.5">
                 <Label>Asset</Label>
                 <div className="orbit-bridge-asset-header mt-2.5 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="orbit-bridge-asset-token rounded-lg border border-white/10 bg-[#101725] p-2 font-bold text-white">USDC</div>
                   </div>
-                  <span className="orbit-bridge-asset-balance font-mono text-xs text-slate-500">
+                  {bridgeHasPositiveAmount && <span className="orbit-bridge-asset-balance font-mono text-xs text-slate-500">
                     Balance {bridgeBalance.isDisconnected ? 'Connect wallet' : bridgeBalance.isLoading ? "..." : bridgeFromToken && bridgeBalance.raw !== null ? formatUnits(bridgeBalance.raw, bridgeFromToken.decimals) : "Unavailable"}
-                  </span>
+                  </span>}
                 </div>
                 <div className="orbit-bridge-amount-control mt-3.5 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-3.5"><input value={bridgeAmount} onChange={(event) => setBridgeAmount(event.target.value)} disabled={bridgeInputsLocked} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-2.5 text-lg font-bold text-white outline-none placeholder:text-slate-600 disabled:opacity-60" /><button type="button" onClick={() => bridgeFromToken && bridgeBalance.raw !== null && setBridgeAmount(formatUnits(bridgeBalance.raw, bridgeFromToken.decimals))} disabled={bridgeInputsLocked} className="orbit-form-max font-mono text-[10px] font-bold disabled:opacity-50">MAX</button><span className="font-mono text-xs text-slate-500">{bridgeSymbol}</span></div>
+                {Boolean(bridgeAmount) && bridgeAmountError && rawBridgeAmount !== 0n && <p role="alert" className="mt-2 text-xs text-rose-300">{bridgeAmountError}</p>}
               </div>
+              {bridgeHasLiveQuote && (
+                <motion.div
+                  className="orbit-bridge-live-quote overflow-hidden"
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  transition={{ duration: reduceMotion ? 0 : 0.24 }}
+                >
               <div className="orbit-bridge-quote-summary mt-3.5 rounded-xl border border-white/10 bg-white/[.025] px-3.5 py-1.5 text-xs">
                 <div className="flex items-center justify-between gap-3 border-b border-white/[.06] py-2.5">
                   <span className="text-slate-400">You send</span>
@@ -3441,9 +3779,19 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                   <span className="font-mono font-semibold text-slate-100">{bridgeDisplayQuote?.toAmount !== null && bridgeDisplayQuote?.toAmount !== undefined ? `${formatUnits(bridgeDisplayQuote.toAmount, bridgeDisplayQuote.toToken.decimals)} ${bridgeDisplayQuote.toToken.symbol}` : bridgeQuoteState.isFetching ? "Quoting…" : "—"}</span>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2 py-2.5">
-                  <span className="text-slate-400">Network / bridge fee</span>
+                  <span className="text-slate-400">Circle / bridge fee</span>
                   <span className="font-mono font-semibold text-slate-100">{bridgeDisplayQuote?.feeAmount !== null && bridgeDisplayQuote?.feeAmount !== undefined && bridgeFromToken ? `${formatUnits(bridgeDisplayQuote.feeAmount, bridgeFromToken.decimals)} ${bridgeFromToken.symbol}` : bridgeQuoteState.isFetching ? "Quoting…" : "—"}</span>
                 </div>
+                {bridgeDisplayQuote && bridgeFromChainId === ARC_PRIMARY_NETWORK.id && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[.06] py-2.5">
+                    <span className="text-slate-400">Estimated Arc gas (native USDC)</span>
+                    <span className="font-mono text-right text-slate-300">
+                      {"error" in displaySourceGasRequirement
+                        ? "Estimate unavailable"
+                        : `${formatUnits(displaySourceGasRequirement.amount, displaySourceGasRequirement.decimals)} ${displaySourceGasRequirement.tokenSymbol}${sourceNativeBalance ? ` · ${formatUnits(sourceNativeBalance.value, displaySourceGasRequirement.decimals)} available` : sourceBalanceLoading ? " · checking balance…" : " · balance unavailable"}`}
+                    </span>
+                  </div>
+                )}
                 {bridgeDisplayQuote && (
                   <details className="orbit-bridge-disclosure border-t border-white/[.06] py-2">
                     <summary className="cursor-pointer py-1 text-[11px] text-slate-400 transition-colors hover:text-slate-200">Fee breakdown</summary>
@@ -3465,7 +3813,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                   <div className="space-y-2 border-t border-white/[.06] py-3 text-[11px]">
                     <div className="flex justify-between gap-3"><span className="text-slate-500">Route</span><span className="text-right text-slate-300">{getBridgeRouteLabel(bridgeDisplayQuote.selectedRoute)} · {bridgeFromChain.name} to {bridgeToChain.name}</span></div>
                     {bridgeDisplayQuote.transferSpeed && <div className="flex justify-between gap-3"><span className="text-slate-500">Settlement</span><span className="text-right text-slate-300">{bridgeDisplayQuote.transferSpeed}</span></div>}
-                    {bridgeDisplayQuote.routeComparison && <p className="text-[10px] leading-4 text-slate-500">Route selection compares Circle USDC fees only; native gas costs use different tokens and are not included in route ranking.</p>}
+                    {bridgeDisplayQuote.routeComparison && <p className="text-[10px] leading-4 text-slate-500">Automatic routing prefers Circle-managed destination delivery when available. Fee comparisons exclude native gas costs.</p>}
                     {(bridgeDisplayQuote.gasEstimates ?? []).map((gas, index) => {
                       const isMint = bridgeDisplayQuote.selectedRoute === "cctp" && gas.chainId === bridgeToChainId && gas.step.toLowerCase() === "mint";
                       if (gas.step.toLowerCase() === "approve" && !bridgeApproval.required && bridgeApproval.isReady) return null;
@@ -3483,9 +3831,11 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                 </details>
               )}
               {bridgeDisplayQuote?.selectedRoute === "cctp" && (
-                <p className="mt-3 text-[10px] leading-4 text-amber-200">Standard CCTP requires a separate Ethereum Sepolia mint transaction and Sepolia ETH.</p>
+                <p className="mt-3 text-[10px] leading-4 text-amber-200">Standard CCTP requires a separate {bridgeToChain.name} mint transaction and {getOrbitNetwork(bridgeToChainId)?.nativeCurrency.symbol ?? "native"} for gas.</p>
               )}
-              {!bridgeExecutionStarted && (
+                </motion.div>
+              )}
+              {bridgeHasPositiveAmount && !bridgeExecutionStarted && (
                 (bridgeQuoteState.quote && ["stale", "refreshing", "refresh-failed"].includes(bridgeQuoteFreshnessState))
                 || (!bridgeDisplayQuote && bridgeQuoteState.isError)
               ) && (
@@ -3509,56 +3859,214 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                   </Button>
                 </div>
               )}
-              {standardDestinationGasError && (
+              {bridgeHasPositiveAmount && standardDestinationGasError && (
                 <p className="mt-3 text-xs text-rose-300">{standardDestinationGasError}</p>
               )}
-              {bridgeStatusMessage &&               <p role={bridgeExecution.status === "error" || bridgeQuoteState.isError || bridgeApproval.status === "failed" ? "alert" : "status"} className={`mt-4 text-xs ${bridgeExecution.status === "error" || bridgeSameNetwork || bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeApproval.status === "failed" || bridgeApproval.isError || Boolean(bridgeExecution.error) ? "text-rose-300" : bridgeIsComplete ? "text-emerald-300" : "text-slate-400"}`}>{bridgeStatusMessage}</p>}
-              {bridgeProgressSteps.length > 0 && (
-                <ol aria-label="Bridge progress" className="orbit-bridge-stepper mt-4 grid" style={{ gridTemplateColumns: `repeat(${bridgeProgressSteps.length}, minmax(0, 1fr))` }}>
-                  {bridgeProgressSteps.map((step, index) => (
-                    <motion.li
-                      key={`${index}-${step.label}`}
-                      aria-current={step.state === "active" ? "step" : undefined}
-                      className={`orbit-bridge-step orbit-bridge-step--${step.state}`}
-                      initial={reduceMotion ? false : { opacity: 0, y: 3 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: reduceMotion ? 0 : 0.18, delay: reduceMotion ? 0 : index * 0.025 }}
-                    >
-                      <span className="orbit-bridge-step__connector" aria-hidden="true" />
-                      <span className="orbit-bridge-step__marker">{step.state === "complete" ? "✓" : index + 1}</span>
-                      <span className="orbit-bridge-step__label">{step.label}</span>
-                    </motion.li>
-                  ))}
-                </ol>
+              {bridgeHasPositiveAmount && !bridgeExecutionStarted && sourceNativeGasError && (
+                <div role={sourceBalanceError ? "alert" : "status"} className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-rose-300">
+                  <span>{sourceNativeGasError}</span>
+                  {sourceBalanceError && <Button variant="secondary" onClick={() => void refetchSourceNativeBalance()} disabled={sourceBalanceLoading}>Retry gas balance</Button>}
+                </div>
               )}
-              {bridgeQuoteCurrent && bridgeApproval.isError && !bridgeWrongNetwork && !bridgeExecutionStarted && <Button className="mt-4 w-full" variant="secondary" onClick={() => void bridgeApproval.refetchAllowance()} disabled={bridgeApproval.isLoading}>Retry allowance check</Button>}
-              {canRetryForwardingReconciliation({ status: bridgeExecution.status, selectedRoute: bridgeLifecycleQuote?.selectedRoute, sourceHash: bridgeExecution.sourceHash, destinationVerified: bridgeExecution.destinationVerified, timedOut: bridgeExecution.forwardingReconciliationTimedOut }) && <Button className="mt-4 w-full" variant="secondary" onClick={bridgeExecution.retryForwardingReconciliation}>Retry Circle status check (no new transaction)</Button>}
-              {canRetryDestinationMint({ status: bridgeExecution.status, selectedRoute: bridgeLifecycleQuote?.selectedRoute, sourceHash: bridgeExecution.sourceHash, destinationHash: bridgeExecution.destinationHash, destinationVerified: bridgeExecution.destinationVerified, destinationSubmissionAttempted: bridgeExecution.destinationSubmissionAttempted, destinationSubmissionReverted: bridgeExecution.destinationSubmissionReverted }) && bridgeStatus.status?.message && bridgeStatus.status.attestation && <Button className="mt-4 w-full" variant="secondary" onClick={() => void bridgeExecution.complete(bridgeStatus.status?.message, bridgeStatus.status?.attestation)}>Retry destination mint</Button>}
-              {shouldShowBridgeApprovalAction({ status: bridgeExecution.status, sourceHash: bridgeExecution.sourceHash, approvalRequired: bridgeApprovalAction.show }) ? <Button className="mt-4 w-full" onClick={() => void bridgeApproval.approve()} disabled={bridgeApprovalAction.disabled} icon>{bridgeApprovalAction.label}</Button> : autoCompleteBridgeReady || (bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation) || bridgeExecutionStarted ? null : <Button className="orbit-bridge-review-button mt-4 w-full" onClick={() => { if (!bridgeReady || !bridgeQuoteState.quote) return; setReviewedBridgeQuote(bridgeQuoteState.quote); setShowBridgeConfirmation(true); }} disabled={!bridgeReady} icon>Review bridge</Button>}
-              {(bridgeExecution.sourceHash || finalDestinationHash) && (
-                <details className="orbit-bridge-disclosure mt-2 rounded-xl border border-white/[.07] px-4 py-1">
-                  <summary className="cursor-pointer py-2 text-[11px] font-medium text-slate-400 transition-colors hover:text-slate-200">Transactions</summary>
-                  <div className="space-y-2 border-t border-white/[.06] py-3 text-[11px] text-cyan-300">
-                    {bridgeExecution.sourceHash && bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) && <div>Source · {bridgeFromChain.name}: <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeExecution.sourceHash)}</a></div>}
-                    {finalDestinationHash && bridgeExplorerUrl(bridgeToChainId, finalDestinationHash) && <div>Destination · {bridgeToChain.name}: <a href={bridgeExplorerUrl(bridgeToChainId, finalDestinationHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(finalDestinationHash)}</a></div>}
+              {(bridgeHasPositiveAmount || bridgeExecutionStarted || bridgeExecution.error) && bridgeStatusMessage && (
+                <>
+                  <p role={bridgeExecution.status === "error" || bridgeExecution.recoverySaveError || bridgeQuoteState.isError || bridgeApproval.status === "failed" ? "alert" : "status"} aria-live={bridgeExecution.status === "error" || bridgeExecution.recoverySaveError ? "assertive" : "polite"} className={`orbit-bridge-status mt-4 text-xs ${bridgeExecution.status === "error" || bridgeExecution.recoverySaveError || bridgeSameNetwork || bridgeAmountError || bridgeQuoteState.isError || bridgeQuoteState.simulationError || bridgeApproval.status === "failed" || bridgeApproval.isError ? "text-rose-300" : bridgeExecution.status === "needs-attention" ? "text-amber-300" : bridgeIsComplete ? "text-emerald-300" : "text-slate-400"}`}>
+                    {bridgeExecution.error?.message ?? bridgeStatusMessage}
+                    {bridgeExecution.status === "error" && bridgeExecution.sourceHash && <span className="mt-1 block">Starting again creates a separate transaction; the previous one will not be resubmitted.</span>}
+                    {bridgeExecution.status === "needs-attention" && bridgeExecution.sourceHash && <span className="mt-1 block">{getBridgeSelectedRoute(bridgeLifecycleQuote) === "forwarding" ? "The source transaction will not be resubmitted. Destination verification will continue automatically." : bridgeExecution.sourceReceiptConfirmed ? "The saved source receipt is verified. Retry Circle attestation to continue." : "The source hash is preserved. Retry receipt lookup before attestation can resume."}</span>}
+                    {bridgeExecution.destinationSubmissionState === "submission-unknown" && (
+                      <span className="mt-1 block">
+                        No destination hash was saved. Check the connected wallet's destination-chain activity before taking any further action; this recovery will not submit another mint.
+                        {bridgeLifecycleQuote && address && getOrbitNetwork(bridgeLifecycleQuote.toChain.id) && (
+                          <> <a
+                            href={`${getOrbitNetwork(bridgeLifecycleQuote.toChain.id)!.explorerUrl}/address/${address}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline"
+                          >Open destination wallet activity</a>.</>
+                        )}
+                      </span>
+                    )}
+                    {bridgeExecution.sourceHash && !bridgeExecutionWalletMatches && <span className="mt-1 block">Reconnect the wallet that submitted this transfer before continuing recovery.</span>}
+                    {bridgeExecution.recoverySaveError && <span className="mt-1 block">Transfer recovery details could not be saved: {bridgeExecution.recoverySaveError.message}</span>}
+                  </p>
+                  {(bridgeExecution.status === "error" || bridgeExecution.status === "needs-attention") &&
+                    bridgeExecution.sourceHash &&
+                    getBridgeSelectedRoute(bridgeLifecycleQuote) === "cctp" &&
+                    !bridgeExecution.sourceReceiptConfirmed && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => void bridgeExecution.retryCctpSourceReceipt(bridgeLifecycleTiming)}
+                        disabled={bridgeExecution.isSubmitting || !bridgeExecutionWalletMatches}
+                      >
+                        {bridgeExecution.isSubmitting ? "Checking source receipt..." : "Retry source receipt lookup"}
+                      </Button>
+                    )}
+                  {bridgeExecution.status === "needs-attention" &&
+                    bridgeExecution.sourceHash &&
+                    bridgeExecution.sourceReceiptConfirmed &&
+                    getBridgeSelectedRoute(bridgeLifecycleQuote) === "cctp" &&
+                    bridgeStatus.status?.status !== "FAILED" && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => void bridgeExecution.retryCctpAttestation(bridgeLifecycleTiming)}
+                        disabled={bridgeExecution.isSubmitting || !bridgeExecutionWalletMatches}
+                      >
+                        {bridgeExecution.isSubmitting ? "Checking Circle attestation..." : "Retry Circle attestation"}
+                      </Button>
+                    )}
+                  {bridgeExecutionStarted && (
+                    <div className="orbit-bridge-progress-slot mt-4">
+                      <ol aria-label="Bridge progress" className="orbit-bridge-stepper grid" style={{ gridTemplateColumns: `repeat(${bridgeProgressSteps.length}, minmax(0, 1fr))` }}>
+                        {bridgeProgressSteps.map((step, index) => (
+                          <motion.li
+                            key={index}
+                            aria-current={step.state === "active" ? "step" : undefined}
+                            className={`orbit-bridge-step orbit-bridge-step--${step.state}`}
+                            initial={false}
+                            animate={{ opacity: 1 }}
+                            transition={{ duration: reduceMotion ? 0 : 0.12 }}
+                          >
+                            <span className="orbit-bridge-step__connector" aria-hidden="true" />
+                            <span className="orbit-bridge-step__marker">{step.state === "complete" ? "✓" : index + 1}</span>
+                            <span className="orbit-bridge-step__label">{step.label}</span>
+                          </motion.li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+                </>
+              )}
+              {(bridgeHasPositiveAmount && bridgeHasLiveQuote || bridgeExecutionStarted) && (
+              <div className="orbit-bridge-actions-slot">
+                {bridgeQuoteCurrent && bridgeApproval.isError && !bridgeWrongNetwork && !bridgeExecutionStarted && <Button className="mt-4 w-full" variant="secondary" onClick={() => void bridgeApproval.refetchAllowance()} disabled={bridgeApproval.isLoading}>Retry allowance check</Button>}
+                {(bridgeExecution.status === "error" || bridgeExecution.status === "needs-attention" && getBridgeSelectedRoute(bridgeLifecycleQuote) !== "forwarding") && bridgeExecution.sourceHash && (
+                  <Button
+                    className="mt-4 w-full"
+                    variant="secondary"
+                    disabled={bridgeExecution.isSubmitting}
+                    onClick={() => resetBridgeRouteState()}
+                  >
+                    Start a new Bridge
+                  </Button>
+                )}
+                {shouldShowBridgeApprovalAction({
+                  status: bridgeExecution.status,
+                  sourceHash: bridgeExecution.sourceHash,
+                  sourceSubmissionAttempted: bridgeExecution.sourceSubmissionAttempted,
+                  approvalRequired: bridgeApprovalAction.show,
+                }) ? (
+                  <div className="mt-4 space-y-3 rounded-xl border border-amber-300/15 bg-amber-300/[.04] p-3">
+                    <p className="text-xs text-slate-300">Approve {formatUnits(bridgeApprovalRequest.amount ?? 0n, bridgeFromToken?.decimals ?? 6)} {bridgeFromToken?.symbol ?? "USDC"} for spender <span className="break-all font-mono text-slate-200">{bridgeApprovalRequest.spender ?? "Unavailable"}</span>.</p>
+                    <SlideToConfirm
+                      label="Slide to approve"
+                      confirmationKey={`${address?.toLowerCase() ?? ""}:${chainId ?? ""}:${bridgeFromToken?.address ?? ""}:${bridgeApprovalRequest.spender ?? ""}:${bridgeApprovalRequest.amount?.toString() ?? ""}`}
+                      phase={bridgeApproval.status === "confirmation" ? "submitting" : bridgeApproval.status === "pending" ? "pending" : bridgeApproval.status === "confirmed" ? "success" : bridgeApproval.status === "failed" ? "failed" : "idle"}
+                      requirePointerDrag
+                      disabled={bridgeApprovalAction.disabled || Boolean(bridgeApproval.hash)}
+                      onConfirm={bridgeApproval.approve}
+                    />
                   </div>
-                </details>
+                ) : shouldShowBridgeReviewAction({
+                  status: bridgeExecution.status,
+                  sourceHash: bridgeExecution.sourceHash,
+                  sourceSubmissionAttempted: bridgeExecution.sourceSubmissionAttempted,
+                  approvalRequired: bridgeApprovalAction.show,
+                  bridgeReady: bridgeReady && !(bridgeStatus.status?.status === "DONE" && bridgeStatus.status.message && bridgeStatus.status.attestation),
+                }) ? (
+                  <Button
+                    className="orbit-bridge-review-button mt-4 w-full"
+                    onClick={() => {
+                      if (!bridgeReady || !bridgeQuoteState.quote) return;
+                      setReviewedBridgeQuote(bridgeQuoteState.quote);
+                      setShowBridgeConfirmation(true);
+                    }}
+                    disabled={!bridgeReady}
+                    icon
+                  >
+                    Review bridge
+                  </Button>
+                ) : null}
+              </div>
               )}
-              {showBridgeConfirmation && reviewedBridgeQuote && (
+              {(bridgeExecution.sourceHash || finalDestinationHash) && <div className="orbit-bridge-transactions-slot">
+                {(bridgeExecution.sourceHash || finalDestinationHash) && (
+                  <details className="orbit-bridge-disclosure rounded-xl border border-white/[.07] px-4 py-1">
+                    <summary className="cursor-pointer py-2 text-[11px] font-medium text-slate-400 transition-colors hover:text-slate-200">Transactions</summary>
+                    <div className="space-y-2 border-t border-white/[.06] py-3 text-[11px] text-cyan-300">
+                      {bridgeExecution.sourceHash && bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) && <div>Source · {bridgeFromChain.name}: <a href={bridgeExplorerUrl(bridgeFromChainId, bridgeExecution.sourceHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(bridgeExecution.sourceHash)}</a></div>}
+                      {finalDestinationHash && bridgeExplorerUrl(bridgeToChainId, finalDestinationHash) && <div>Destination · {bridgeToChain.name}: <a href={bridgeExplorerUrl(bridgeToChainId, finalDestinationHash) ?? undefined} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(finalDestinationHash)}</a></div>}
+                    </div>
+                  </details>
+                )}
+              </div>}
+              {shouldShowBridgeSourceConfirmation({
+                open: showBridgeConfirmation && Boolean(reviewedBridgeQuote),
+                executionStarted: bridgeExecutionStarted,
+                sourceHash: bridgeExecution.sourceHash,
+              }) && reviewedBridgeQuote && (
                 <div className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4">
                   <Label>Final confirmation</Label>
                   <div className="mt-3 space-y-2 text-xs">
                     <div className="flex justify-between gap-3"><span className="text-slate-500">Route</span><span className="text-right">{getBridgeRouteLabel(reviewedBridgeQuote.selectedRoute)} · {bridgeFromChain.name} → {bridgeToChain.name}</span></div>
                     <div className="flex justify-between"><span className="text-slate-500">Input</span><span>{formatUnits(reviewedBridgeQuote.fromAmount, reviewedBridgeQuote.fromToken.decimals)} {reviewedBridgeQuote.fromToken.symbol}</span></div>
-                    <div className="flex justify-between"><span className="text-slate-500">Expected output</span><span>{reviewedBridgeQuote.toAmountMin !== null ? `${formatUnits(reviewedBridgeQuote.toAmountMin, reviewedBridgeQuote.toToken.decimals)} ${reviewedBridgeQuote.toToken.symbol}` : "Unavailable"}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Minimum received</span><span>{reviewedBridgeQuote.toAmountMin !== null ? `${formatUnits(reviewedBridgeQuote.toAmountMin, reviewedBridgeQuote.toToken.decimals)} ${reviewedBridgeQuote.toToken.symbol}` : "Unavailable"}</span></div>
                     <div className="flex justify-between"><span className="text-slate-500">Circle fee</span><span>{reviewedBridgeQuote.feeAmount !== null ? `${formatUnits(reviewedBridgeQuote.feeAmount, reviewedBridgeQuote.fromToken.decimals)} ${reviewedBridgeQuote.fromToken.symbol}` : "Unavailable"}</span></div>
+                    <div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="break-all text-right font-mono">{address ?? "Unavailable"}</span></div>
                   </div>
-                  <p className="mt-3 text-[10px] leading-4 text-amber-300">{reviewedBridgeQuote.selectedRoute === "forwarding" ? "Confirm the source USDC burn in your wallet. Circle will handle destination delivery." : "Confirm the source USDC burn in your wallet. Standard CCTP requires a separate destination mint confirmation and Sepolia ETH."}</p>
+                  <p className="mt-3 text-[10px] leading-4 text-amber-300">{reviewedBridgeQuote.selectedRoute === "forwarding" ? "Confirm the source USDC transfer in your wallet. Circle will handle destination delivery." : `Confirm the source USDC transfer in your wallet. Standard CCTP requires a separate ${bridgeToChain.name} mint confirmation and ${getOrbitNetwork(bridgeToChainId)?.nativeCurrency.symbol ?? "native"} for gas.`}</p>
                   {!reviewedBridgeQuoteCurrent && <p role="status" className="mt-3 text-xs text-amber-200">This quote changed or expired after review. Review the current quote again before confirming.</p>}
-                  <div className="mt-4 flex gap-2">
-                    <Button variant="secondary" className="flex-1" onClick={() => { setShowBridgeConfirmation(false); setReviewedBridgeQuote(null); }}>Cancel</Button>
-                    <Button className="flex-1" onClick={() => { if (!reviewedBridgeQuoteCurrent || !reviewedBridgeQuote) return; const timing = bridgeTiming ?? beginArcForwardingTiming(); bridgeTimingRef.current = timing; markArcForwardingTiming(timing, "Confirm bridge clicked"); setShowBridgeConfirmation(false); void bridgeExecution.execute(timing, reviewedBridgeQuote); }} disabled={!bridgeReady || !reviewedBridgeQuoteCurrent} icon>Confirm bridge</Button>
+                  <div className="mt-4 space-y-3">
+                    <Button variant="secondary" className="w-full" disabled={bridgeExecutionStarted} onClick={() => { setShowBridgeConfirmation(false); setReviewedBridgeQuote(null); }}>Cancel review</Button>
+                    <SlideToConfirm
+                      label="Slide to bridge"
+                      confirmationKey={`${address?.toLowerCase() ?? ""}:${chainId ?? ""}:${bridgeFromChainId}:${bridgeToChainId}:${reviewedBridgeQuote.fromToken.address}:${reviewedBridgeQuote.toToken.address}:${reviewedBridgeQuote.fromAmount}:${reviewedBridgeQuote.feeAmount ?? ""}:${reviewedBridgeQuote.selectedRoute}`}
+                      phase={bridgeExecution.isSubmitting || bridgeExecution.status === "preflight" ? "submitting" : bridgeExecution.status === "source-pending" ? "pending" : ["source-confirmed", "attestation-pending", "attestation-ready", "destination-pending"].includes(bridgeExecution.status) ? "pending" : bridgeExecution.status === "completed" ? "success" : bridgeExecution.status === "error" ? "failed" : "idle"}
+                      requirePointerDrag
+                      disabled={bridgeExecution.isSubmitting || bridgeExecution.sourceSubmissionAttempted || Boolean(bridgeExecution.sourceHash) || (!reviewedBridgeQuoteCurrent && !bridgeExecutionStarted)}
+                      onConfirm={() => {
+                        if (!reviewedBridgeQuoteCurrent || !reviewedBridgeQuote || !bridgeReady || bridgeExecution.sourceHash || bridgeExecution.sourceSubmissionAttempted || bridgeExecution.isSubmitting) {
+                          throw new Error("Bridge review changed or is no longer ready. Review the current route again.");
+                        }
+                        setShowBridgeConfirmation(false);
+                        setReviewedBridgeQuote(null);
+                        const timing = bridgeTiming ?? beginArcForwardingTiming();
+                        bridgeTimingRef.current = timing;
+                        markArcForwardingTiming(timing, "Confirm bridge clicked");
+                        return bridgeExecution.execute(timing, reviewedBridgeQuote);
+                      }}
+                    />
                   </div>
+                </div>
+              )}
+              {bridgeLifecycleQuote && shouldShowCctpDestinationMintAction({
+                selectedRoute: getBridgeSelectedRoute(bridgeLifecycleQuote),
+                status: bridgeStatus.status?.status,
+                message: bridgeStatus.status?.message,
+                attestation: bridgeStatus.status?.attestation,
+              }) && bridgeStatus.status?.message && bridgeStatus.status.attestation && (
+                <div className="mt-4 space-y-3 rounded-xl border border-amber-300/20 bg-amber-300/[.04] p-4" aria-label="Review destination mint">
+                  <Label>Destination mint confirmation</Label>
+                  <p className="text-xs leading-5 text-slate-300">The source transfer is confirmed and Circle attestation is ready. Review and authorize the separate destination mint transaction.</p>
+                  <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                    <div><dt className="text-slate-500">Destination network</dt><dd className="mt-1 text-slate-200">{bridgeLifecycleQuote.toChain.name}</dd></div>
+                    <div><dt className="text-slate-500">Asset / minimum received</dt><dd className="mt-1 text-slate-200">{bridgeLifecycleQuote.toAmountMin === null ? "Unavailable" : `${formatUnits(bridgeLifecycleQuote.toAmountMin, bridgeLifecycleQuote.toToken.decimals)} ${bridgeLifecycleQuote.toToken.symbol}`}</dd></div>
+                    <div><dt className="text-slate-500">Source transaction</dt><dd className="mt-1 break-all font-mono text-slate-200">{bridgeExecution.sourceHash ?? "Unavailable"}</dd></div>
+                    <div><dt className="text-slate-500">Destination gas estimate</dt><dd className="mt-1 text-slate-200">{standardMintGasEstimate === undefined || standardMintGasDecimals === undefined ? "Unavailable" : `${formatUnits(standardMintGasEstimate, standardMintGasDecimals)} ${getOrbitNetwork(bridgeLifecycleQuote.toChain.id)?.nativeCurrency.symbol ?? "native gas"}`}</dd></div>
+                  </dl>
+                  <SlideToConfirm
+                    label={bridgeExecution.destinationHash ? "Verify destination mint" : "Confirm destination mint"}
+                    confirmationKey={`${address?.toLowerCase() ?? ""}:${chainId ?? ""}:${bridgeExecution.sourceHash ?? ""}:${bridgeStatus.status.message}:${bridgeStatus.status.attestation}`}
+                    phase={bridgeExecution.isSubmitting && bridgeExecution.status === "destination-pending" ? bridgeExecution.destinationHash ? "pending" : "submitting" : bridgeExecution.status === "completed" ? "success" : bridgeExecution.status === "error" ? "failed" : bridgeExecution.status === "destination-pending" ? "pending" : "idle"}
+                    requirePointerDrag
+                    disabled={!bridgeExecution.sourceHash || !bridgeExecutionWalletMatches || bridgeExecution.isSubmitting || bridgeExecution.status === "completed" || bridgeExecution.destinationSubmissionAttempted && !bridgeExecution.destinationHash}
+                    onConfirm={() => {
+                      if (!bridgeStatus.status?.message || !bridgeStatus.status.attestation || !bridgeExecution.sourceHash) {
+                        throw new Error("Circle attestation or source transaction changed. Verify status before continuing.");
+                      }
+                      return bridgeExecution.complete(bridgeStatus.status.message, bridgeStatus.status.attestation);
+                    }}
+                  />
                 </div>
               )}
               <AnimatePresence>
@@ -3580,7 +4088,7 @@ export function ActionPage({ type }: { type: "swap" | "bridge" }) {
                     additionalTransactions={[{
                       label: "Destination transaction",
                       transactionHash: finalDestinationHash,
-                      explorerUrl: finalDestinationHash ? bridgeExplorerUrl(bridgeStatus.status?.receiving?.chainId ?? bridgeToChainId, finalDestinationHash) : null,
+                      explorerUrl: finalDestinationHash ? bridgeExplorerUrl(bridgeToChainId, finalDestinationHash) : null,
                     }]}
                     completedAt={bridgeLifecycleQuote.quotedAt}
                     primaryLabel="Done"
@@ -3837,17 +4345,19 @@ function Discover() {
 function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | null }) {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
-  const { send, status, transactionHash, error, reset, gasCost } = useSendTransaction();
+  const { prepare, confirm, status, transactionHash, error, reset, gasCost, submissionUncertain, retryRecoveryCheck } = useSendTransaction();
   const isArcTestnet = chainId === arcTestnet.id;
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [completedAt, setCompletedAt] = useState<number | null>(null);
+  const [showSendReview, setShowSendReview] = useState(false);
+  const sendUiGenerationRef = useRef(0);
   const asset = ARC_USDC;
   const balance = useTokenBalance(asset, address, Boolean(isConnected && isArcTestnet));
   const isPaymentRequestSend = Boolean(paymentRequest);
   const balanceRaw = balance.raw;
-  const isBusy = status === "preparing" || status === "confirmation" || status === "pending";
+  const isBusy = status === "preparing" || status === "ready" || status === "confirmation" || status === "pending";
   const isSendInputInvalid = validateSendRequest({
     address,
     recipient,
@@ -3862,6 +4372,7 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
   const setInput = (setter: (value: string) => void, value: string) => {
     setter(value);
     setFormError(null);
+    setShowSendReview(false);
     if (status !== "idle") reset();
   };
   useEffect(() => {
@@ -3874,7 +4385,18 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
     setAmount(formatUnits(balanceRaw, asset.decimals));
     setFormError(null);
   };
-  const handleSend = async () => {
+  const startAnotherSend = () => {
+    sendUiGenerationRef.current += 1;
+    reset();
+    const freshForm = createFreshSendFormState();
+    setRecipient(freshForm.recipient);
+    setAmount(freshForm.amount);
+    setFormError(freshForm.formError);
+    setCompletedAt(freshForm.completedAt);
+    setShowSendReview(freshForm.showReview);
+  };
+  const prepareSend = async () => {
+    const flowGeneration = sendUiGenerationRef.current;
     setFormError(null);
     if (!isConnected || !address) {
       setFormError("Connect your wallet before sending assets.");
@@ -3907,33 +4429,37 @@ function SendPage({ paymentRequest }: { paymentRequest?: ArcPaymentRequest | nul
       setFormError(`Insufficient ${asset.symbol} balance.`);
       return;
     }
-    await send({ asset, recipient: recipient as Address, amount: rawAmount });
+    const prepared = await prepare({ asset, recipient: recipient as Address, amount: rawAmount });
+    if (!isCurrentSendFlow(flowGeneration, sendUiGenerationRef.current)) return;
+    setShowSendReview(prepared);
   };
-  const stateMessage = status === "preparing" ? "Preparing transaction and estimating Arc gas..." : status === "confirmation" ? "Confirm this transaction in your wallet." : status === "pending" ? "Transaction pending on Arc Testnet..." : status === "confirmed" ? "Transaction confirmed." : status === "rejected" ? "Transaction rejected in wallet." : status === "failed" ? error?.message ?? "Transaction failed." : null;
-  if (status === "confirmed" && transactionHash) {
+  const stateMessage = status === "preparing" ? "Preparing transaction and estimating Arc gas..." : status === "ready" ? "Review the estimated fee, then slide to send." : status === "confirmation" ? "Confirm this transaction in your wallet." : status === "pending" ? "Transaction pending on Arc Testnet..." : status === "timeout" ? "Receipt check timed out. The transaction outcome is still unresolved." : status === "rpc-error" ? "RPC could not verify the saved transaction. Its outcome is still unresolved." : status === "uncertain" ? "Wallet submission outcome is unknown. Check wallet activity before retrying." : status === "recovery-mismatch" ? "A saved Send transaction belongs to a different chain context. Switch to Arc Testnet to check it." : status === "reverted" ? "The Send transaction reverted on Arc Testnet." : status === "confirmed" ? "Transaction confirmed." : status === "rejected" ? "Transaction rejected in wallet." : status === "failed" ? error?.message ?? "Transaction failed." : null;
+  if (transactionHash && shouldShowSendSuccess({ status, transactionHash })) {
     return (
       <TransactionSuccessScreen
         title="Send Successful!"
-        description={`Your ${asset.symbol} transfer was successfully confirmed on Arc Testnet.`}
+        description={recipient && amount
+          ? `Your ${asset.symbol} transfer was successfully confirmed on Arc Testnet.`
+          : `A Send transaction was confirmed on Arc Testnet. The original amount and recipient are not available in this browser session.`}
         amountLabel="Amount sent"
-        amount={amount}
+        amount={amount || "—"}
         token={asset}
         networks={[{ label: "Network", network: { id: arcTestnet.id, name: "Arc Testnet" } }]}
-        recipient={recipient}
+        recipient={recipient || undefined}
         transactionHash={transactionHash}
         explorerUrl={explorerTxUrl(transactionHash, arcTestnet.id)}
         gasFee={gasCost === null ? "Unavailable" : `${formatEther(gasCost)} USDC`}
         completedAt={completedAt ?? Date.now()}
         primaryLabel="Send Again"
-        onBack={reset}
-        onPrimary={reset}
+        onBack={startAnotherSend}
+        onPrimary={startAnotherSend}
       />
     );
   }
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="orbit-action-page orbit-send-page mx-auto max-w-3xl space-y-6">
       <PageTitle label="Move / Send" title="Send assets securely." />
-      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send Arc Testnet USDC.</p><WalletButton className="mt-7" /></Card> : !isArcTestnet ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send uses the official Arc Testnet USDC contract and your connected wallet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send / Arc Testnet</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><div><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Official Arc ERC-20</span></div></div><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || isPaymentRequestSend || balance.isLoading || balance.isError} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balance.isLoading ? "..." : balance.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} USDC`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} USDC</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} native USDC` : "Estimated during preparation"}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p></div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}<Button onClick={() => void handleSend()} disabled={isBusy || balance.isLoading || balance.isError || isSendInputInvalid} className="mt-5 w-full" icon>{status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" ? "Send another" : "Review and send"}</Button></Card>}
+      {!isConnected ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to send Arc Testnet USDC.</p><WalletButton className="mt-7" /></Card> : !isArcTestnet ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><ShieldCheck size={28} className="text-amber-300" /><h2 className="mt-6 text-2xl font-bold">Switch to Arc Testnet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send uses the official Arc Testnet USDC contract and your connected wallet.</p><Button className="mt-6" variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })}>Switch to Arc Testnet</Button></Card> : <Card className="p-5" glow><div className="mb-5"><Label>Send / Arc Testnet</Label><h2 className="mt-2 text-xl font-bold">{isPaymentRequestSend ? "Pay Arc USDC request" : "Transfer from your wallet"}</h2></div><div className="space-y-4"><div><span className="mb-2 block text-xs font-semibold text-slate-400">Asset</span><div className="rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 text-sm font-bold text-white">USDC <span className="ml-2 font-normal text-slate-500">Official Arc ERC-20</span></div></div><label className="block"><span className="mb-2 block text-xs font-semibold text-slate-400">Recipient address</span><input value={recipient} onChange={(event) => setInput(setRecipient, event.target.value)} disabled={isBusy || Boolean(transactionHash) || submissionUncertain || isPaymentRequestSend} placeholder="0x..." className="w-full rounded-xl border border-white/10 bg-white/[.04] px-4 py-3 font-mono text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/40" /></label><label className="block"><span className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-400"><span>Amount</span><button type="button" onClick={handleMax} disabled={isBusy || Boolean(transactionHash) || submissionUncertain || isPaymentRequestSend || balance.isLoading || balance.isError} className="font-mono text-[10px] text-cyan-300 hover:text-cyan-200">MAX</button></span><div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={amount} onChange={(event) => setInput(setAmount, event.target.value)} disabled={isBusy || Boolean(transactionHash) || submissionUncertain || isPaymentRequestSend} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-lg font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div><span className="mt-2 block font-mono text-[10px] text-slate-500">Available {balance.isLoading ? "..." : balance.isError ? "Unavailable" : `${formatUnits(balanceRaw, asset.decimals)} USDC`}</span></label>{isPaymentRequestSend && <div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs text-slate-300">This request is for {paymentRequest?.amount} USDC to {paymentRequest?.recipient}. Review the details in your wallet before confirming.</div>}<div className="rounded-xl border border-cyan-300/20 bg-cyan-300/[.05] p-4 text-xs"><p className="font-semibold text-cyan-100">Transaction preview</p><div className="mt-3 space-y-2 text-slate-300"><div className="flex justify-between gap-3"><span className="text-slate-500">Network</span><span>Arc Testnet</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Asset / amount</span><span>{amount || "0"} USDC</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Recipient</span><span className="max-w-[65%] truncate font-mono">{recipient || "Not provided"}</span></div><div className="flex justify-between gap-3"><span className="text-slate-500">Estimated gas</span><span>{gasCost !== null ? `${formatUnits(gasCost, 18)} native USDC` : "Estimated during preparation"}</span></div></div><p className="mt-3 text-[10px] leading-4 text-amber-200">Arc gas is paid in native USDC. ERC-20 balance alone does not guarantee enough gas.</p></div></div>{(formError || stateMessage) && <p className={`mt-4 text-xs ${status === "confirmed" ? "text-emerald-300" : status === "failed" || status === "rejected" || formError ? "text-rose-300" : "text-cyan-300"}`}>{formError || stateMessage}</p>}{transactionHash && <p className="mt-3 text-xs text-emerald-300">Hash: <a href={explorerTxUrl(transactionHash, arcTestnet.id)} target="_blank" rel="noopener noreferrer" className="underline">{shortAddr(transactionHash)}</a></p>}                  <Button onClick={() => submissionUncertain ? void retryRecoveryCheck() : (status === "confirmed" || status === "reverted") && transactionHash ? reset() : void prepareSend()} disabled={submissionUncertain ? false : (status === "confirmed" || status === "reverted") && transactionHash ? false : isBusy || Boolean(transactionHash) || balance.isLoading || balance.isError || isSendInputInvalid} className="mt-5 w-full" icon>{submissionUncertain ? "Check transaction status" : status === "confirmation" ? "Confirm in wallet" : status === "pending" ? "Sending..." : status === "confirmed" || status === "reverted" ? "Prepare another send" : "Review and send"}</Button>{showSendReview && status !== "idle" && status !== "preparing" && status !== "confirmed" && <div className="mt-5 space-y-3 rounded-xl border border-lime-300/20 bg-lime-300/[.04] p-4" aria-label="Review send details"><p className="text-sm font-semibold text-white">Review send details</p><dl className="grid gap-3 text-xs sm:grid-cols-2"><div><dt className="text-slate-500">Recipient</dt><dd className="mt-1 break-all font-mono text-slate-200">{recipient}</dd></div><div><dt className="text-slate-500">Amount</dt><dd className="mt-1 text-slate-200">{amount} USDC</dd></div><div><dt className="text-slate-500">Network</dt><dd className="mt-1 text-slate-200">Arc Testnet</dd></div><div><dt className="text-slate-500">Estimated fee</dt><dd className="mt-1 text-slate-200">{gasCost === null ? "Unavailable" : `${formatUnits(gasCost, 18)} native USDC`}</dd></div></dl><SlideToConfirm label="Slide to send" confirmationKey={`${address?.toLowerCase() ?? ""}:${chainId ?? ""}:${recipient.toLowerCase()}:${amount}:${gasCost?.toString() ?? ""}`} phase={status === "confirmation" ? "submitting" : status === "pending" ? "pending" : status === "rejected" ? "rejected" : status === "failed" ? "failed" : "idle"} disabled={Boolean(transactionHash) || submissionUncertain} onConfirm={() => confirm({ asset, recipient: recipient as Address, amount: parseUnits(amount, asset.decimals) })} /><Button variant="secondary" className="w-full" disabled={isBusy || Boolean(transactionHash) || submissionUncertain} onClick={() => { setShowSendReview(false); reset(); }}>Cancel review</Button></div>}</Card>}
     </div>
   );
 }
@@ -4055,7 +4581,7 @@ function ReceivePage() {
       setCopyError("Unable to copy the wallet address. Select and copy it manually.");
     }
   };
-  return <div className="mx-auto max-w-3xl space-y-6"><PageTitle label="Move / Receive" title="Fund your wallet." /><div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />Arc Testnet / USDC</div>{!isConnected || !address ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to display your Arc Testnet receiving address.</p><WalletButton className="mt-7" /></Card> : <Card className="flex flex-col items-center p-8 text-center" glow><div className="flex items-center gap-2 text-sm font-bold text-slate-200"><ChainLogo chainId={arcTestnet.id} className="h-6 w-6" />Arc Testnet</div><Label>Your Arc Testnet wallet address</Label><div className="mt-6 rounded-2xl bg-white p-4"><QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#070a11" includeMargin /></div><p className="mt-6 max-w-lg break-all font-mono text-xs leading-6 text-slate-300">{address}</p><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send real USDC to this connected wallet address on Arc Testnet. The QR and copied value are the wallet address itself.</p>{!isArcTestnet && <Button variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })} className="mt-6">Switch to Arc Testnet</Button>}<Button variant="secondary" onClick={() => void copyAddress()} className="mt-6"><Copy size={15} />{copied ? "Copied" : "Copy address"}</Button>{copyError && <p className="mt-3 text-xs text-rose-300">{copyError}</p>}</Card>}</div>;
+  return <div className="orbit-action-page orbit-receive-page mx-auto max-w-3xl space-y-6"><PageTitle label="Move / Receive" title="Fund your wallet." /><div className="flex items-center gap-2 text-xs font-semibold text-slate-400"><ChainLogo chainId={arcTestnet.id} className="h-5 w-5" />Arc Testnet / USDC</div>{!isConnected || !address ? <Card className="flex flex-col items-center justify-center p-16 text-center" glow><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-300"><Wallet size={28} /></div><h2 className="mt-6 text-2xl font-bold">Connect your wallet</h2><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Connect a wallet to display your Arc Testnet receiving address.</p><WalletButton className="mt-7" /></Card> : <Card className="flex flex-col items-center p-8 text-center" glow><div className="flex items-center gap-2 text-sm font-bold text-slate-200"><ChainLogo chainId={arcTestnet.id} className="h-6 w-6" />Arc Testnet</div><Label>Your Arc Testnet wallet address</Label><div className="mt-6 rounded-2xl bg-white p-4"><QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#070a11" includeMargin /></div><p className="mt-6 max-w-lg break-all font-mono text-xs leading-6 text-slate-300">{address}</p><p className="mt-3 max-w-md text-sm leading-6 text-slate-500">Send real USDC to this connected wallet address on Arc Testnet. The QR and copied value are the wallet address itself.</p>{!isArcTestnet && <Button variant="secondary" onClick={() => switchChain({ chainId: arcTestnet.id })} className="mt-6">Switch to Arc Testnet</Button>}<Button variant="secondary" onClick={() => void copyAddress()} className="mt-6"><Copy size={15} />{copied ? "Copied" : "Copy address"}</Button>{copyError && <p className="mt-3 text-xs text-rose-300">{copyError}</p>}</Card>}</div>;
 }
 function WatchlistPage() {
   const { items, has, toggle, remove } = useWatchlist();
@@ -4826,18 +5352,18 @@ function ActivityPage() {
               </div>
             ) : (
               <>
-                <div className="grid gap-0 xl:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.72fr)]">
+                <div className="min-w-0">
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[980px] table-fixed text-left xl:min-w-0">
                       <thead className="border-b border-white/[.06] font-mono text-[9px] uppercase tracking-widest text-slate-600">
                         <tr>
                           <th className="w-[10%] px-3 py-3 text-left">Type</th>
-                          <th className="w-[18%] min-w-[150px] px-3 py-3 text-left">Tx Hash</th>
-                          <th className="w-[12%] min-w-[110px] px-3 py-3 text-left">From</th>
-                          <th className="w-[12%] min-w-[110px] px-3 py-3 text-left">To</th>
-                          <th className="w-[12%] min-w-[110px] px-3 py-3 text-left">Value</th>
-                          <th className="w-[12%] px-3 py-3 text-left">Status</th>
-                          <th className="w-[14%] min-w-[130px] px-3 py-3 text-left">Time</th>
+                          <th className="w-[16%] min-w-[150px] px-3 py-3 text-left">Tx Hash</th>
+                          <th className="w-[14%] min-w-[110px] px-3 py-3 text-left">From</th>
+                          <th className="w-[14%] min-w-[110px] px-3 py-3 text-left">To</th>
+                          <th className="w-[18%] min-w-[110px] px-3 py-3 text-left">Value</th>
+                          <th className="w-[10%] px-3 py-3 text-left">Status</th>
+                          <th className="w-[18%] min-w-[130px] px-3 py-3 text-left">Time</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/[.05]">
@@ -4896,8 +5422,8 @@ function ActivityPage() {
                                 </span>
                               </td>
                               <td className="overflow-hidden px-3 py-4 align-top text-slate-500">
-                                <span className="block text-[11px]">{getTimeAgo(tx.timestamp)}</span>
-                                {tx.timestamp ? <span className="mt-1 block text-[10px] text-slate-500">{formatTransactionDate(tx.timestamp)}</span> : null}
+                                <span className="block whitespace-nowrap text-[11px]">{getTimeAgo(tx.timestamp)}</span>
+                                {tx.timestamp ? <span className="mt-1 block whitespace-nowrap text-[10px] text-slate-500">{formatTransactionDate(tx.timestamp)}</span> : null}
                               </td>
                             </tr>
                           );
@@ -4907,7 +5433,7 @@ function ActivityPage() {
                   </div>
 
                   {selectedTx && (
-                    <aside className="border-t border-white/[.06] bg-slate-950/60 p-5 xl:border-l xl:border-t-0">
+                    <aside className="border-t border-white/[.06] bg-slate-950/60 p-5 sm:p-6">
                       <Label>Transaction details</Label>
                       <div className="mt-4 space-y-4">
                         <div className="flex items-center justify-between gap-3">
@@ -4917,61 +5443,62 @@ function ActivityPage() {
                           </span>
                         </div>
 
-                        <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Hash</p>
-                            <button
-                              type="button"
-                              onClick={() => void handleCopyText(selectedTx.hash)}
-                              className="inline-flex items-center gap-1 text-[10px] text-cyan-300"
-                              title="Copy transaction hash"
-                            >
-                              {copiedHash === selectedTx.hash ? 'Copied' : 'Copy'} <Copy size={11} />
-                            </button>
+                        <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                          <div className="min-w-0 rounded-xl border border-white/10 bg-white/[.02] p-3 xl:col-span-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Hash</p>
+                              <button
+                                type="button"
+                                onClick={() => void handleCopyText(selectedTx.hash)}
+                                className="inline-flex items-center gap-1 text-[10px] text-cyan-300"
+                                title="Copy transaction hash"
+                              >
+                                {copiedHash === selectedTx.hash ? 'Copied' : 'Copy'} <Copy size={11} />
+                              </button>
+                            </div>
+                            <div className="mt-2 flex items-center gap-2">
+                              <a href={explorerTxUrl(selectedTx.hash, chainId)} target="_blank" rel="noopener noreferrer" title={selectedTx.hash} className="min-w-0 flex-1 truncate text-sm text-cyan-300 hover:text-cyan-200">
+                                {`${selectedTx.hash.slice(0, 8)}...${selectedTx.hash.slice(-6)}`}
+                              </a>
+                              <a href={explorerTxUrl(selectedTx.hash, chainId)} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-slate-200" aria-label="View transaction on block explorer">
+                                <ExternalLink size={14} />
+                              </a>
+                            </div>
                           </div>
-                          <div className="mt-2 flex items-center gap-2">
-                            <a href={explorerTxUrl(selectedTx.hash, chainId)} target="_blank" rel="noopener noreferrer" title={selectedTx.hash} className="min-w-0 flex-1 truncate text-sm text-cyan-300 hover:text-cyan-200">
-                              {`${selectedTx.hash.slice(0, 8)}...${selectedTx.hash.slice(-6)}`}
-                            </a>
-                            <a href={explorerTxUrl(selectedTx.hash, chainId)} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-slate-200" aria-label="View transaction on block explorer">
-                              <ExternalLink size={14} />
-                            </a>
-                          </div>
-                        </div>
-
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+                          <div className="min-w-0 rounded-xl border border-white/10 bg-white/[.02] p-3">
                             <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Block</p>
-                            <p className="mt-2 text-sm font-semibold text-slate-200">
+                            <p className="mt-2 whitespace-nowrap text-sm font-semibold text-slate-200">
                               {selectedTx.blockNumber !== null ? `#${selectedTx.blockNumber}` : selectedTx.status === 'pending' ? 'Pending' : 'Not mined'}
                             </p>
                           </div>
-                          <div className="rounded-xl border border-white/10 bg-white/[.02] p-3">
+                          <div className="min-w-0 rounded-xl border border-white/10 bg-white/[.02] p-3">
                             <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Time</p>
-                            <p className="mt-2 text-sm font-semibold text-slate-200">
+                            <p className="mt-2 whitespace-nowrap text-xs font-semibold text-slate-200 sm:text-sm">
                               {formatTransactionDate(selectedTx.timestamp)}
+                            </p>
+                          </div>
+                          <div className="min-w-0 rounded-xl border border-white/10 bg-white/[.02] p-3">
+                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Value</p>
+                            <p className="mt-2 truncate font-mono text-sm text-slate-300" title={formatTxValue(selectedTx.value, selectedTx.nativeSymbol)}>
+                              {formatTxValue(selectedTx.value, selectedTx.nativeSymbol)}
                             </p>
                           </div>
                         </div>
 
-                        <div className="space-y-3 text-sm">
-                          <div>
+                        <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                          <div className="min-w-0 rounded-xl border border-white/10 bg-white/[.02] p-3">
                             <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">From</p>
                             <div className="mt-1 flex items-center gap-2">
                               <span title={selectedTx.from} className="min-w-0 flex-1 truncate font-mono text-slate-300">{shortAddr(selectedTx.from)}</span>
                               <button type="button" onClick={() => void handleCopyText(selectedTx.from)} className="text-slate-400 hover:text-slate-200" title="Copy address"><Copy size={12} /></button>
                             </div>
                           </div>
-                          <div>
+                          <div className="min-w-0 rounded-xl border border-white/10 bg-white/[.02] p-3">
                             <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">To</p>
                             <div className="mt-1 flex items-center gap-2">
                               <span title={selectedTx.to} className="min-w-0 flex-1 truncate font-mono text-slate-300">{shortAddr(selectedTx.to)}</span>
                               <button type="button" onClick={() => void handleCopyText(selectedTx.to)} className="text-slate-400 hover:text-slate-200" title="Copy address"><Copy size={12} /></button>
                             </div>
-                          </div>
-                          <div>
-                            <p className="font-mono text-[9px] uppercase tracking-[.14em] text-slate-500">Value</p>
-                            <p className="mt-1 font-mono text-slate-300">{formatTxValue(selectedTx.value, selectedTx.nativeSymbol)}</p>
                           </div>
                         </div>
 
@@ -5129,7 +5656,11 @@ function Dashboard({
                 {page === "home" && <Home setPage={setPage} />}
                 {page === "portfolio" && <Portfolio />}
                 {page === "settings" && <SettingsPage />}
-                {page === "security" && <SecurityCenter />}
+                {page === "security" && (
+                  <SecurityCenter
+                    onManageApprovals={() => setPage(getSecurityNavigationTarget('manage-approvals'))}
+                  />
+                )}
                 {page === "approvals" && <Approvals />}
                 {page === "discover" && <Discover />}
                 {page === "watchlist" && <WatchlistPage />}
@@ -5139,7 +5670,11 @@ function Dashboard({
                 {page === "arc-pay" && <ArcPayPage onPay={(request) => { setPaymentRequest(request); setPage("send"); }} />}
                 {page === "bridge" && <ActionPage type="bridge" />}
                 {page === "swap" && <ArcSwapPage />}
-                {page === "unified-balance" && <UnifiedBalancePage />}
+                {page === "unified-balance" && (
+                  <div className="orbit-unified-balance">
+                    <UnifiedBalancePage />
+                  </div>
+                )}
                 {page === "about" && <AboutPage />}
               </motion.div>
             </AnimatePresence>

@@ -1,14 +1,29 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Blockchain, type BridgeEstimateResult } from '@circle-fin/bridge-kit';
 import { ARC_PRIMARY_NETWORK, ARBITRUM_SEPOLIA, AVALANCHE_FUJI, BASE_SEPOLIA, ETHEREUM_SEPOLIA, OP_SEPOLIA, POLYGON_AMOY, getOrbitNetwork } from '../../data/networks';
-import { FORWARDING_RECONCILIATION_INTERVAL_MS } from '../../hooks/useBridgeExecution';
 import { isDestinationGasReady } from '../../hooks/useBridgeQuote';
-import { calculateForwardedDestinationAmount, calculateForwardingQuoteAmounts, createCircleEstimatedBridgeQuote, createCircleForwardingParams, forwardingRouteLabel, getCircleEstimateFeeTotal, getCircleForwardingApprovalAmount, getCircleForwardingApprovalTarget, getCircleForwardingConfig, getForwardingFailureDetail, getForwardingPollRetryDelay, getForwardingStatusOutcome, getForwardingTerminalError, getWalletRequestDiagnostic, isAuthoritativeForwardingSuccess, isCircleForwardingSourceFeeSupported, isCircleForwardingSupported, isFastArcSepoliaForwarding, isForwardingDeliveryReady, isForwardingPendingResult, isForwardingRetryableResult, isStandardCctpSupported, selectCircleBridgeRoute, verifyCircleForwardingResult } from './circleForwarding';
+import { calculateForwardedDestinationAmount, calculateForwardingQuoteAmounts, createCircleEstimatedBridgeQuote, createCircleForwardingParams, forwardingRouteLabel, getCircleEstimateFeeTotal, getCircleForwardingApprovalAmount, getCircleForwardingApprovalTarget, getCircleForwardingConfig, getForwardingFailureDetail, getForwardingPollRetryDelay, getForwardingStatusOutcome, getForwardingTerminalError, getWalletRequestDiagnostic, isAuthoritativeForwardingSuccess, isCircleForwardingMessageValid, isCircleForwardingSourceFeeSupported, isCircleForwardingSupported, isFastArcSepoliaForwarding, isForwardingDeliveryReady, isForwardingPendingResult, isForwardingRetryableResult, isStandardCctpSupported, pollCircleForwardingStatus, selectCircleBridgeRoute, selectCircleExecutionRoute, verifyCircleForwardingResult, withWalletRequestDiagnostics } from './circleForwarding';
 import type { BridgeQuote } from '../../types/bridge';
+import type { EIP1193Provider } from 'viem';
+
+const { fetchAttestationMock } = vi.hoisted(() => ({ fetchAttestationMock: vi.fn() }));
+vi.mock('@circle-fin/provider-cctp-v2', () => ({
+  CCTPV2BridgingProvider: class {
+    fetchAttestation = fetchAttestationMock;
+  },
+}));
 
 const source = ARC_PRIMARY_NETWORK.id;
 const recipient = '0x0000000000000000000000000000000000000002' as const;
+const walletB = '0x0000000000000000000000000000000000000003' as const;
+const sourceAddress = '0x0000000000000000000000000000000000000001' as const;
+const circleBridgeAddress = '0xc5567a5e3370d4dbfb0540025078e283e36a363d';
+const forwardingNonce = `0x${'0'.repeat(63)}1`;
+const sourceHash = `0x${'a'.repeat(64)}` as const;
 const supportedNetworks = [ARC_PRIMARY_NETWORK, ETHEREUM_SEPOLIA, BASE_SEPOLIA, ARBITRUM_SEPOLIA, OP_SEPOLIA, AVALANCHE_FUJI, POLYGON_AMOY];
+const supportedRoutes = supportedNetworks.flatMap((from) => supportedNetworks
+  .filter((to) => to.id !== from.id)
+  .map((to) => [from, to] as const));
 const sdkNames = new Map([
   [ARC_PRIMARY_NETWORK.id, 'Arc_Testnet'],
   [ETHEREUM_SEPOLIA.id, 'Ethereum_Sepolia'],
@@ -40,10 +55,106 @@ const quote: BridgeQuote = {
   raw: {},
 };
 
-function sdkEstimate(fees: BridgeEstimateResult['fees'] = []): BridgeEstimateResult {
+beforeEach(() => {
+  fetchAttestationMock.mockReset();
+  vi.stubGlobal('window', { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+});
+
+describe('Circle forwarding status polling', () => {
+  it('persists an observed approval hash before a later BridgeKit request fails', async () => {
+    const approvalHash = `0x${'c'.repeat(64)}`;
+    const provider = {
+      request: vi.fn(async (args: { method: string; params?: unknown[] }) => {
+        const transaction = args.params?.[0] as { data?: string } | undefined;
+        if (args.method === 'eth_sendTransaction' && transaction?.data === '0x095ea7b3') return approvalHash;
+        throw new Error('partial BridgeKit execution failure');
+      }),
+    } as unknown as EIP1193Provider;
+    const onHash = vi.fn();
+    const instrumented = withWalletRequestDiagnostics(provider, undefined, undefined, onHash);
+
+    await expect((async () => {
+      await instrumented.request({
+        method: 'eth_sendTransaction',
+        params: [{ to: recipient, data: '0x095ea7b3' }],
+      } as never);
+      await instrumented.request({ method: 'eth_sendTransaction', params: [] } as never);
+    })()).rejects.toThrow('partial BridgeKit execution failure');
+
+    expect(onHash).toHaveBeenCalledWith(
+      approvalHash,
+      'eth_sendTransaction',
+      [{ to: recipient, data: '0x095ea7b3' }],
+    );
+  });
+
+  it.each([
+    ['pending relay', { forwardState: 'PENDING', status: 'complete', message: '0x1234', eventNonce: forwardingNonce, attestation: '0x5678', decodedMessage: {} }],
+    ['completed relay', { forwardState: 'COMPLETE', forwardTxHash: `0x${'b'.repeat(64)}`, status: 'complete', message: '0x1234', eventNonce: forwardingNonce, attestation: '0x5678', decodedMessage: {} }],
+  ])('returns the Circle %s response with a read-only SDK context', async (_label, response) => {
+    fetchAttestationMock.mockResolvedValueOnce(response);
+
+    await expect(pollCircleForwardingStatus({ sourceChainId: source, sourceHash, recipient }))
+      .resolves.toBe(response);
+
+    const [context, requestedHash, pollingConfig] = fetchAttestationMock.mock.calls[0];
+    expect(context).toMatchObject({
+      address: recipient,
+      chain: { chain: 'Arc_Testnet' },
+      adapter: {
+        prepare: expect.any(Function),
+        waitForTransaction: expect.any(Function),
+      },
+    });
+    expect(requestedHash).toBe(sourceHash);
+    expect(pollingConfig).toEqual({ timeout: 8_000, maxRetries: 1, retryDelay: 1_000 });
+    await expect(context.adapter.prepare()).rejects.toThrow('cannot prepare wallet transactions');
+    await expect(context.adapter.waitForTransaction()).rejects.toThrow('cannot wait for wallet transactions');
+  });
+
+  it('surfaces Circle status RPC failures instead of returning a success-shaped response', async () => {
+    fetchAttestationMock.mockRejectedValueOnce(new Error('Circle status RPC unavailable'));
+
+    await expect(pollCircleForwardingStatus({ sourceChainId: source, sourceHash, recipient }))
+      .rejects.toThrow('Circle status RPC unavailable');
+  });
+});
+
+function forwardingStatus(
+  sourceChainId: number,
+  destinationChainId: number,
+  mintRecipient: string = recipient,
+  messageSender: string = circleBridgeAddress,
+  amount = '1000000',
+  feeExecuted = '1000',
+) {
+  const sourceNetwork = getOrbitNetwork(sourceChainId)!;
+  const destinationNetwork = getOrbitNetwork(destinationChainId)!;
+  return {
+    forwardState: 'CONFIRMED' as const,
+    forwardTxHash: '0x' + 'b'.repeat(64),
+    eventNonce: forwardingNonce,
+    decodedMessage: {
+      sourceDomain: String(sourceNetwork.cctpDomain),
+      destinationDomain: String(destinationNetwork.cctpDomain),
+      nonce: forwardingNonce,
+      sender: sourceNetwork.tokenMessengerV2,
+      recipient: destinationNetwork.tokenMessengerV2,
+      decodedMessageBody: {
+        burnToken: sourceNetwork.usdc,
+        mintRecipient,
+        amount,
+        feeExecuted,
+        messageSender,
+      },
+    },
+  };
+}
+
+function sdkEstimate(fees: BridgeEstimateResult['fees'] = [], amount = '5'): BridgeEstimateResult {
   return {
     token: 'USDC',
-    amount: '5',
+    amount,
     source: { address: recipient, chain: Blockchain.Arc_Testnet },
     destination: { address: recipient, chain: Blockchain.Ethereum_Sepolia, recipientAddress: recipient },
     fees,
@@ -56,8 +167,21 @@ function sdkEstimate(fees: BridgeEstimateResult['fees'] = []): BridgeEstimateRes
 }
 
 describe('BridgeKit forwarding parameters', () => {
-  it('uses a 1 second forwarding reconciliation interval', () => {
-    expect(FORWARDING_RECONCILIATION_INTERVAL_MS).toBe(1_000);
+  it('keeps Base Sepolia and Ethereum Sepolia on their distinct Circle domains and USDC contracts', () => {
+    const ethereum = getOrbitNetwork(ETHEREUM_SEPOLIA.id)!;
+    const base = getOrbitNetwork(BASE_SEPOLIA.id)!;
+
+    expect(ethereum).toMatchObject({
+      cctpDomain: 0,
+      usdc: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+      messageTransmitterV2: '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275',
+    });
+    expect(base).toMatchObject({
+      cctpDomain: 6,
+      usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+      messageTransmitterV2: '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275',
+    });
+    expect(ethereum.usdc).not.toBe(base.usdc);
   });
 
   it('redacts wallet diagnostics to safe request metadata', () => {
@@ -177,6 +301,32 @@ describe('Circle forwarding route capability', () => {
         feeAmount: 150_000n,
       });
     });
+
+    it('uses the fee returned for each Arc to Ethereum Sepolia amount-specific estimate', () => {
+      const fiveUsdcQuote = createCircleEstimatedBridgeQuote(
+        quote,
+        sdkEstimate([{ type: 'forwarder', token: 'USDC', amount: '1.646653' }]),
+        'forwarding',
+        recipient,
+      );
+      const tenUsdcQuote = createCircleEstimatedBridgeQuote(
+        { ...quote, fromAmount: 10_000_000n },
+        sdkEstimate([{ type: 'forwarder', token: 'USDC', amount: '1.25' }], '10'),
+        'forwarding',
+        recipient,
+      );
+
+      expect(fiveUsdcQuote.feeAmount).toBe(1_646_653n);
+      expect(tenUsdcQuote.feeAmount).toBe(1_250_000n);
+      expect(fiveUsdcQuote.toAmount).toBe(3_353_347n);
+      expect(tenUsdcQuote.toAmount).toBe(8_750_000n);
+      expect(() => createCircleEstimatedBridgeQuote(
+        { ...quote, fromAmount: 10_000_000n },
+        sdkEstimate([{ type: 'forwarder', token: 'USDC', amount: '1.25' }]),
+        'forwarding',
+        recipient,
+      )).toThrow('Circle estimate amount does not match');
+    });
   });
 
   it('selects only supported routes and chooses the lower fresh Circle fee, preferring forwarding on a tie', () => {
@@ -190,6 +340,54 @@ describe('Circle forwarding route capability', () => {
     expect(selectCircleBridgeRoute({ forwardingSupported: false, standardCctpSupported: true, standardCctpFeeAmount: 0n })).toBe('cctp');
     expect(() => selectCircleBridgeRoute({ forwardingSupported: false, standardCctpSupported: false })).toThrow('no supported route');
     expect(() => selectCircleBridgeRoute({ forwardingSupported: true, standardCctpSupported: true })).toThrow('fresh estimate');
+  });
+
+  it.each([ETHEREUM_SEPOLIA, BASE_SEPOLIA])('uses relayed destination execution by default for Arc to %s when Circle forwarding is available', (destination) => {
+    expect(isCircleForwardingSupported(source, destination.id)).toBe(true);
+    expect(selectCircleExecutionRoute({
+      preferredRoute: 'auto',
+      recommendedRoute: 'cctp',
+      forwardingSupported: true,
+    })).toBe('forwarding');
+    const adapter = {} as Parameters<typeof createCircleForwardingParams>[1];
+    expect(createCircleForwardingParams({
+      sourceChainId: source,
+      destinationChainId: destination.id,
+      recipient,
+      amount: 1_000_000n,
+    }, adapter).to.useForwarder).toBe(true);
+  });
+
+  it('keeps Standard CCTP only when explicitly selected or forwarding is unavailable', () => {
+    expect(selectCircleExecutionRoute({
+      preferredRoute: 'cctp',
+      recommendedRoute: 'forwarding',
+      forwardingSupported: true,
+    })).toBe('cctp');
+    expect(selectCircleExecutionRoute({
+      preferredRoute: 'auto',
+      recommendedRoute: 'cctp',
+      forwardingSupported: false,
+    })).toBe('cctp');
+  });
+
+  it.each(supportedRoutes)('selects the supported Circle delivery model for %s → %s', (from, to) => {
+    const forwardingSupported = isCircleForwardingSupported(from.id, to.id);
+    expect(isStandardCctpSupported(from.id, to.id)).toBe(true);
+    expect(selectCircleExecutionRoute({
+      preferredRoute: 'auto',
+      recommendedRoute: 'cctp',
+      forwardingSupported,
+    })).toBe(forwardingSupported ? 'forwarding' : 'cctp');
+    if (forwardingSupported) {
+      const adapter = {} as Parameters<typeof createCircleForwardingParams>[1];
+      expect(createCircleForwardingParams({
+        sourceChainId: from.id,
+        destinationChainId: to.id,
+        recipient,
+        amount: 1_000_000n,
+      }, adapter).to).toMatchObject({ useForwarder: true });
+    }
   });
 
   it.each([ETHEREUM_SEPOLIA, BASE_SEPOLIA, ARBITRUM_SEPOLIA])('enables forwarding to %s', (destination) => {
@@ -262,36 +460,38 @@ describe('Circle forwarding route capability', () => {
     ['PROCESSING', undefined, false],
     ['SENT', undefined, false],
     ['UNKNOWN', undefined, false],
-    ['CONFIRMED', undefined, true],
+    ['CONFIRMED', undefined, false],
     ['CONFIRMED', '0xdestination', true],
-    ['COMPLETE', undefined, true],
+    ['COMPLETE', undefined, false],
     ['COMPLETE', '0xdestination', true],
   ])('classifies %s forwarding state with hash %s correctly', (forwardState, forwardTxHash, expected) => {
     expect(isForwardingDeliveryReady({ forwardState, forwardTxHash })).toBe(expected);
   });
 
-  it('uses Circle state or a destination tx hash as the authoritative forwarding result without a receipt', () => {
-    expect(isAuthoritativeForwardingSuccess({ forwardState: 'CONFIRMED' })).toBe(true);
-    expect(isAuthoritativeForwardingSuccess({ forwardState: 'COMPLETE' })).toBe(true);
+  it('requires a confirmed Circle state and destination hash before attempting receipt verification', () => {
+    expect(isAuthoritativeForwardingSuccess({ forwardState: 'CONFIRMED' })).toBe(false);
+    expect(isAuthoritativeForwardingSuccess({ forwardState: 'COMPLETE' })).toBe(false);
     expect(isAuthoritativeForwardingSuccess({ forwardState: 'PENDING' })).toBe(false);
     expect(isAuthoritativeForwardingSuccess({ forwardState: 'FAILED' })).toBe(false);
-    expect(isAuthoritativeForwardingSuccess({ forwardState: 'PENDING', forwardTxHash: '0xdestination' })).toBe(true);
+    expect(isAuthoritativeForwardingSuccess({ forwardState: 'PENDING', forwardTxHash: '0xdestination' })).toBe(false);
+    expect(isAuthoritativeForwardingSuccess({ forwardState: 'CONFIRMED', forwardTxHash: '0xdestination' })).toBe(true);
   });
 
   it.each([
     ['PENDING', 'pending'],
     ['PROCESSING', 'pending'],
     ['UNKNOWN', 'pending'],
-    ['CONFIRMED', 'completed'],
-    ['COMPLETE', 'completed'],
+    ['CONFIRMED', 'pending'],
+    ['COMPLETE', 'pending'],
     ['FAILED', 'failed'],
   ] as const)('maps %s to %s without destination metadata', (state, outcome) => {
     expect(getForwardingStatusOutcome(state)).toBe(outcome);
   });
 
-  it('treats a destination tx hash as completed even when Circle omits the final forward state', () => {
-    expect(getForwardingStatusOutcome(undefined, '0xdestination')).toBe('completed');
-    expect(isAuthoritativeForwardingSuccess({ forwardState: undefined, forwardTxHash: '0xdestination' })).toBe(true);
+  it('requires Circle confirmation together with the destination hash', () => {
+    expect(getForwardingStatusOutcome(undefined, '0xdestination')).toBe('pending');
+    expect(getForwardingStatusOutcome('COMPLETE', '0xdestination')).toBe('completed');
+    expect(isAuthoritativeForwardingSuccess({ forwardState: undefined, forwardTxHash: '0xdestination' })).toBe(false);
   });
 
   it('surfaces forwarder failure metadata', () => {
@@ -299,44 +499,149 @@ describe('Circle forwarding route capability', () => {
     expect(getForwardingTerminalError({ forwardState: 'PENDING' })).toBeUndefined();
   });
 
+  it('validates the configured Circle bridge sender, domains, USDC token, amount and encoded recipient', () => {
+    const forwarding = forwardingStatus(source, BASE_SEPOLIA.id);
+    const input = {
+      sourceChainId: source,
+      destinationChainId: BASE_SEPOLIA.id,
+      sourceAddress,
+      recipient,
+      expectedNetAmount: 999_000n,
+    };
+    expect(isCircleForwardingMessageValid({ ...input, forwarding })).toBe(true);
+    expect(isCircleForwardingMessageValid({
+      ...input,
+      forwarding: forwardingStatus(source, BASE_SEPOLIA.id, recipient, sourceAddress),
+    })).toBe(false);
+    expect(isCircleForwardingMessageValid({
+      ...input,
+      forwarding: forwardingStatus(source, BASE_SEPOLIA.id, walletB),
+    })).toBe(false);
+    expect(isCircleForwardingMessageValid({
+      ...input,
+      forwarding: forwardingStatus(source, ETHEREUM_SEPOLIA.id),
+    })).toBe(false);
+    expect(isCircleForwardingMessageValid({
+      ...input,
+      forwarding: forwardingStatus(source, BASE_SEPOLIA.id, recipient, circleBridgeAddress, '1000000', '2000'),
+    })).toBe(false);
+  });
+
+  it('accepts the completed Arc-to-Base transfer using Circle Bridge Kit message structure', () => {
+    const sourceWallet = '0xbccb7750de26b1a1ac3a18ce08be01ecd4094c6c' as const;
+    const sourceTxHash = '0x73f974fca9ed3f9a96db7da90f4b01915c4aa7e347d933be8df7902f99adfdef';
+    const destinationTxHash = '0x9f5e102c713cfb86b7a4f0d8a8ecbcdbe5f2283904400959f1227a028187e341';
+    const nonce = '0xa26c0e25d7311d0019ed6fccedff2e2039d853cb881ae2184ab7e06b0a4eb9ba';
+    const forwarding = {
+      forwardState: 'COMPLETE',
+      forwardTxHash: destinationTxHash,
+      eventNonce: nonce,
+      decodedMessage: {
+        sourceDomain: '26',
+        destinationDomain: '6',
+        nonce,
+        sender: '0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa',
+        recipient: '0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa',
+        decodedMessageBody: {
+          burnToken: '0x3600000000000000000000000000000000000000',
+          mintRecipient: sourceWallet,
+          amount: '3000000',
+          feeExecuted: '53929',
+          messageSender: circleBridgeAddress,
+        },
+      },
+    } as const;
+    const input = {
+      sourceChainId: source,
+      destinationChainId: BASE_SEPOLIA.id,
+      sourceAddress: sourceWallet,
+      recipient: sourceWallet,
+      expectedNetAmount: 2_946_071n,
+    };
+    const result = {
+      state: 'pending' as const,
+      source: { address: sourceWallet, chain: { chain: 'Arc_Testnet' } },
+      destination: { address: sourceWallet, chain: { chain: 'Base_Sepolia' } },
+      steps: [{ name: 'burn', state: 'success' as const, txHash: sourceTxHash }],
+    } as never;
+
+    expect(isCircleForwardingMessageValid({ ...input, forwarding })).toBe(true);
+    expect(verifyCircleForwardingResult({ ...input, result, forwarding })).toBe(true);
+    expect(isCircleForwardingMessageValid({
+      ...input,
+      forwarding: { ...forwarding, decodedMessage: { ...forwarding.decodedMessage, decodedMessageBody: { ...forwarding.decodedMessage.decodedMessageBody, messageSender: sourceWallet } } },
+    })).toBe(false);
+  });
+
   it('accepts authoritative forwarder completion without a destination tx hash', () => {
-    const recipient = '0x0000000000000000000000000000000000000002' as const;
     const result = {
       state: 'success' as const,
-      source: { address: '0x0000000000000000000000000000000000000001', chain: { chain: 'Arc_Testnet' } },
+      source: { address: sourceAddress, chain: { chain: 'Arc_Testnet' } },
       destination: { address: recipient, chain: { chain: 'Avalanche_Fuji' } },
       steps: [{ name: 'burn', state: 'success' as const, txHash: '0xsource' }, { name: 'mint', state: 'success' as const, forwarded: true }],
     } as never;
-    expect(verifyCircleForwardingResult({ result, sourceChainId: source, destinationChainId: 43113, recipient, expectedNetAmount: 999_000n })).toBe(true);
+    expect(verifyCircleForwardingResult({
+      result,
+      sourceChainId: source,
+      destinationChainId: 43113,
+      sourceAddress,
+      recipient,
+      expectedNetAmount: 999_000n,
+      forwarding: forwardingStatus(source, 43113),
+    })).toBe(true);
   });
 
   it('accepts authoritative IRIS completion without requiring mint step data', () => {
     const result = {
       state: 'error' as const,
-      source: { address: '0x0000000000000000000000000000000000000001', chain: { chain: 'Ethereum_Sepolia' } },
+      source: { address: sourceAddress, chain: { chain: 'Ethereum_Sepolia' } },
       destination: { address: recipient, chain: { chain: 'Arc_Testnet' } },
       steps: [{ name: 'burn', state: 'success' as const, txHash: '0xsource' }, { name: 'fetchAttestation', state: 'error' as const, errorMessage: 'incomplete while polling' }],
     } as never;
-    expect(verifyCircleForwardingResult({ result, sourceChainId: ETHEREUM_SEPOLIA.id, destinationChainId: source, recipient, expectedNetAmount: 999_000n, forwarding: { forwardState: 'COMPLETE' } })).toBe(true);
+    expect(verifyCircleForwardingResult({
+      result,
+      sourceChainId: ETHEREUM_SEPOLIA.id,
+      destinationChainId: source,
+      sourceAddress,
+      recipient,
+      expectedNetAmount: 999_000n,
+      forwarding: forwardingStatus(ETHEREUM_SEPOLIA.id, source),
+    })).toBe(true);
   });
 
   it('accepts CONFIRMED forwarding with a destination transaction hash', () => {
     const result = {
       state: 'pending' as const,
-      source: { address: '0x0000000000000000000000000000000000000001', chain: { chain: 'Arc_Testnet' } },
+      source: { address: sourceAddress, chain: { chain: 'Arc_Testnet' } },
       destination: { address: recipient, chain: { chain: 'Ethereum_Sepolia' } },
       steps: [{ name: 'burn', state: 'success' as const, txHash: '0xsource' }],
     } as never;
-    expect(verifyCircleForwardingResult({ result, sourceChainId: source, destinationChainId: ETHEREUM_SEPOLIA.id, recipient, expectedNetAmount: 99_000n, forwarding: { forwardState: 'CONFIRMED', forwardTxHash: '0xdestination' } })).toBe(true);
+    expect(verifyCircleForwardingResult({
+      result,
+      sourceChainId: source,
+      destinationChainId: ETHEREUM_SEPOLIA.id,
+      sourceAddress,
+      recipient,
+      expectedNetAmount: 999_000n,
+      forwarding: forwardingStatus(source, ETHEREUM_SEPOLIA.id),
+    })).toBe(true);
   });
 
   it('treats CONFIRMED forwarding as complete even when Bridge Kit result remains pending and has no hash', () => {
     const result = {
       state: 'pending' as const,
-      source: { address: '0x0000000000000000000000000000000000000001', chain: { chain: 'Arc_Testnet' } },
+      source: { address: sourceAddress, chain: { chain: 'Arc_Testnet' } },
       destination: { address: recipient, chain: { chain: 'Ethereum_Sepolia' } },
       steps: [{ name: 'burn', state: 'success' as const, txHash: '0xsource' }],
     } as never;
-    expect(verifyCircleForwardingResult({ result, sourceChainId: source, destinationChainId: ETHEREUM_SEPOLIA.id, recipient, expectedNetAmount: 99_000n, forwarding: { forwardState: 'CONFIRMED' } })).toBe(true);
+    expect(verifyCircleForwardingResult({
+      result,
+      sourceChainId: source,
+      destinationChainId: ETHEREUM_SEPOLIA.id,
+      sourceAddress,
+      recipient,
+      expectedNetAmount: 999_000n,
+      forwarding: forwardingStatus(source, ETHEREUM_SEPOLIA.id),
+    })).toBe(true);
   });
 });

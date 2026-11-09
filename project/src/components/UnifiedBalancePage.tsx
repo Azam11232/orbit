@@ -11,6 +11,7 @@ import { getPreferredConnector } from '../wallet';
 import { Button, Card, ChainLogo, Label } from './ui';
 import { getInitialTransferDestination, shouldShowFastGatewayDepositOption, updateUnifiedBalanceNetworkState } from './unifiedBalanceNetworkState';
 import { TransactionSuccessScreen } from './TransactionSuccessScreen';
+import { SlideToConfirm } from './SlideToConfirm';
 
 const ARC_ID = 5042002;
 
@@ -31,6 +32,8 @@ export function UnifiedBalancePage() {
   const { depositSourceId, transferSourceId, transferDestinationId: destinationId } = networkSelection;
   const [depositAmount, setDepositAmount] = useState('');
   const [spendAmount, setSpendAmount] = useState('');
+  const [showDepositReview, setShowDepositReview] = useState(false);
+  const [showSpendReview, setShowSpendReview] = useState(false);
   const gateway = useGateway(depositSourceId, transferSourceId, destinationId);
   const depositSource = getOrbitNetwork(depositSourceId)!;
   const transferSource = getOrbitNetwork(transferSourceId)!;
@@ -42,19 +45,23 @@ export function UnifiedBalancePage() {
   const depositNetworkMismatch = Boolean(isConnected && chainId !== depositSourceId);
   const transferNetworkMismatch = Boolean(isConnected && chainId !== transferSourceId);
   const previousDepositPending = gateway.depositAvailability !== null && gateway.depositAvailability.status !== 'available';
+  const canRetryStandardDeposit = gateway.recoveryStatus['gateway-deposit'] === 'reverted' ||
+    (gateway.depositState === 'failed' && gateway.depositHashStep === 'approval' && gateway.recoveryStatus['gateway-deposit'] === undefined);
+  const canRetryFastDeposit = gateway.recoveryStatus['gateway-fast-deposit'] === 'reverted';
+  const depositRecoveryBlocked = gateway.hasUnresolvedGatewayDepositRecovery;
   const transferRouteValid = isGatewayTransferRouteValid(transferSourceId, destinationId);
   const operationMessage = gateway.error?.message
     ?? (depositNetworkMismatch ? `Switch wallet to ${depositSource.name} before depositing.` : null)
     ?? (transferNetworkMismatch ? `Switch wallet to ${transferSource.name} before transferring.` : null);
-  const gatewayBalanceValue = gateway.isGatewayBalanceLoading
+  const gatewayBalanceValue = gateway.gatewayBalanceStatus === 'loading'
     ? 'Loading...'
-    : gateway.isGatewayBalanceError || !gateway.hasGatewayBalanceData
-      ? 'Unavailable'
+    : gateway.gatewayBalanceStatus === 'unavailable'
+      ? 'Balance unavailable'
       : `${amountLabel(gateway.totalGatewayBalance)} USDC`;
 
   if (!isConnected || !address) {
     return (
-      <div className="mx-auto max-w-5xl space-y-6">
+      <div className="orbit-unified-balance mx-auto max-w-5xl space-y-6">
         <PageHeader />
         <Card className="flex flex-col items-center p-12 text-center" glow>
           <Wallet size={30} className="text-cyan-300" />
@@ -67,7 +74,7 @@ export function UnifiedBalancePage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
+    <div className="orbit-unified-balance mx-auto max-w-6xl space-y-6">
       <PageHeader />
       <Card className="p-6" glow>
         <div className="flex flex-wrap items-end justify-between gap-4">
@@ -79,11 +86,14 @@ export function UnifiedBalancePage() {
           <Button variant="secondary" onClick={() => void gateway.refresh()} disabled={gateway.isRefreshing || gateway.busy}><RefreshCw size={15} className={gateway.isRefreshing ? 'animate-spin' : ''} /> {gateway.isRefreshing ? 'Refreshing...' : 'Refresh'}</Button>
         </div>
         {gateway.refreshError && <p role="alert" className="mt-4 text-sm text-rose-200">Balance refresh failed: {gateway.refreshError.message} Retry using Refresh.</p>}
-        {gateway.isGatewayBalanceError && <p role="alert" className="mt-4 text-sm text-rose-200">Gateway balances unavailable: {gateway.gatewayBalanceError instanceof Error ? gateway.gatewayBalanceError.message : 'Circle Gateway API request failed.'} Retry using Refresh.</p>}
+        {gateway.isGatewayBalanceError && <div role="alert" className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-rose-200">
+          <span>{gateway.gatewayBalanceStatus === 'stale' ? 'Gateway refresh failed; showing the last successfully fetched balances.' : `Gateway balances unavailable: ${gateway.gatewayBalanceError instanceof Error ? gateway.gatewayBalanceError.message : 'Circle Gateway API request failed.'}`}</span>
+          <button type="button" className="font-semibold underline underline-offset-2 disabled:opacity-50" onClick={() => void gateway.refresh()} disabled={gateway.isRefreshing || gateway.busy}>Retry balances</button>
+        </div>}
         {gateway.isWalletBalancesError && <p role="alert" className="mt-4 text-sm text-rose-200">One or more wallet balances could not be refreshed. Retry using Refresh.</p>}
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <div className="orbit-unified-balance-tiles mt-6 grid gap-3 sm:grid-cols-3">
           <BalanceTile label="Available" value={gatewayBalanceValue} detail="Circle Gateway API" />
-          <BalanceTile label="Pending batch" value={gateway.isGatewayBalanceLoading ? 'Loading...' : gateway.isGatewayBalanceError || !gateway.hasGatewayBalanceData ? 'Unavailable' : `${amountLabel(gateway.totalGatewayPendingBatch)} USDC`} detail="Awaiting Circle Gateway batch processing; not available to transfer" />
+          <BalanceTile label="Pending batch" value={gateway.gatewayBalanceStatus === 'loading' ? 'Loading...' : gateway.gatewayBalanceStatus === 'unavailable' ? 'Balance unavailable' : `${amountLabel(gateway.totalGatewayPendingBatch)} USDC`} detail="Awaiting Circle Gateway batch processing; not available to transfer" />
           <BalanceTile label="Gateway balance" value={gatewayBalanceValue} detail="Not added to wallet balances" />
         </div>
       </Card>
@@ -92,11 +102,12 @@ export function UnifiedBalancePage() {
         <Card className="p-5" glow>
           <div className="flex items-center gap-3"><div className="rounded-xl bg-cyan-300/10 p-3 text-cyan-200"><ArrowDownToLine size={19} /></div><div><Label>Fund Gateway</Label><h2 className="mt-1 text-xl font-bold text-white">Deposit USDC</h2></div></div>
           <p className="mt-3 text-sm leading-6 text-slate-400">Move wallet USDC into your Circle Gateway balance. This is separate from CCTP Bridge.</p>
-          <NetworkSelect label="Source network" value={depositSourceId} onChange={(value) => { dispatchNetworkSelection({ type: 'deposit-source', chainId: value }); setDepositAmount(''); gateway.clearFastDepositEstimate(); }} options={gatewayNetworks} />
+          <NetworkSelect label="Source network" value={depositSourceId} onChange={(value) => { dispatchNetworkSelection({ type: 'deposit-source', chainId: value }); setDepositAmount(''); setShowDepositReview(false); gateway.clearFastDepositEstimate(); }} options={gatewayNetworks} />
           <div className="mt-4 flex items-center justify-between text-xs"><span className="text-slate-500">Wallet USDC on {depositSource.name}</span><span className="font-mono text-slate-200">{gateway.sourceBalanceDisplay}</span></div>
-          <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={depositAmount} onChange={(event) => { setDepositAmount(event.target.value); gateway.clearFastDepositEstimate(); }} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-xl font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div>
+          <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={depositAmount} onChange={(event) => { setDepositAmount(event.target.value); setShowDepositReview(false); gateway.clearFastDepositEstimate(); }} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-xl font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div>
           {depositNetworkMismatch && <NetworkGuard network={depositSource.name} onSwitch={() => switchChain({ chainId: depositSourceId })} disabled={isSwitching} />}
-          <Button className="mt-4 w-full" onClick={() => void gateway.deposit(depositAmount)} disabled={gateway.busy || depositNetworkMismatch || !depositAmount || (gateway.depositAvailability !== null && gateway.depositAvailability.status !== 'available')}>{gateway.depositState === 'checking' ? 'Checking Gateway balance...' : gateway.depositState === 'estimating' ? 'Estimating fast deposit...' : gateway.depositState === 'approval' ? 'Approve USDC...' : gateway.depositState === 'deposit' ? 'Confirm Gateway deposit...' : gateway.depositState === 'pending' ? 'Deposit pending...' : gateway.depositState === 'relaying' ? 'Circle is relaying...' : gateway.depositState === 'confirmed' ? 'Deposit confirmed' : gateway.depositAvailability?.status === 'timeout' ? 'Retry Gateway check first' : 'Review standard deposit'}</Button>
+          <Button className="mt-4 w-full" onClick={() => setShowDepositReview(true)} disabled={gateway.busy || depositRecoveryBlocked || depositNetworkMismatch || !depositAmount || (gateway.depositAvailability !== null && gateway.depositAvailability.status !== 'available')}>{gateway.depositState === 'checking' ? 'Checking Gateway balance...' : gateway.depositState === 'estimating' ? 'Estimating fast deposit...' : gateway.depositState === 'approval' ? 'Approve USDC...' : gateway.depositState === 'deposit' ? 'Confirm Gateway deposit...' : gateway.depositState === 'pending' ? 'Deposit pending...' : gateway.depositState === 'relaying' ? 'Circle is relaying...' : gateway.depositState === 'confirmed' ? 'Deposit confirmed' : gateway.depositAvailability?.status === 'timeout' ? 'Retry Gateway check first' : 'Review standard deposit'}</Button>
+          {showDepositReview && <div className="mt-4 space-y-3 rounded-xl border border-lime-300/20 bg-lime-300/[.04] p-4" aria-label="Review Gateway deposit"><p className="text-sm font-semibold text-white">Review standard deposit</p><dl className="grid gap-3 text-xs sm:grid-cols-2"><div><dt className="text-slate-500">Amount</dt><dd className="mt-1 text-slate-200">{depositAmount} USDC</dd></div><div><dt className="text-slate-500">Source network</dt><dd className="mt-1 text-slate-200">{depositSource.name}</dd></div><div><dt className="text-slate-500">Destination</dt><dd className="mt-1 text-slate-200">Circle Gateway balance</dd></div><div><dt className="text-slate-500">Fee estimate</dt><dd className="mt-1 text-slate-200">Not provided by the standard deposit quote</dd></div></dl><p className="text-[11px] leading-5 text-amber-200">The Gateway operation may request a USDC approval before deposit; review each transaction in your wallet. The wallet fee prompt is authoritative.</p><SlideToConfirm label="Slide to deposit" confirmationKey={`${address.toLowerCase()}:${chainId ?? ''}:${depositSourceId}:${depositAmount}`}           phase={gateway.depositState === 'checking' || gateway.depositState === 'estimating' || gateway.depositState === 'approval' || gateway.depositState === 'deposit' ? 'submitting' : gateway.depositState === 'pending' || gateway.depositState === 'relaying' ? 'pending' : gateway.depositState === 'confirmed' ? 'success' : gateway.depositState === 'failed' ? 'failed' : 'idle'} disabled={gateway.busy || depositRecoveryBlocked || depositNetworkMismatch || (gateway.depositState === 'failed' && Boolean(gateway.depositHash) && !canRetryStandardDeposit)} onConfirm={() => gateway.deposit(depositAmount)} /><Button variant="secondary" className="w-full" disabled={gateway.busy || Boolean(gateway.depositHash && gateway.depositState !== 'confirmed' && !canRetryStandardDeposit)} onClick={() => setShowDepositReview(false)}>Cancel review</Button></div>}
           {shouldShowFastGatewayDepositOption(depositSourceId) && <div className="mt-3 rounded-xl border border-cyan-300/15 bg-cyan-300/[.04] p-3">
             <p className="text-xs font-semibold text-cyan-100">Fast Deposit — Ethereum Sepolia to Arc Testnet</p>
             <p className="mt-1 text-[11px] leading-5 text-slate-400">Separate opt-in route: Ethereum Sepolia to Arc Testnet. The Transfer destination selector does not affect this route. Circle returns a live fee and source-gas estimate for review before confirmation.</p>
@@ -105,13 +116,13 @@ export function UnifiedBalancePage() {
                 ? 'A previous deposit is still awaiting Gateway availability. Fast Deposit remains visible, but a new estimate or deposit is disabled until that deposit is resolved.'
                 : `A ${gateway.depositAvailability?.transferSpeed === 'FAST' ? 'Fast' : 'Standard'} deposit is still awaiting Gateway availability. Fast Deposit remains visible, but a new estimate or deposit is disabled until it is resolved.`}
             </p>}
-            {!gateway.fastDepositEstimate ? <Button className="mt-2 w-full" variant="secondary" onClick={() => void gateway.prepareFastDeposit(depositAmount)} disabled={gateway.busy || depositNetworkMismatch || !depositAmount || previousDepositPending}>{previousDepositPending ? 'Fast Deposit unavailable while previous deposit is pending' : 'Get Fast Deposit estimate'}</Button> : <div className="mt-3">
+            {!gateway.fastDepositEstimate ? <Button className="mt-2 w-full" variant="secondary" onClick={() => void gateway.prepareFastDeposit(depositAmount)} disabled={gateway.busy || depositRecoveryBlocked || depositNetworkMismatch || !depositAmount || previousDepositPending}>{previousDepositPending ? 'Fast Deposit unavailable while previous deposit is pending' : 'Get Fast Deposit estimate'}</Button> : <div className="mt-3">
               <p className="text-xs text-slate-300">Destination: <span className="font-semibold text-white">Arc Testnet</span></p>
               <p className="text-xs text-slate-300">Deposit amount: <span className="font-mono text-white">{formatUnits(gateway.fastDepositEstimate.amount, 6)} USDC</span></p>
               <p className="text-[11px] font-semibold text-slate-300">Estimated costs</p>
               <div className="mt-2 space-y-1">{gateway.fastDepositEstimate.estimate.fees.map((fee, index) => <div key={`${fee.type}-${fee.token}-${index}`} className="flex justify-between gap-3 text-[11px]"><span className="text-slate-400">{fee.type} ({fee.token})</span><span className="font-mono text-slate-200">{fee.amount ?? 'Unavailable'} {fee.token}</span></div>)}</div>
               <p className="mt-2 text-[10px] leading-4 text-amber-200">This is an opt-in cross-chain deposit: USDC is burned on Sepolia, then Circle relays a fast mint and Gateway deposit to Arc. A confirmed source transaction does not alone make the funds spendable.</p>
-              <div className="mt-3 flex gap-2"><Button className="flex-1" variant="secondary" onClick={gateway.clearFastDepositEstimate} disabled={gateway.busy}>Cancel</Button><Button className="flex-1" onClick={() => void gateway.confirmFastDeposit(depositAmount)} disabled={gateway.busy || depositNetworkMismatch}>Confirm fast deposit</Button></div>
+              <div className="mt-3 flex flex-col gap-2"><Button className="w-full" variant="secondary" onClick={gateway.clearFastDepositEstimate} disabled={gateway.busy}>Cancel</Button><SlideToConfirm label="Slide to fast deposit" confirmationKey={`${address.toLowerCase()}:${chainId ?? ""}:${depositSourceId}:${ARC_ID}:${depositAmount}:${gateway.fastDepositEstimate.quotedAt}`} phase={gateway.depositState === "checking" || gateway.depositState === "estimating" || gateway.depositState === "approval" || gateway.depositState === "deposit" ? "submitting" : gateway.depositState === "pending" || gateway.depositState === "relaying" ? "pending" : gateway.depositState === "confirmed" ? "success" : gateway.depositState === "failed" ? "failed" : "idle"} disabled={gateway.busy || depositRecoveryBlocked || depositNetworkMismatch || previousDepositPending || (gateway.depositState === 'failed' && Boolean(gateway.depositHash) && !canRetryFastDeposit)} onConfirm={() => gateway.confirmFastDeposit(depositAmount)} /></div>
             </div>}
           </div>}
           {gateway.depositAvailability?.status === 'waiting' && <div role="status" className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-3 text-xs leading-5 text-amber-100">
@@ -141,20 +152,40 @@ export function UnifiedBalancePage() {
             <p className="mt-1">Circle has not reported the additional {gateway.depositAvailability.amount} USDC as available yet. Your source transaction remains confirmed; {gateway.depositAvailability.transferSpeed === 'FAST' ? gateway.fastRelayStatus === 'FAILED' ? 'do not submit another deposit; contact Circle support and retry only the balance check if advised.' : 'check the Circle relay and retry the balance check.' : 'wait for source-chain finality or retry the balance check.'}</p>
             <Button className="mt-2" variant="secondary" onClick={gateway.retryDepositAvailability}>Retry Gateway check</Button>
           </div>}
-          {gateway.depositHash && <TxLink label="Deposit source transaction" hash={gateway.depositHash} chainId={gateway.depositHashChainId ?? depositSourceId} />}
+          {gateway.depositHash && <TxLink label={gateway.depositHashStep === 'approval' ? 'USDC approval transaction' : gateway.depositHashStep === 'source' ? 'Fast deposit source transaction' : 'Deposit transaction'} hash={gateway.depositHash} chainId={gateway.depositHashChainId ?? depositSourceId} />}
           {gateway.fastDestinationHash && <TxLink label="Fast relay transaction" hash={gateway.fastDestinationHash} chainId={ARC_ID} />}
         </Card>
 
         <Card className="p-5" glow>
           <div className="flex items-center gap-3"><div className="rounded-xl bg-blue-300/10 p-3 text-blue-200"><ArrowUpRight size={19} /></div><div><Label>Spend Gateway balance</Label><h2 className="mt-1 text-xl font-bold text-white">Transfer USDC</h2></div></div>
           <p className="mt-3 text-sm leading-6 text-slate-400">Authorize a Gateway burn intent, receive Circle’s attestation, and mint on the selected destination.</p>
-          <NetworkSelect label="Source Gateway balance" value={transferSourceId} onChange={(value) => dispatchNetworkSelection({ type: 'transfer-source', chainId: value })} options={gatewayNetworks} />
+          <NetworkSelect label="Source Gateway balance" value={transferSourceId} onChange={(value) => { dispatchNetworkSelection({ type: 'transfer-source', chainId: value }); setShowSpendReview(false); }} options={gatewayNetworks} />
           <div className="mt-3 flex items-center justify-between text-xs"><span className="text-slate-500">Available on {transferSource.name}</span><span className="font-mono text-slate-200">{gateway.sourceGatewayBalance === null ? 'Unavailable' : `${amountLabel(gateway.sourceGatewayBalance)} USDC`}</span></div>
-          <NetworkSelect label="Destination network" value={destinationId} onChange={(value) => dispatchNetworkSelection({ type: 'transfer-destination', chainId: value })} options={gatewayNetworks} />
+          <NetworkSelect label="Destination network" value={destinationId} onChange={(value) => { dispatchNetworkSelection({ type: 'transfer-destination', chainId: value }); setShowSpendReview(false); }} options={gatewayNetworks} />
           {!transferRouteValid && <p role="alert" className="mt-2 text-xs text-rose-300">Choose a destination network different from the Gateway source.</p>}
-          <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={spendAmount} onChange={(event) => setSpendAmount(event.target.value)} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-xl font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div>
+          <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.04] px-4"><input value={spendAmount} onChange={(event) => { setSpendAmount(event.target.value); setShowSpendReview(false); }} inputMode="decimal" placeholder="0.00" className="min-w-0 flex-1 bg-transparent py-3 text-xl font-bold text-white outline-none placeholder:text-slate-600" /><span className="font-mono text-xs text-slate-500">USDC</span></div>
           {transferNetworkMismatch && <NetworkGuard network={transferSource.name} onSwitch={() => switchChain({ chainId: transferSourceId })} disabled={isSwitching} />}
-          <Button className="mt-4 w-full" onClick={() => void gateway.spend(spendAmount)} disabled={gateway.busy || transferNetworkMismatch || !spendAmount || !transferRouteValid}>{gateway.spendState === 'signing' ? 'Confirm Gateway authorization...' : gateway.spendState === 'minting' ? `Minting on ${destination.name}...` : gateway.spendState === 'pending' ? 'Transfer pending...' : gateway.spendState === 'confirmed' ? 'Transfer confirmed' : 'Review transfer'}</Button>
+          <Button className="mt-4 w-full" onClick={() => { void gateway.prepareSpend(spendAmount).then((estimate) => setShowSpendReview(Boolean(estimate))); }} disabled={gateway.busy || transferNetworkMismatch || !spendAmount || !transferRouteValid || gateway.spendSubmissionBlocked}>{gateway.spendState === 'estimating' ? 'Estimating Gateway fee...' : gateway.spendState === 'signing' ? 'Confirm Gateway authorization...' : gateway.spendState === 'minting' ? `Minting on ${destination.name}...` : gateway.spendState === 'pending' ? 'Transfer pending...' : gateway.spendState === 'confirmed' ? 'Transfer confirmed' : 'Review transfer'}</Button>
+          {showSpendReview && <div className="mt-4 space-y-3 rounded-xl border border-lime-300/20 bg-lime-300/[.04] p-4" aria-label="Review Gateway transfer">
+            <p className="text-sm font-semibold text-white">Review Gateway transfer</p>
+            <dl className="grid gap-3 text-xs sm:grid-cols-2">
+              <div><dt className="text-slate-500">Amount / asset</dt><dd className="mt-1 text-slate-200">{spendAmount} USDC</dd></div>
+              <div><dt className="text-slate-500">Source balance</dt><dd className="mt-1 text-slate-200">{transferSource.name}</dd></div>
+              <div><dt className="text-slate-500">Destination network</dt><dd className="mt-1 text-slate-200">{destination.name}</dd></div>
+              <div><dt className="text-slate-500">Maximum Circle fee</dt><dd className="mt-1 text-slate-200">{gateway.spendEstimate ? `${formatUnits(gateway.spendEstimate.maxFee, 6)} USDC` : 'Unavailable'}</dd></div>
+              <div><dt className="text-slate-500">Estimate block limit</dt><dd className="mt-1 text-slate-200">{gateway.spendEstimate?.maxBlockHeight.toString() ?? 'Unavailable'}</dd></div>
+            </dl>
+            <p className="text-[11px] leading-5 text-amber-200">The Gateway burn intent and destination mint require wallet authorization. Review the typed-data request and destination transaction in your wallet before signing.</p>
+            <SlideToConfirm
+              label="Slide to transfer"
+              confirmationKey={`${address.toLowerCase()}:${chainId ?? ''}:${transferSourceId}:${destinationId}:${spendAmount}:${gateway.spendEstimate?.maxFee.toString() ?? ''}:${gateway.spendEstimate?.maxBlockHeight.toString() ?? ''}`}
+              phase={gateway.spendState === 'signing' || gateway.spendState === 'minting' ? 'submitting' : gateway.spendState === 'pending' ? 'pending' : gateway.spendState === 'confirmed' ? 'success' : gateway.spendState === 'failed' ? 'failed' : 'idle'}
+              disabled={gateway.busy || transferNetworkMismatch || !transferRouteValid || !gateway.spendEstimate || gateway.spendSubmissionBlocked || (gateway.spendState === 'failed' && Boolean(gateway.mintHash))}
+              onConfirm={() => gateway.spend(spendAmount)}
+            />
+            {gateway.spendSubmissionBlocked && gateway.error && <p role="alert" className="text-xs text-rose-200">{gateway.error.message} Do not submit a second transfer until its outcome is verified.</p>}
+            <Button variant="secondary" className="w-full" disabled={gateway.busy || gateway.spendSubmissionBlocked || (gateway.spendState === 'failed' && Boolean(gateway.mintHash))} onClick={() => setShowSpendReview(false)}>Cancel review</Button>
+          </div>}
           {gateway.mintHash && <TxLink label="Destination transaction" hash={gateway.mintHash} chainId={destinationId} />}
         </Card>
       </div>
@@ -162,7 +193,7 @@ export function UnifiedBalancePage() {
       <Card className="p-5">
         <div className="flex items-center justify-between gap-3"><div><Label>Balance sources</Label><h2 className="mt-1 text-lg font-bold text-white">Wallet balances</h2></div><span className="text-xs text-slate-500">EVM USDC, 6 decimals</span></div>
         <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{gateway.walletBalances.map(({ network, raw, isLoading, isError }) => <div key={network.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[.03] p-3"><span className="flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={network.id} className="h-5 w-5" /><span className="truncate">{network.name}</span></span><span className="font-mono text-xs text-slate-300">{isLoading ? 'Loading...' : isError || raw === undefined ? 'Unavailable' : `${amountLabel(raw)} USDC`}</span></div>)}</div>
-        <div className="mt-6 border-t border-white/10 pt-5"><div className="flex items-center justify-between gap-3"><div><Label>Circle Gateway balance</Label><h2 className="mt-1 text-lg font-bold text-white">Available by source</h2></div><span className="text-xs text-slate-500">Not wallet balances</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{gateway.gatewayNetworks.map((network) => { const balance = gateway.gatewayBalances.find((item) => item.domain === network.cctpDomain); return <div key={network.id} className="flex items-center justify-between rounded-xl border border-cyan-300/10 bg-cyan-300/[.04] p-3"><span className="flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={network.id} className="h-5 w-5" /><span className="truncate">{network.name}</span></span><span className="text-right font-mono text-xs text-cyan-100">{gateway.isGatewayBalanceError || !balance ? 'Unavailable' : <>{balance.formatted} USDC{balance.pendingBatchRaw > 0n && <span className="block text-[10px] text-amber-200">{balance.pendingBatchFormatted} pending</span>}</>}</span></div>; })}</div>{!gateway.isGatewayBalanceLoading && !gateway.isGatewayBalanceError && !gateway.hasGatewayBalanceData && <p className="mt-3 text-xs text-slate-500">No confirmed Gateway balance was returned for this wallet.</p>}</div>
+        <div className="mt-6 border-t border-white/10 pt-5"><div className="flex items-center justify-between gap-3"><div><Label>Circle Gateway balance</Label><h2 className="mt-1 text-lg font-bold text-white">Available by source</h2></div><span className="text-xs text-slate-500">Not wallet balances</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{gateway.gatewayNetworks.map((network) => { const balance = gateway.gatewayBalances.find((item) => item.domain === network.cctpDomain); return <div key={network.id} className="flex items-center justify-between rounded-xl border border-cyan-300/10 bg-cyan-300/[.04] p-3"><span className="flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-200"><ChainLogo chainId={network.id} className="h-5 w-5" /><span className="truncate">{network.name}</span></span><span className="text-right font-mono text-xs text-cyan-100">{!balance ? gateway.gatewayBalanceStatus === 'loading' ? 'Loading...' : 'Balance unavailable' : <>{balance.formatted} USDC{balance.pendingBatchRaw > 0n && <span className="block text-[10px] text-amber-200">{balance.pendingBatchFormatted} pending</span>}</>}</span></div>; })}</div>{gateway.gatewayBalanceStatus === 'unavailable' && <p className="mt-3 text-xs text-slate-500">No confirmed Gateway balance was returned for this wallet.</p>}</div>
       </Card>
       <AnimatePresence>
         {gateway.successNotification && <TransactionSuccessScreen
@@ -185,6 +216,11 @@ export function UnifiedBalancePage() {
         />}
       </AnimatePresence>
       {operationMessage && <p role={gateway.error ? 'alert' : 'status'} className={`text-xs ${gateway.error ? 'text-rose-300' : 'text-cyan-200'}`}>{operationMessage}</p>}
+      {depositRecoveryBlocked && <div role="alert" className="space-y-2 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-3 text-xs leading-5 text-amber-100">
+        <p>A standard or fast Gateway wallet request is unresolved, including requests with no saved hash. Both deposit modes are blocked. Check wallet activity and the relevant source and destination explorers; a missing hash, timeout, or RPC error is not proof that no transaction was submitted.</p>
+        <Button variant="secondary" onClick={() => void gateway.manuallyResolveGatewayDepositRecovery()}>Manually verify Gateway wallet activity</Button>
+      </div>}
+      {gateway.hasUnresolvedRecovery && <Button variant="secondary" onClick={() => void gateway.retryRecoveryCheck()}>Check saved Gateway transactions</Button>}
     </div>
   );
 }

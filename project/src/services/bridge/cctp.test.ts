@@ -153,6 +153,48 @@ describe('Circle CCTP provider', () => {
     await expect(provider.getStatus(fakeQuote, '0x27a500415a7a6265978b1a070281088343c0736fac2e1f7e5c6da004ce964f8d')).resolves.toMatchObject({ status: 'PENDING' });
   });
 
+  it('polls the Arc source transaction for Ethereum Sepolia attestation without inventing a destination hash', async () => {
+    const sourceHash = '0x27a500415a7a6265978b1a070281088343c0736fac2e1f7e5c6da004ce964f8d';
+    const message = '0x1234';
+    const attestation = '0x5678';
+    const fakeQuote: BridgeQuote = {
+      id: 'arc-ethereum-cctp',
+      provider: 'Circle CCTP V2',
+      fromChain: { id: source.id, name: source.name },
+      toChain: { id: destination.id, name: destination.name },
+      fromToken: token(source),
+      toToken: token(destination),
+      fromAmount: 1_000_000n,
+      toAmount: 1_000_000n,
+      toAmountMin: 1_000_000n,
+      feeAmount: 0n,
+      gasAmount: null,
+      gasCosts: [],
+      executionDurationSeconds: null,
+      transactionTarget: null,
+      transactionData: null,
+      transactionValue: 0n,
+      bridge: 'CCTP V2',
+      quotedAt: Date.now(),
+      raw: {},
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ messages: [{ status: 'complete', message, attestation }] }),
+    } as Response);
+
+    await expect(provider.getStatus(fakeQuote, sourceHash)).resolves.toEqual({
+      status: 'DONE',
+      substatus: 'Attested',
+      message,
+      attestation,
+      sending: { txHash: sourceHash },
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(`/${source.cctpDomain}?transactionHash=${sourceHash}`);
+  });
+
   it('rejects non-USDC routes', async () => {
     await expect(provider.getQuote({
       fromChain: { id: source.id, name: source.name },

@@ -10,28 +10,50 @@ import {
   verifyGatewayTransactionReceipt,
 } from './useGateway';
 import { getFastGatewayDepositRoute } from '../services/gatewayFastDeposit';
+import { gatewayWalletAbi } from '../services/gateway';
 
 const minter = '0x1111111111111111111111111111111111111111' as Address;
 const token = '0x2222222222222222222222222222222222222222' as Address;
 const recipient = '0x3333333333333333333333333333333333333333' as Address;
 const source = '0x4444444444444444444444444444444444444444' as Address;
+const handler = '0x5555555555555555555555555555555555555555' as Address;
+const executor = '0x7777777777777777777777777777777777777777' as Address;
+const wallet = '0x6666666666666666666666666666666666666666' as Address;
+const zeroAddress = '0x0000000000000000000000000000000000000000' as Address;
 
-function mintTransferLog(to = recipient, amount = 2_000_000n) {
+function transferLog(from: Address, to: Address, amount: bigint) {
   return {
     address: token,
-    topics: encodeEventTopics({ abi: erc20Abi, eventName: 'Transfer', args: { from: source, to } }) as readonly Hex[],
+    topics: encodeEventTopics({ abi: erc20Abi, eventName: 'Transfer', args: { from, to } }) as readonly Hex[],
     data: encodeAbiParameters([{ type: 'uint256' }], [amount]),
   };
 }
 
+function mintTransferLog(to = recipient, amount = 2_000_000n, from = zeroAddress) {
+  return transferLog(from, to, amount);
+}
+
 function burnTransferLog(
-  to = '0x0000000000000000000000000000000000000000' as Address,
+  to = zeroAddress,
   amount = 2_000_000n,
   from = source,
 ) {
+  return transferLog(from, to, amount);
+}
+
+function depositedLog(
+  depositor = recipient,
+  amount = 2_000_000n,
+  depositToken = token,
+  sender = handler,
+) {
   return {
-    address: token,
-    topics: encodeEventTopics({ abi: erc20Abi, eventName: 'Transfer', args: { from, to } }) as readonly Hex[],
+    address: wallet,
+    topics: encodeEventTopics({
+      abi: gatewayWalletAbi,
+      eventName: 'Deposited',
+      args: { token: depositToken, depositor, sender },
+    }) as readonly Hex[],
     data: encodeAbiParameters([{ type: 'uint256' }], [amount]),
   };
 }
@@ -56,6 +78,7 @@ describe('Gateway transaction receipt verification', () => {
       expectedMinter: minter,
       expectedToken: token,
       recipient,
+      expectedAmount: 2_000_000n,
       logs: [mintTransferLog()],
     })).toBe(true);
   });
@@ -65,7 +88,12 @@ describe('Gateway transaction receipt verification', () => {
     ['wrong minter', { to: token }],
     ['wrong token', { logs: [{ ...mintTransferLog(), address: minter }] }],
     ['wrong recipient', { logs: [mintTransferLog(source)] }],
-    ['zero transfer', { logs: [mintTransferLog(recipient, 0n)] }],
+    ['wrong mint source', { logs: [mintTransferLog(recipient, 2_000_000n, source)] }],
+    ['underpayment', { logs: [mintTransferLog(recipient, 1_999_999n)] }],
+    ['overpayment', { logs: [mintTransferLog(recipient, 2_000_001n)] }],
+    ['duplicate matching transfers', { logs: [mintTransferLog(), mintTransferLog()] }],
+    ['unrelated transfer only', { logs: [mintTransferLog(source)] }],
+    ['malformed matching transfer', { logs: [{ ...mintTransferLog(), data: '0x' as Hex }] }],
   ])('rejects destination mint with %s', (_description, override) => {
     expect(verifyGatewayMintReceipt({
       status: 'success',
@@ -73,8 +101,31 @@ describe('Gateway transaction receipt verification', () => {
       expectedMinter: minter,
       expectedToken: token,
       recipient,
+      expectedAmount: 2_000_000n,
       logs: [mintTransferLog()],
       ...override,
+    })).toBe(false);
+  });
+
+  it('compares exact mint amounts without losing bigint precision', () => {
+    const expectedAmount = (1n << 128n) + 71n;
+    expect(verifyGatewayMintReceipt({
+      status: 'success',
+      to: minter,
+      expectedMinter: minter,
+      expectedToken: token,
+      recipient,
+      expectedAmount,
+      logs: [mintTransferLog(recipient, expectedAmount)],
+    })).toBe(true);
+    expect(verifyGatewayMintReceipt({
+      status: 'success',
+      to: minter,
+      expectedMinter: minter,
+      expectedToken: token,
+      recipient,
+      expectedAmount,
+      logs: [mintTransferLog(recipient, expectedAmount + 1n)],
     })).toBe(false);
   });
 });
@@ -122,7 +173,7 @@ describe('Circle Fast Gateway Deposit', () => {
   it.each([
     ['wrong burn recipient', { logs: [burnTransferLog(minter)] }],
     ['wrong depositor', { logs: [burnTransferLog('0x0000000000000000000000000000000000000000' as Address, 2_000_000n, recipient)] }],
-    ['insufficient burned amount', { logs: [burnTransferLog('0x0000000000000000000000000000000000000000' as Address, 1_000_000n)] }],
+    ['underpaid burned amount', { logs: [burnTransferLog(zeroAddress, 1_999_999n)] }],
     ['wrong messenger', { to: token }],
     ['reverted source transaction', { status: 'reverted' as const }],
   ])('rejects an unverified source burn: %s', (_description, override) => {
@@ -138,10 +189,64 @@ describe('Circle Fast Gateway Deposit', () => {
     })).toBe(false);
   });
 
-  it('requires a successful destination receipt from Arc Generic Executor', () => {
-    expect(verifyFastGatewayDestinationReceipt({ status: 'success', to: minter, expectedExecutor: minter })).toBe(true);
-    expect(verifyFastGatewayDestinationReceipt({ status: 'success', to: token, expectedExecutor: minter })).toBe(false);
-    expect(verifyFastGatewayDestinationReceipt({ status: 'reverted', to: minter, expectedExecutor: minter })).toBe(false);
+  it('verifies the exact USDC transfer and Gateway account credit in the destination receipt', () => {
+    const input = {
+      status: 'success' as const,
+      to: executor,
+      expectedExecutor: executor,
+      expectedWallet: wallet,
+      expectedToken: token,
+      recipient,
+      expectedAmount: 2_000_000n,
+      logs: [transferLog(handler, wallet, 2_000_000n), depositedLog()],
+    };
+    expect(verifyFastGatewayDestinationReceipt(input)).toBe(true);
+    expect(verifyFastGatewayDestinationReceipt({ ...input, to: token })).toBe(false);
+    expect(verifyFastGatewayDestinationReceipt({ ...input, status: 'reverted' })).toBe(false);
+  });
+
+  it.each([
+    ['underpayment', { logs: [transferLog(handler, wallet, 1_999_999n), depositedLog(recipient, 1_999_999n)] }],
+    ['overpayment', { logs: [transferLog(handler, wallet, 2_000_001n), depositedLog(recipient, 2_000_001n)] }],
+    ['wrong credited account', { logs: [transferLog(handler, wallet, 2_000_000n), depositedLog(source)] }],
+    ['wrong token', { logs: [{ ...transferLog(handler, wallet, 2_000_000n), address: minter }, depositedLog()] }],
+    ['sender mismatch', { logs: [transferLog(source, wallet, 2_000_000n), depositedLog()] }],
+    ['unrelated transfer only', { logs: [transferLog(handler, recipient, 2_000_000n)] }],
+    ['missing Gateway deposit event', { logs: [transferLog(handler, wallet, 2_000_000n)] }],
+    ['missing token transfer', { logs: [depositedLog()] }],
+    ['duplicate token transfers', { logs: [transferLog(handler, wallet, 2_000_000n), transferLog(handler, wallet, 2_000_000n), depositedLog()] }],
+    ['duplicate Gateway deposit events', { logs: [transferLog(handler, wallet, 2_000_000n), depositedLog(), depositedLog()] }],
+    ['malformed token transfer', { logs: [{ ...transferLog(handler, wallet, 2_000_000n), data: '0x' as Hex }, depositedLog()] }],
+    ['malformed Gateway deposit event', { logs: [transferLog(handler, wallet, 2_000_000n), { ...depositedLog(), data: '0x' as Hex }] }],
+  ])('rejects destination receipt with %s', (_description, override) => {
+    const input = {
+      ...{
+        status: 'success' as const,
+        to: executor,
+        expectedExecutor: executor,
+        expectedWallet: wallet,
+        expectedToken: token,
+        recipient,
+        expectedAmount: 2_000_000n,
+        logs: [transferLog(handler, wallet, 2_000_000n), depositedLog()],
+      },
+      ...override,
+    };
+    expect(verifyFastGatewayDestinationReceipt(input)).toBe(false);
+  });
+
+  it('uses bigint precision for the exact fast destination credit', () => {
+    const expectedAmount = (1n << 128n) + 73n;
+    expect(verifyFastGatewayDestinationReceipt({
+      status: 'success',
+      to: executor,
+      expectedExecutor: executor,
+      expectedWallet: wallet,
+      expectedToken: token,
+      recipient,
+      expectedAmount,
+      logs: [transferLog(handler, wallet, expectedAmount), depositedLog(recipient, expectedAmount)],
+    })).toBe(true);
   });
 });
 

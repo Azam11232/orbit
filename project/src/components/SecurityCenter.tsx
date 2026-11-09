@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
+import { useReducedMotion } from 'framer-motion';
 import { useAccount } from 'wagmi';
 import { arcTestnet } from 'wagmi/chains';
 import {
@@ -15,7 +16,6 @@ import {
   ExternalLink,
   FileSearch,
   Fingerprint,
-  Gauge,
   LockKeyhole,
   RefreshCw,
   Search,
@@ -32,15 +32,22 @@ import { useRevokeApproval } from '../hooks/useRevokeApproval';
 import { useTransactions } from '../hooks/useTransactions';
 import { ARC_TESTNET } from '../data/networks';
 import {
-  calculateSecurityScore,
+  APPROVAL_SCAN_HISTORY_WINDOWS,
+  APPROVAL_SCAN_HISTORY_WINDOW_STORAGE_KEY,
+  DEFAULT_APPROVAL_SCAN_HISTORY_WINDOW,
   canRevokeApproval,
   countLargeOutgoingTransfers,
-  summarizeApprovalScanErrors,
+  getApprovalCoveragePercent,
+  getApprovalScanStatus,
+  getSecurityAssessment,
+  summarizeApprovalInventory,
+  type ApprovalScanHistoryWindow,
   type ApprovalRisk,
   type TokenApproval,
 } from '../services/security';
 import { formatTransactionDate, shortAddr } from '../services/transactions';
 import { Button, Card, ChainLogo, Pill, TokenIcon } from './ui';
+import { SlideToConfirm } from './SlideToConfirm';
 
 type ApprovalStatusFilter = 'all' | 'active' | 'zero';
 type ApprovalRiskFilter = 'all' | ApprovalRisk;
@@ -169,13 +176,36 @@ function formatTimestamp(timestamp: number | null): string {
   return timestamp === null ? 'Unavailable' : formatTransactionDate(timestamp);
 }
 
+function readApprovalScanHistoryWindow(): {
+  blocks: ApprovalScanHistoryWindow;
+  error: string | null;
+} {
+  try {
+    const stored = localStorage.getItem(APPROVAL_SCAN_HISTORY_WINDOW_STORAGE_KEY);
+    const blocks = Number(stored);
+    if (APPROVAL_SCAN_HISTORY_WINDOWS.some((window) => window === blocks)) {
+      return { blocks: blocks as ApprovalScanHistoryWindow, error: null };
+    }
+  } catch (error) {
+    return {
+      blocks: DEFAULT_APPROVAL_SCAN_HISTORY_WINDOW,
+      error: error instanceof Error ? error.message : 'Unable to read the saved history window.',
+    };
+  }
+  return { blocks: DEFAULT_APPROVAL_SCAN_HISTORY_WINDOW, error: null };
+}
+
 function PageAnchor({ id }: { id: string }) {
   return <span id={id} className="relative -top-3 block scroll-mt-6" aria-hidden="true" />;
 }
 
-export function SecurityCenter() {
+export function SecurityCenter({ onManageApprovals }: { onManageApprovals: () => void }) {
+  const reduceMotion = useReducedMotion();
   const { address, isConnected, chainId } = useAccount();
-  const approvalsQuery = useApprovals(true);
+  const [historyWindowSetting, setHistoryWindowSetting] = useState(readApprovalScanHistoryWindow);
+  const [approvalToConfirm, setApprovalToConfirm] = useState<TokenApproval | null>(null);
+  const [cooldownClock, setCooldownClock] = useState(Date.now());
+  const approvalsQuery = useApprovals(true, historyWindowSetting.blocks);
   const transactionsQuery = useTransactions(
     address,
     isConnected && chainId === arcTestnet.id && Boolean(address),
@@ -183,20 +213,28 @@ export function SecurityCenter() {
     false,
     true,
   );
-  const { revoke, activeApprovalId, status: revokeStatus, transactionHash, error: revokeError } = useRevokeApproval();
+  const {
+    revoke,
+    activeApprovalId,
+    status: revokeStatus,
+    transactionHash,
+    error: revokeError,
+    retryRevokeCheck,
+  } = useRevokeApproval();
   const [searchText, setSearchText] = useState('');
   const [statusFilter, setStatusFilter] = useState<ApprovalStatusFilter>('all');
   const [riskFilter, setRiskFilter] = useState<ApprovalRiskFilter>('all');
   const [activeTab, setActiveTab] = useState('token-approvals');
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
-  const [showTechnicalErrors, setShowTechnicalErrors] = useState(false);
+  const [continueScanError, setContinueScanError] = useState<string | null>(null);
 
   const approvals = useMemo(() => approvalsQuery.data?.approvals ?? [], [approvalsQuery.data]);
   const transactions = transactionsQuery.transactions;
   const connectedToArc = isConnected && chainId === ARC_TESTNET.id && Boolean(address);
-  const approvalAvailable = approvalsQuery.data !== undefined && !approvalsQuery.isError;
+  const approvalAvailable = approvalsQuery.data !== undefined;
   const activityAvailable = transactionsQuery.lastScannedAt !== null && !transactionsQuery.isError;
+  const hasTransactionSample = transactionsQuery.lastScannedAt !== null;
   const activeApprovals = approvals.filter((approval) => approval.allowance > 0n);
   const unlimitedApprovals = activeApprovals.filter((approval) => approval.isUnlimited);
   const finiteHighApprovals = activeApprovals.filter((approval) => approval.risk === 'Medium');
@@ -215,36 +253,54 @@ export function SecurityCenter() {
     transaction.tokenTransfers.filter((transfer) => transfer.direction === 'received').length +
     (transaction.category === 'Receive' && transaction.tokenTransfers.length === 0 && Number(transaction.value) > 0 ? 1 : 0),
   0);
-  const scannedToBlock = approvalsQuery.data?.scannedToBlock.toString() ?? '—';
+  const approvalCoverage = approvalsQuery.data
+    ? getApprovalCoveragePercent(approvalsQuery.data.coveredBlocks, approvalsQuery.data.totalBlocks)
+    : 0;
+  const approvalScanStatus = getApprovalScanStatus({
+    isFetching: approvalsQuery.isFetching,
+    isError: approvalsQuery.isError,
+    data: approvalsQuery.data,
+    now: cooldownClock,
+  });
+  const cooldownActive = approvalsQuery.cooldownUntil !== null &&
+    approvalsQuery.cooldownUntil > cooldownClock;
+  const providerLimitEncountered = !approvalsQuery.data?.isComplete && (
+    approvalScanStatus === 'Partial scan — provider limit' || cooldownActive
+  );
+  const scanStatusLabel = approvalScanStatus ?? (
+    providerLimitEncountered
+      ? 'Partial scan — provider limit'
+      : !isConnected ? 'Connect wallet' : !connectedToArc ? 'Assessment unavailable' : 'Scan required'
+  );
 
-  const scoreIsComplete = Boolean(
-    connectedToArc &&
-    approvalsQuery.data?.isComplete &&
-    activityAvailable &&
-    transactions.every((transaction) => transaction.status !== 'unknown') &&
-    !approvalsQuery.isFetching &&
-    !transactionsQuery.isFetching &&
-    !approvalsQuery.isError &&
-    !transactionsQuery.isError,
+  useEffect(() => {
+    if (!cooldownActive || approvalsQuery.cooldownUntil === null) return;
+    const timer = window.setTimeout(
+      () => setCooldownClock(Date.now()),
+      Math.max(0, approvalsQuery.cooldownUntil - Date.now() + 20),
+    );
+    return () => window.clearTimeout(timer);
+  }, [approvalsQuery.cooldownUntil, cooldownActive]);
+  const approvalInventory = summarizeApprovalInventory(
+    approvalAvailable ? approvals : undefined,
+    Boolean(approvalsQuery.data?.isComplete),
   );
-  const score = address
-    ? calculateSecurityScore({
-        approvals,
-        transactions,
-        walletAddress: address,
-        isComplete: scoreIsComplete,
-      })
-    : null;
-  const scanHasErrors = Boolean(
-    approvalsQuery.isError ||
-    transactionsQuery.isError ||
-    approvalsQuery.data?.errors.length ||
-    (approvalsQuery.data && !approvalsQuery.data.isComplete),
-  );
-  const completedAt = Math.max(
-    approvalsQuery.data?.lastScannedAt ?? 0,
-    transactionsQuery.lastScannedAt ?? 0,
-  );
+
+  const assessment = getSecurityAssessment({
+    walletConnected: isConnected && Boolean(address),
+    supportedNetwork: chainId === arcTestnet.id,
+    isScanning: approvalsQuery.isFetching || transactionsQuery.isFetching,
+    providerRateLimited: providerLimitEncountered,
+    approvalScanStarted: approvalsQuery.data !== undefined,
+    approvalWindowComplete: Boolean(approvalsQuery.data?.isComplete),
+    approvalHistoryStartsAtGenesis: approvalsQuery.data?.scannedFromBlock === 0n,
+    approvalDataUnavailable: approvalsQuery.isError || Boolean(approvalsQuery.data?.errors.length),
+    activityScanStarted: activityAvailable,
+    activityDataUnavailable: transactionsQuery.isError,
+    activityHasUnresolvedTransactions: transactions.some(
+      (transaction) => transaction.status !== 'success' && transaction.status !== 'failed',
+    ),
+  });
   const filteredApprovals = useMemo(() => {
     const query = searchText.trim().toLowerCase();
     return approvals.filter((approval) => {
@@ -275,16 +331,15 @@ export function SecurityCenter() {
       detail: approvalAvailable
         ? activeApprovals.length > 0
           ? `${activeApprovals.length} active allowance${activeApprovals.length === 1 ? '' : 's'} observed. Revoke only allowances you no longer need.`
-          : approvalsQuery.data?.isComplete
-            ? 'No active allowances were observed in the completed configured-token scan.'
-            : 'No active allowances were returned, but scan coverage is incomplete.'
+          : approvals.length === 0
+            ? 'No spender records were found in the checked window. This preventive reminder remains because older or unsupported approvals may exist.'
+            : approvalsQuery.data?.isComplete
+              ? 'No active allowance was observed among checked records in this window. This preventive reminder remains because older or unsupported approvals may exist.'
+              : `No active allowance was observed among ${approvals.length} checked records. This reminder remains because the scan is incomplete.`
         : 'Approval state is unavailable until the scan succeeds.',
       tone: activeApprovals.length > 0 ? 'amber' as const : 'slate' as const,
       action: approvalAvailable && activeApprovals.length > 0 ? 'Review approvals' : null,
-      onClick: () => {
-        setStatusFilter('active');
-        jumpTo('token-approvals');
-      },
+      onClick: onManageApprovals,
       available: approvalAvailable && activeApprovals.length > 0,
     },
     {
@@ -293,41 +348,33 @@ export function SecurityCenter() {
       detail: approvalAvailable
         ? unlimitedApprovals.length > 0
           ? `${unlimitedApprovals.length} unlimited allowance${unlimitedApprovals.length === 1 ? '' : 's'} observed; review whether each is still needed.`
-          : approvalsQuery.data?.isComplete
-            ? 'No unlimited allowance was observed in the completed configured-token scan.'
-            : 'No unlimited allowance was returned, but the approval scan is incomplete.'
+          : approvals.length === 0
+            ? 'No spender records were found in the checked window. This preventive reminder remains because older or unsupported approvals may exist.'
+            : approvalsQuery.data?.isComplete
+              ? 'No unlimited allowance was observed among checked records in this window. This reminder remains because older or unsupported approvals may exist.'
+              : `No unlimited allowance was observed among ${approvals.length} checked records. This reminder remains because the scan is incomplete.`
         : 'Unlimited allowance state is unavailable until the scan succeeds.',
       tone: unlimitedApprovals.length > 0 ? 'amber' as const : 'slate' as const,
       action: approvalAvailable && unlimitedApprovals.length > 0 ? 'Filter unlimited' : null,
-      onClick: () => {
-        setStatusFilter('active');
-        setRiskFilter('High');
-        jumpTo('token-approvals');
-      },
+      onClick: onManageApprovals,
       available: approvalAvailable && unlimitedApprovals.length > 0,
     },
-    {
+    ...(hasVerificationIssues ? [{
       icon: Fingerprint,
       title: 'Verify unknown contracts',
-      detail: approvalAvailable
-        ? hasVerificationIssues
-          ? `${verificationIssues + tokenVerificationFailures} observed token/spender verification check${verificationIssues + tokenVerificationFailures === 1 ? '' : 's'} is unverified or unavailable. This is not a maliciousness verdict.`
-          : approvals.length > 0
-            ? 'All observed token and spender checks returned verified.'
-            : 'No spender records were observed, so spender verification cannot be assessed.'
-        : 'Contract verification could not be assessed without approval scan data.',
-      tone: hasVerificationIssues || !approvalAvailable ? 'cyan' as const : 'slate' as const,
-      action: approvalAvailable && hasVerificationIssues ? 'Inspect contracts' : null,
-      onClick: () => jumpTo('token-approvals'),
-      available: approvalAvailable && hasVerificationIssues,
-    },
+      detail: `${verificationIssues + tokenVerificationFailures} observed token/spender verification check${verificationIssues + tokenVerificationFailures === 1 ? '' : 's'} returned unverified or unavailable. ArcScan verification metadata is not an independent audit or a safety guarantee.`,
+      tone: 'cyan' as const,
+      action: approvalAvailable ? 'Inspect contracts' : null,
+      onClick: onManageApprovals,
+      available: approvalAvailable,
+    }] : []),
     {
       icon: ArrowUpRight,
       title: 'Keep an eye on large transfers',
       detail: activityAvailable
         ? largeOutgoing > 0
           ? `${largeOutgoing} outgoing transfer${largeOutgoing === 1 ? '' : 's'} at or above 100 USDC units in the recent activity sample.`
-          : 'No outgoing transfer at or above 100 USDC units was observed in the recent activity sample.'
+          : 'No matching transfer was observed in the recent activity sample. This monitoring reminder remains because the sample covers only recent activity.'
         : 'Recent transfer activity is unavailable.',
       tone: largeOutgoing > 0 ? 'amber' as const : 'slate' as const,
       action: activityAvailable && largeOutgoing > 0 ? 'Review activity' : null,
@@ -336,8 +383,31 @@ export function SecurityCenter() {
     },
   ];
 
+  const continueApprovalScan = async () => {
+    setContinueScanError(null);
+    try {
+      await approvalsQuery.continueScan();
+    } catch (error) {
+      setContinueScanError(error instanceof Error ? error.message : 'Unable to continue the approval scan.');
+    }
+  };
+
+  const changeHistoryWindow = (value: string) => {
+    const blocks = Number(value);
+    if (!APPROVAL_SCAN_HISTORY_WINDOWS.some((window) => window === blocks)) return;
+    try {
+      localStorage.setItem(APPROVAL_SCAN_HISTORY_WINDOW_STORAGE_KEY, String(blocks));
+      setHistoryWindowSetting({ blocks: blocks as ApprovalScanHistoryWindow, error: null });
+    } catch (error) {
+      setHistoryWindowSetting({
+        blocks: blocks as ApprovalScanHistoryWindow,
+        error: error instanceof Error ? error.message : 'Unable to save the history window preference.',
+      });
+    }
+  };
+
   const refreshScan = () => {
-    void approvalsQuery.refetch();
+    void continueApprovalScan();
     transactionsQuery.refetch();
   };
 
@@ -353,22 +423,18 @@ export function SecurityCenter() {
     }
   };
 
-  const confirmRevoke = async (approval: TokenApproval) => {
+  const confirmRevoke = (approval: TokenApproval) => {
     if (!canRevokeApproval(approval)) return;
-    const confirmed = window.confirm(
-      `Revoke the ${approval.token.symbol} allowance for ${shortAddr(approval.spenderAddress)}? This will ask your wallet to submit an on-chain approval transaction.`,
-    );
-    if (!confirmed) return;
-    await revoke(approval);
+    setApprovalToConfirm(approval);
   };
 
   const jumpTo = (id: string) => {
     setActiveTab(id);
-    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById(id)?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
   };
 
   const tabs = [
-    ['token-approvals', 'Token Approvals'],
+    ['token-approvals', 'Approval Summary'],
     ['transaction-analysis', 'Transaction Analysis'],
     ['risk-insights', 'Risk Insights'],
     ['security-recommendations', 'Security Recommendations'],
@@ -386,8 +452,8 @@ export function SecurityCenter() {
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-2xl font-semibold tracking-[-.035em] text-white sm:text-[28px]">Security Center</h1>
-                <Pill color={scanHasErrors ? 'amber' : scoreIsComplete ? 'green' : 'cyan'}>
-                  {scanHasErrors ? 'PARTIAL SCAN' : scoreIsComplete ? 'COVERAGE COMPLETE' : 'SCAN STATUS UNKNOWN'}
+                <Pill color={scanStatusLabel === 'Window complete' ? 'green' : scanStatusLabel === 'Scanning' ? 'cyan' : 'amber'}>
+                  {scanStatusLabel}
                 </Pill>
               </div>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-300/80">
@@ -396,7 +462,9 @@ export function SecurityCenter() {
               <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
                 <span className="inline-flex items-center gap-1.5">
                   <Clock3 size={12} aria-hidden="true" />
-                  Last scanned: {completedAt > 0 ? new Date(completedAt).toLocaleString() : 'Not scanned'}
+                  Last scan attempt: {approvalsQuery.data
+                    ? new Date(approvalsQuery.data.lastScanAttemptAt).toLocaleString()
+                    : 'Not started'}
                 </span>
                 {address && (
                   <span className="inline-flex items-center gap-1.5">
@@ -414,7 +482,7 @@ export function SecurityCenter() {
           <Button
             variant="secondary"
             onClick={refreshScan}
-            disabled={!connectedToArc || approvalsQuery.isFetching || transactionsQuery.isFetching}
+            disabled={!connectedToArc || approvalsQuery.isFetching || transactionsQuery.isFetching || cooldownActive}
             className="shrink-0 self-start border-[#3a5a50] bg-[#0c1a17] text-emerald-100 hover:border-emerald-400/50 sm:self-center"
           >
             <RefreshCw
@@ -422,7 +490,9 @@ export function SecurityCenter() {
               className={approvalsQuery.isFetching || transactionsQuery.isFetching ? 'animate-spin' : ''}
               aria-hidden="true"
             />
-            {approvalsQuery.isFetching || transactionsQuery.isFetching ? 'Refreshing scan' : 'Refresh Scan'}
+            {approvalsQuery.isFetching || transactionsQuery.isFetching
+              ? 'Scanning'
+              : cooldownActive ? 'Provider cooldown' : 'Refresh Scan'}
           </Button>
         </div>
       </section>
@@ -439,108 +509,270 @@ export function SecurityCenter() {
       )}
 
       {(approvalsQuery.isError || transactionsQuery.isError) && (
-        <div role="alert" className="rounded-xl border border-rose-400/20 bg-rose-400/[.045] px-4 py-3 text-xs text-rose-100">
-          <p className="font-semibold">One or more security data sources failed. Results below may be incomplete.</p>
-          {approvalsQuery.error && <p className="mt-1 break-words text-rose-200/80">Approval scan: {shortError(approvalsQuery.error.message)}</p>}
-          {transactionsQuery.error && <p className="mt-1 break-words text-rose-200/80">ArcScan activity: {shortError(transactionsQuery.error.message)}</p>}
-        </div>
+        <details role="alert" className="rounded-lg border border-rose-400/15 bg-rose-400/[.025] px-3 py-2 text-[11px] text-rose-100/80">
+          <summary className="cursor-pointer font-medium">A security data source failed · view diagnostics</summary>
+          {approvalsQuery.error && <p className="mt-2 break-words">Approval scan: {shortError(approvalsQuery.error.message)}</p>}
+          {transactionsQuery.error && <p className="mt-1 break-words">ArcScan activity: {shortError(transactionsQuery.error.message)}</p>}
+        </details>
       )}
 
-      {approvalsQuery.data && approvalsQuery.data.errors.length > 0 && (
-        <div className="rounded-xl border border-amber-300/20 bg-amber-300/[.035] px-4 py-3 text-xs text-amber-100">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div>
-              <p className="font-semibold">Partial approval coverage</p>
-              <ul className="mt-1 space-y-1 text-amber-100/80">
-                {summarizeApprovalScanErrors(approvalsQuery.data.errors).map((error) => <li key={error}>{error}</li>)}
-              </ul>
-            </div>
-            <button
-              type="button"
-              className="rounded-md px-2 py-1 text-[10px] text-amber-100/70 underline decoration-amber-100/30 underline-offset-2 hover:text-amber-50"
-              onClick={() => setShowTechnicalErrors((value) => !value)}
-              aria-expanded={showTechnicalErrors}
-            >
-              {showTechnicalErrors ? 'Hide details' : `Technical details (${approvalsQuery.data.errors.length})`}
-            </button>
-          </div>
-          {showTechnicalErrors && (
-            <ul className="mt-3 max-h-40 space-y-1 overflow-y-auto border-t border-amber-100/10 pt-2 font-mono text-[10px] text-amber-100/65">
-              {approvalsQuery.data.errors.map((error, index) => <li key={`${index}:${error}`}>{error}</li>)}
-            </ul>
-          )}
-        </div>
+      {approvalsQuery.data?.isComplete && approvalsQuery.isFetching && (
+        <p role="status" className="rounded-lg border border-cyan-300/15 bg-cyan-300/[.035] px-4 py-2 text-[11px] text-cyan-100/80">
+          Refreshing approval coverage; the previous successful results remain visible until this scan completes.
+        </p>
       )}
+
+      <section
+        aria-label="Approval scan status"
+        role="status"
+        className="security-scan-status rounded-xl border border-[#344039] bg-[#0b1212]/90 px-3 py-3 sm:px-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <span className="text-xs font-semibold text-slate-100">
+                {scanStatusLabel}
+              </span>
+              {approvalsQuery.data && (
+                <span className="font-mono text-[11px] tabular-nums text-slate-300">
+                  {approvalCoverage.toFixed(2)}% of the selected {approvalsQuery.data.historyWindowBlocks.toLocaleString()}-block window
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-[11px] leading-4 text-slate-400">
+              {providerLimitEncountered
+                ? `Partial scan — provider limit. The public RPC deferred pending ranges; ${approvalsQuery.data?.tokenCoverage.reduce((total, item) => total + item.remainingRangeCount, 0).toLocaleString() ?? 'Some'} remain. Completed ranges are saved.`
+                : approvalScanStatus === 'Failed'
+                  ? 'The latest attempt failed; previously saved coverage and results remain available.'
+                : approvalsQuery.data && !approvalsQuery.data.isComplete
+                  ? `${approvalsQuery.data.tokenCoverage.reduce((total, item) => total + item.remainingRangeCount, 0).toLocaleString()} ranges remain in the selected window. Completed ranges are saved; older history is not included.`
+                  : approvalScanStatus === 'Window complete'
+                      ? `${approvalCoverage.toFixed(2)}% of the selected ${(approvalsQuery.data?.historyWindowBlocks ?? BigInt(historyWindowSetting.blocks)).toLocaleString()}-block window is covered. This is not the wallet’s complete approval history.`
+                    : connectedToArc
+                      ? 'The scan covers a bounded recent history window for configured Arc Testnet tokens; older history is not included.'
+                      : scanStatusLabel === 'Connect wallet'
+                        ? 'Connect an Arc Testnet wallet to scan configured-token approval history.'
+                        : 'Switch to Arc Testnet to load the required security data.'}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-400">
+              <label className="inline-flex items-center gap-2">
+                Recent history window
+                <select
+                  aria-label="Approval scan history window"
+                  value={historyWindowSetting.blocks}
+                  onChange={(event) => changeHistoryWindow(event.target.value)}
+                  className="rounded-md border border-white/10 bg-[#111a19] px-2 py-1 text-[10px] text-slate-200"
+                >
+                  {APPROVAL_SCAN_HISTORY_WINDOWS.map((blocks) => (
+                    <option key={blocks} value={blocks}>
+                      {blocks.toLocaleString()} blocks ({(blocks / 10_000).toLocaleString()} standard ranges/token)
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {approvalsQuery.data && (
+                <span>
+                  Window boundary: blocks {approvalsQuery.data.scannedFromBlock.toString()}–{approvalsQuery.data.scannedToBlock.toString()} per token
+                </span>
+              )}
+            </div>
+            {historyWindowSetting.error && (
+              <p className="mt-1 text-[10px] text-rose-200">
+                History-window preference could not be saved: {historyWindowSetting.error}
+              </p>
+            )}
+            {approvalsQuery.data && (
+              <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                Successful ranges:{' '}
+                {approvalsQuery.data.tokenCoverage.map((coverage) => (
+                  `${coverage.symbol} ${
+                    coverage.coveredRanges.length > 0
+                      ? coverage.coveredRanges.map((range) => `${range.fromBlock}–${range.toBlock}`).join(', ')
+                      : 'none'
+                  }`
+                )).join(' · ')}
+              </p>
+            )}
+            {approvalsQuery.data && (
+              <div
+                className="mt-2 h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-white/[.07]"
+                role="progressbar"
+                aria-label="Approval history coverage"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={approvalCoverage}
+                aria-valuetext={`${approvalCoverage.toFixed(2)} percent covered`}
+              >
+                <div
+                  className="h-full rounded-full bg-[var(--orbit-gold)] transition-[width] duration-300"
+                  style={{ width: `${approvalCoverage}%` }}
+                />
+              </div>
+            )}
+            {cooldownActive && approvalsQuery.cooldownUntil !== null && (
+              <p className="mt-1.5 text-[10px] text-amber-200/75">
+                Provider cooldown until {new Date(approvalsQuery.cooldownUntil).toLocaleTimeString()}.
+                Continue Scan is paused; retry becomes available after this time. No RPC requests are sent during cooldown.
+              </p>
+            )}
+            {continueScanError && <p className="mt-1.5 text-[10px] text-rose-200">{continueScanError}</p>}
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {approvalScanStatus !== 'Window complete' && connectedToArc && (
+              <Button
+                variant="secondary"
+                className="rounded-lg px-2.5 py-1.5 text-[10px]"
+                disabled={approvalsQuery.isFetching || cooldownActive}
+                onClick={() => void continueApprovalScan()}
+              >
+                <RefreshCw
+                  size={13}
+                  className={approvalsQuery.isFetching ? 'animate-spin' : ''}
+                  aria-hidden="true"
+                />
+                {cooldownActive
+                  ? 'Provider cooldown'
+                  : approvalsQuery.isFetching ? 'Scanning' : 'Continue scan'}
+              </Button>
+            )}
+            <details className="relative">
+              <summary className="cursor-pointer list-none rounded-md border border-white/[.1] px-2.5 py-1.5 text-[10px] font-medium text-slate-300 hover:bg-white/[.035]">
+                Technical details
+              </summary>
+              <div className="absolute right-0 z-20 mt-2 w-[min(90vw,38rem)] rounded-xl border border-[#344039] bg-[#0b1212] p-3 shadow-xl sm:w-[38rem]">
+                <div className="max-h-[65vh] space-y-3 overflow-y-auto text-[10px]">
+                  <div>
+                    <p className="mb-1 font-semibold text-slate-200">RPC errors</p>
+                    {approvalsQuery.isError && (
+                      <p className="mb-1 break-words text-rose-200">
+                        Latest attempt: {approvalsQuery.error?.message ?? 'Scanner request failed'}
+                      </p>
+                    )}
+                    {approvalsQuery.data?.errors.length ? (
+                      <ul className="space-y-1 font-mono text-slate-400">
+                        {approvalsQuery.data.errors.map((error, index) => (
+                          <li key={`${index}:${error}`} className="break-words">{error}</li>
+                        ))}
+                      </ul>
+                    ) : <p className="text-slate-500">No RPC errors recorded in the last attempt.</p>}
+                  </div>
+                  {approvalsQuery.data && (
+                    <div className="border-t border-white/[.07] pt-2">
+                      <p className="mb-1 font-semibold text-slate-200">Per-token coverage and ranges</p>
+                      <div className="space-y-2 font-mono text-[10px]">
+                        {approvalsQuery.data.tokenCoverage.map((tokenCoverage) => (
+                          <div key={tokenCoverage.symbol} className="rounded-lg border border-white/[.07] p-2">
+                            <p className="font-sans font-semibold text-slate-200">
+                              {tokenCoverage.symbol}: {tokenCoverage.coveredRanges.length} covered intervals,
+                              {' '}{tokenCoverage.failedRanges.length} failed, {tokenCoverage.remainingRangeCount.toLocaleString()} pending ranges
+                            </p>
+                            <p className="mt-1 font-sans text-slate-500">
+                              Last successful range: {tokenCoverage.lastSuccessfulRange
+                                ? `${tokenCoverage.lastSuccessfulRange.fromBlock}–${tokenCoverage.lastSuccessfulRange.toBlock}`
+                                : 'none yet'}
+                              {tokenCoverage.lastSuccessfulAt === null
+                                ? ''
+                                : ` · ${new Date(tokenCoverage.lastSuccessfulAt).toLocaleString()}`}
+                            </p>
+                            {tokenCoverage.coveredRanges.length > 0 && (
+                              <p className="mt-1 break-words text-emerald-200/80">
+                                Successful ranges: {tokenCoverage.coveredRanges.map((range) =>
+                                  `${range.fromBlock}–${range.toBlock}`,
+                                ).join(', ')}
+                              </p>
+                            )}
+                            {tokenCoverage.failedRanges.length > 0 && (
+                              <p className="mt-1 break-words text-rose-200/80">
+                                Failed ranges: {tokenCoverage.failedRanges.slice(0, 10).map((range) => `${range.fromBlock}–${range.toBlock}`).join(', ')}
+                                {tokenCoverage.failedRanges.length > 10 ? `, … (${tokenCoverage.failedRanges.length - 10} more)` : ''}
+                              </p>
+                            )}
+                            {tokenCoverage.remainingRanges.length > 0 && (
+                              <p className="mt-1 break-words text-slate-400">
+                                Pending ranges: {tokenCoverage.remainingRanges.slice(0, 10).map((range) => `${range.fromBlock}–${range.toBlock}`).join(', ')}
+                                {tokenCoverage.remainingRangeCount > 10 ? ', …' : ''}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
 
       <section aria-label="Security overview" className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard icon={Gauge} label="Security Score" accent="bg-cyan-300/[.09] text-cyan-200">
-          <div className="flex items-center gap-3">
+        <SummaryCard icon={Shield} label="Security Score" accent="bg-[#c6a76a]/[.09] text-[#d2b779]">
+          <div className="flex min-w-0 items-center gap-3">
             <div
-              className="security-score-gauge grid h-[58px] w-[58px] shrink-0 place-items-center rounded-full"
-              style={{ '--security-score': score ?? 0 } as CSSProperties}
-              aria-label={score === null ? 'Security score unknown' : `Security score ${score} out of 100`}
+              className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-[#c6a76a]/25 bg-[#c6a76a]/[.07] text-[#d2b779]"
+              aria-hidden="true"
               role="img"
             >
-              <span className="grid h-[46px] w-[46px] place-items-center rounded-full bg-[#0b1212] font-mono text-[15px] font-semibold tabular-nums text-white">
-                {score ?? '—'}
-              </span>
+              <ShieldCheck size={23} strokeWidth={1.7} />
             </div>
             <div className="min-w-0">
-              <p className="text-sm font-semibold text-slate-100">
-                {score === null ? 'Unknown' : score >= 70 ? 'Lower observed risk' : score >= 40 ? 'Review advised' : 'Elevated observed risk'}
-              </p>
+              <p className="text-sm font-semibold text-slate-100">Not scored</p>
               <p className="mt-1 text-[11px] leading-4 text-slate-500">
-                {score === null ? 'Required checks or coverage incomplete' : 'Based on completed checks only'}
+                No reliable numeric score is available for this assessment.
               </p>
             </div>
           </div>
         </SummaryCard>
 
-        <SummaryCard icon={Shield} label="Active Approvals" accent="bg-emerald-300/[.09] text-emerald-200">
-          <div className="flex items-baseline gap-2">
-            <p className="font-mono text-[27px] font-semibold leading-none tabular-nums text-white">
-              {approvalAvailable ? activeApprovals.length : '—'}
-            </p>
-            <span className="text-[11px] text-slate-500">
-              {approvalAvailable ? approvalsQuery.data?.isComplete ? 'observed' : 'observed · partial' : 'unavailable'}
-            </span>
+        <SummaryCard icon={Shield} label="Approval inventory" accent="bg-emerald-300/[.09] text-emerald-200">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] leading-4 text-slate-500">Active allowances</p>
+              <p className="mt-0.5 font-mono text-xl font-semibold leading-none tabular-nums text-white">
+                {approvalInventory.activeAllowances ?? '—'}
+              </p>
+            </div>
+            <div className="min-w-0">
+              <p className="text-[10px] leading-4 text-slate-500">Observed spender records</p>
+              <p className="mt-0.5 font-mono text-xl font-semibold leading-none tabular-nums text-white">
+                {approvalInventory.observedSpenderRecords ?? '—'}
+              </p>
+            </div>
           </div>
-          <p className="mt-2 text-[11px] text-slate-500">
-            {approvalAvailable
-              ? `${unlimitedApprovals.length} unlimited · ${finiteHighApprovals.length} high finite`
-              : 'No confirmed count'}
+          <p className="mt-2 text-[10px] leading-4 text-slate-500">
+            {approvalInventory.activeAllowances === null
+              ? 'No checked allowance values are available.'
+              : approvalInventory.isCoverageComplete
+                ? 'Counts reflect current on-chain values for observed records in the selected history window; older history is not included.'
+                : `Counts reflect checked records only; the scan is incomplete, so other approvals may not be included.`}
           </p>
         </SummaryCard>
 
         <SummaryCard icon={AlertTriangle} label="Unlimited Allowances" accent="bg-amber-300/[.09] text-amber-200">
           <div className="flex items-baseline gap-2">
             <p className="font-mono text-[27px] font-semibold leading-none tabular-nums text-white">
-              {approvalAvailable ? unlimitedApprovals.length : '—'}
+              {approvalAvailable && approvals.length > 0 ? unlimitedApprovals.length : '—'}
             </p>
             <span className={`text-[11px] ${unlimitedApprovals.length > 0 ? 'text-amber-200' : 'text-slate-500'}`}>
-              {approvalAvailable
+              {approvalAvailable && approvals.length > 0
                 ? unlimitedApprovals.length > 0 ? 'review recommended' : approvalsQuery.data?.isComplete ? 'none observed' : 'partial data'
-                : 'unknown'}
+                : 'no checked records'}
             </span>
           </div>
           <p className="mt-2 text-[11px] text-slate-500">
-            {approvalAvailable ? `${finiteHighApprovals.length} high finite allowance${finiteHighApprovals.length === 1 ? '' : 's'} observed` : 'Requires a successful approval scan'}
+            {approvalAvailable && approvals.length > 0
+              ? `${finiteHighApprovals.length} high finite allowance${finiteHighApprovals.length === 1 ? '' : 's'} among checked records`
+              : 'Requires checked on-chain allowance values'}
           </p>
         </SummaryCard>
 
         <SummaryCard icon={FileSearch} label="Scan Status" accent="bg-cyan-300/[.09] text-cyan-200">
           <p className="text-sm font-semibold text-slate-100">
-            {approvalsQuery.isFetching || transactionsQuery.isFetching
-              ? 'Scanning'
-              : approvalsQuery.isError || transactionsQuery.isError
-                ? 'Failed'
-                : !approvalsQuery.data && !activityAvailable
-                  ? connectedToArc ? 'Not yet scanned' : 'Not connected'
-                  : scoreIsComplete ? 'Complete' : 'Incomplete'}
+            {scanStatusLabel}
           </p>
           <p className="mt-1 text-[11px] leading-4 text-slate-500">
             {approvalsQuery.data
-              ? `Block ${approvalsQuery.data.scannedFromBlock.toString()}–${approvalsQuery.data.scannedToBlock.toString()} · ${approvalsQuery.data.isComplete ? 'full configured history' : 'bounded coverage'}`
+              ? `${approvalCoverage.toFixed(2)}% of selected window covered · ${approvalsQuery.data.tokenCoverage.reduce((total, item) => total + item.remainingRangeCount, 0).toLocaleString()} ranges remain`
               : 'Approval coverage unavailable'}
           </p>
         </SummaryCard>
@@ -563,24 +795,52 @@ export function SecurityCenter() {
         ))}
       </nav>
 
-      <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1.65fr)_minmax(300px,.9fr)]">
+      <div className="grid min-w-0 items-start gap-4">
         <section className="min-w-0 space-y-4">
           <PageAnchor id="token-approvals" />
           <Card className="min-w-0 overflow-hidden rounded-2xl border border-[#243331] bg-[#0b1212]/95 shadow-[0_14px_34px_rgba(0,0,0,.15)]">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[.06] px-4 py-4 sm:px-5">
               <div>
-                <h2 className="text-base font-semibold tracking-tight text-slate-100">Token Approvals</h2>
+                <h2 className="text-base font-semibold tracking-tight text-slate-100">Approval Summary</h2>
                 <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
-                  Allowances observed from configured Arc Testnet token Approval events; a partial scan never implies zero approvals.
+                  Approval coverage and checked allowance totals only. View individual records and revoke permissions on Approvals &amp; Revoke.
                 </p>
               </div>
-              {approvalsQuery.data && (
-                <Pill color={approvalsQuery.data.isComplete ? 'green' : 'amber'}>
-                  {approvalsQuery.data.isComplete ? 'COVERAGE COMPLETE' : 'PARTIAL COVERAGE'}
-                </Pill>
-              )}
+              <div className="flex items-center gap-2">
+                {approvalsQuery.data && (
+                  <Pill color={approvalsQuery.data.isComplete ? 'green' : 'amber'}>
+                    {approvalsQuery.data.isComplete ? 'WINDOW COMPLETE' : 'PARTIAL COVERAGE'}
+                  </Pill>
+                )}
+                <Button variant="secondary" className="rounded-lg px-2.5 py-1.5 text-[10px]" onClick={onManageApprovals}>
+                  Manage approvals <ChevronRight size={14} aria-hidden="true" />
+                </Button>
+              </div>
             </div>
 
+            <div className="px-4 py-3 sm:px-5">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-white/[.055] bg-[#0c1414]/70 px-3 py-2.5">
+                  <p className="text-[10px] text-slate-500">Observed spender records</p>
+                  <p className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+                    {approvalInventory.observedSpenderRecords ?? 'Unknown'}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/[.055] bg-[#0c1414]/70 px-3 py-2.5">
+                  <p className="text-[10px] text-slate-500">Active allowances</p>
+                  <p className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+                    {approvalInventory.activeAllowances ?? 'Unknown'}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-2 text-[10px] leading-4 text-slate-500">
+                {approvalInventory.activeAllowances === null
+                  ? 'No current allowance values have been checked for discovered spender records.'
+                  : `The count reflects current allowance reads for ${approvalInventory.observedSpenderRecords ?? 0} discovered spender records that were successfully checked; it is not a complete wallet approval inventory.`}
+              </p>
+            </div>
+
+            <div className="hidden">
             <div className="flex flex-col gap-2 border-b border-white/[.055] px-4 py-3 sm:flex-row sm:px-5">
               <label className="relative min-w-0 flex-1">
                 <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" aria-hidden="true" />
@@ -621,11 +881,25 @@ export function SecurityCenter() {
 
             {revokeStatus === 'success' && transactionHash && (
               <p className="border-b border-emerald-300/10 bg-emerald-300/[.035] px-5 py-2.5 text-xs text-emerald-200">
-                Allowance revoke confirmed.{' '}
+                Revoke receipt confirmed and a fresh on-chain read verified zero allowance.{' '}
                 <a href={`${explorerUrl}/tx/${transactionHash}`} target="_blank" rel="noreferrer" className="underline underline-offset-2">
                   View transaction
                 </a>
               </p>
+            )}
+            {revokeStatus === 'already-zero' && (
+              <p role="status" className="border-b border-white/[.06] px-5 py-2.5 text-xs text-slate-300">
+                A fresh on-chain read found this allowance already at zero; no transaction was submitted.
+              </p>
+            )}
+            {(revokeStatus === 'confirmation-pending' || revokeStatus === 'verification-pending') && revokeError && (
+              <div role="status" className="flex flex-wrap items-center gap-2 border-b border-amber-300/10 bg-amber-300/[.035] px-5 py-2.5 text-xs text-amber-100">
+                <span>{revokeError.message}</span>
+                {transactionHash && <a href={`${explorerUrl}/tx/${transactionHash}`} target="_blank" rel="noreferrer" className="underline underline-offset-2">View transaction</a>}
+                <button type="button" onClick={() => void retryRevokeCheck()} className="underline underline-offset-2">
+                  {revokeStatus === 'confirmation-pending' ? 'Retry confirmation check' : 'Retry allowance check'}
+                </button>
+              </div>
             )}
             {revokeStatus === 'error' && revokeError && (
               <p role="alert" className="border-b border-rose-300/10 px-5 py-2.5 text-xs text-rose-200">{revokeError.message}</p>
@@ -638,9 +912,9 @@ export function SecurityCenter() {
               </div>
             ) : chainId !== arcTestnet.id ? (
               <p className="px-5 py-12 text-center text-sm text-amber-200">Switch to Arc Testnet to scan approvals.</p>
-            ) : approvalsQuery.isFetching ? (
+            ) : approvalsQuery.isFetching && !approvalsQuery.data ? (
               <p className="px-5 py-12 text-center text-sm text-slate-400">Reading configured token approvals…</p>
-            ) : approvalsQuery.isError ? (
+            ) : approvalsQuery.isError && !approvalsQuery.data ? (
               <p className="px-5 py-12 text-center text-sm text-rose-200">Approval data is unavailable. No zero-approval result is inferred.</p>
             ) : !approvalsQuery.data ? (
               <p className="px-5 py-12 text-center text-sm text-slate-400">Approval scan has not completed.</p>
@@ -725,23 +999,28 @@ export function SecurityCenter() {
                           <p className={`truncate font-mono text-[11px] ${approval.allowance > 0n ? 'text-slate-200' : 'text-slate-500'}`}>
                             {approval.allowance === 0n ? `0 ${approval.token.symbol}` : approval.isUnlimited ? 'Unlimited' : `${approval.allowanceFormatted} ${approval.token.symbol}`}
                           </p>
-                          <p className="mt-1 truncate text-[9px] text-slate-600">Checked at block {scannedToBlock}</p>
+                          <p className="mt-1 truncate text-[9px] text-slate-600">Verified at block {approval.allowanceCheckedBlock.toString()}</p>
                         </td>
                         <td className="px-4 py-3.5">
                           <Pill color={riskColor(approval.risk)}>{approval.risk}</Pill>
                         </td>
-                        <td className="px-4 py-3.5 font-mono text-[10px] text-slate-500">
-                          Block {approval.lastSeenBlock.toString()}
+                        <td className="px-4 py-3.5 text-[10px] text-slate-500">
+                          <time dateTime={new Date(approval.allowanceCheckedAt).toISOString()}>
+                            {new Date(approval.allowanceCheckedAt).toLocaleString()}
+                          </time>
+                          <span className="mt-1 block font-mono text-[9px] text-slate-600">Event block {approval.lastSeenBlock.toString()}</span>
                         </td>
                         <td className="px-4 py-3.5 text-right">
                           <button
                             type="button"
                             onClick={() => void confirmRevoke(approval)}
-                            disabled={revokeStatus === 'pending' || !canRevokeApproval(approval)}
+                            disabled={revokeStatus === 'checking' || revokeStatus === 'pending' || revokeStatus === 'confirmation-pending' || revokeStatus === 'verification-pending' || !canRevokeApproval(approval)}
                             title={!canRevokeApproval(approval) ? 'Only verified token and spender contracts can be revoked here' : 'Revoke allowance'}
                             className="rounded-lg border border-rose-300/20 bg-rose-300/[.045] px-2.5 py-1.5 text-[10px] font-semibold text-rose-100 transition hover:border-rose-300/45 hover:bg-rose-300/[.1] disabled:cursor-not-allowed disabled:opacity-40"
                           >
-                            {revokeStatus === 'pending' && activeApprovalId === approval.id
+                            {revokeStatus === 'checking' && activeApprovalId === approval.id
+                              ? 'Checking allowance…'
+                              : revokeStatus === 'pending' && activeApprovalId === approval.id
                               ? 'Confirm in wallet…'
                               : approval.allowance === 0n ? 'Already zero' : 'Revoke'}
                           </button>
@@ -752,13 +1031,37 @@ export function SecurityCenter() {
                 </table>
               </div>
             )}
+            {approvalToConfirm && (
+              <div className="space-y-3 border-t border-rose-300/10 bg-rose-300/[.025] px-4 py-4 sm:px-5" aria-label="Review approval revocation">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Review permission change</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">This on-chain action sets the allowance to zero. Your wallet will still request its own transaction signature.</p>
+                </div>
+                <dl className="grid gap-3 text-xs sm:grid-cols-3">
+                  <div><dt className="text-slate-500">Token</dt><dd className="mt-1 text-slate-200">{approvalToConfirm.token.symbol}</dd></div>
+                  <div><dt className="text-slate-500">Current permission</dt><dd className="mt-1 text-slate-200">{approvalToConfirm.isUnlimited ? 'Unlimited' : `${approvalToConfirm.allowanceFormatted} ${approvalToConfirm.token.symbol}`}</dd></div>
+                  <div><dt className="text-slate-500">Spender</dt><dd className="mt-1 break-all font-mono text-slate-200">{approvalToConfirm.spenderAddress}</dd></div>
+                </dl>
+                {activeApprovalId === approvalToConfirm.id && revokeStatus === 'already-zero' && <p role="status" className="text-xs text-slate-300">A fresh on-chain read found zero allowance. No transaction was submitted.</p>}
+                {activeApprovalId === approvalToConfirm.id && revokeError && <p role="alert" className="text-xs text-rose-200">{revokeError.message}</p>}
+                <SlideToConfirm
+                  label="Slide to revoke"
+                  confirmationKey={`${address?.toLowerCase() ?? ''}:${chainId ?? ''}:${approvalToConfirm.id}:${approvalToConfirm.allowance.toString()}`}
+                  phase={activeApprovalId !== approvalToConfirm.id ? 'idle' : revokeStatus === 'checking' || revokeStatus === 'confirmation-pending' ? 'submitting' : revokeStatus === 'pending' || revokeStatus === 'verification-pending' ? 'pending' : revokeStatus === 'success' ? 'success' : revokeStatus === 'error' ? 'failed' : 'idle'}
+                  disabled={!canRevokeApproval(approvalToConfirm) || (activeApprovalId === approvalToConfirm.id && Boolean(transactionHash))}
+                  onConfirm={() => revoke(approvalToConfirm)}
+                />
+                <Button variant="secondary" className="w-full" disabled={revokeStatus === 'checking' || revokeStatus === 'confirmation-pending' || revokeStatus === 'pending' || revokeStatus === 'verification-pending'} onClick={() => setApprovalToConfirm(null)}>Cancel</Button>
+              </div>
+            )}
             {copyError && <p role="status" className="border-t border-white/[.055] px-5 py-2 text-[10px] text-amber-200">{copyError}</p>}
             {approvalsQuery.data && (
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[.055] px-4 py-3 text-[10px] text-slate-500 sm:px-5">
                 <span>{approvals.length} observed spender record{approvals.length === 1 ? '' : 's'} · checked at block {approvalsQuery.data.scannedToBlock.toString()}</span>
-                <span>{approvalsQuery.data.isComplete ? 'All configured scan ranges succeeded' : 'Coverage incomplete; results are not a full inventory'}</span>
+                <span>{approvalsQuery.data.isComplete ? 'Selected recent-window ranges succeeded; older history is not included' : 'Coverage incomplete; results are not a full inventory'}</span>
               </div>
             )}
+            </div>
           </Card>
 
           <PageAnchor id="recent-transactions" />
@@ -768,6 +1071,11 @@ export function SecurityCenter() {
                 <div>
                   <h2 id="recent-transactions-heading" className="text-base font-semibold text-slate-100">Recent Transactions</h2>
                   <p className="mt-1 text-xs text-slate-500">Latest ArcScan transaction page for this wallet; not a complete lifetime history.</p>
+                  {hasTransactionSample && (transactionsQuery.isFetching || transactionsQuery.isError) && (
+                    <p className="mt-1 text-[10px] text-amber-200">
+                      {transactionsQuery.isFetching ? 'Refreshing; showing the previous successful sample.' : 'Refresh failed; showing the previous successful sample.'}
+                    </p>
+                  )}
                 </div>
                 <a
                   href={address ? `${explorerUrl}/address/${address}` : explorerUrl}
@@ -780,25 +1088,25 @@ export function SecurityCenter() {
               </div>
               {!isConnected ? (
                 <p className="px-5 py-10 text-center text-sm text-slate-500">Connect a wallet to view recent activity.</p>
-              ) : transactionsQuery.isFetching ? (
+              ) : !hasTransactionSample && transactionsQuery.isFetching ? (
                 <p className="px-5 py-10 text-center text-sm text-slate-500">Loading recent ArcScan activity…</p>
-              ) : transactionsQuery.isError ? (
+              ) : !hasTransactionSample && transactionsQuery.isError ? (
                 <p className="px-5 py-10 text-center text-sm text-rose-200">Recent transaction data is unavailable.</p>
-              ) : !activityAvailable ? (
+              ) : !hasTransactionSample ? (
                 <p className="px-5 py-10 text-center text-sm text-slate-500">Activity has not yet been scanned.</p>
               ) : transactions.length === 0 ? (
                 <p className="px-5 py-10 text-center text-sm text-slate-500">No transactions were returned for this recent page.</p>
               ) : (
                 <div className="security-table-scroll min-w-0 overflow-x-auto">
-                  <table className="w-full min-w-[760px] table-fixed text-left">
+                  <table className="w-full min-w-[980px] table-fixed text-left">
                     <thead className="border-b border-white/[.06] font-mono text-[9px] uppercase tracking-[.13em] text-slate-600">
                       <tr>
-                        <th className="w-[17%] px-4 py-3 font-medium">Type</th>
-                        <th className="w-[20%] px-4 py-3 font-medium">Hash / Details</th>
-                        <th className="w-[24%] px-4 py-3 font-medium">Amount</th>
-                        <th className="w-[18%] px-4 py-3 font-medium">To / From</th>
-                        <th className="w-[10%] px-4 py-3 font-medium">Block</th>
-                        <th className="w-[11%] px-4 py-3 font-medium">Time</th>
+                        <th className="w-[13%] px-4 py-3 font-medium">Type</th>
+                        <th className="w-[18%] px-4 py-3 font-medium">Hash / Details</th>
+                        <th className="w-[21%] px-4 py-3 font-medium">Amount</th>
+                        <th className="w-[21%] px-4 py-3 font-medium">To / From</th>
+                        <th className="w-[11%] px-4 py-3 font-medium">Block</th>
+                        <th className="w-[16%] px-4 py-3 font-medium">Time</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/[.045]">
@@ -828,8 +1136,8 @@ export function SecurityCenter() {
                                 {shortenAddress(isIncoming ? transaction.from : transaction.to)}
                               </a>
                             </td>
-                            <td className="px-4 py-3 font-mono text-[10px] text-slate-500">{transaction.blockNumber ?? '—'}</td>
-                            <td className="px-4 py-3 text-[10px] text-slate-500">{formatTimestamp(transaction.timestamp)}</td>
+                            <td className="whitespace-nowrap px-4 py-3 font-mono text-[10px] text-slate-500">{transaction.blockNumber ?? '—'}</td>
+                            <td className="whitespace-nowrap px-4 py-3 text-[10px] text-slate-500">{formatTimestamp(transaction.timestamp)}</td>
                           </tr>
                         );
                       })}
@@ -841,9 +1149,9 @@ export function SecurityCenter() {
           </section>
         </section>
 
-        <aside className="min-w-0 space-y-4">
-          <PageAnchor id="risk-insights" />
+        <aside className="grid min-w-0 items-start gap-4 lg:grid-cols-2">
           <Card className="rounded-2xl border border-[#243331] bg-[#0b1212]/95 p-4 shadow-[0_14px_34px_rgba(0,0,0,.15)] sm:p-5">
+            <PageAnchor id="risk-insights" />
             <div className="flex items-start justify-between gap-2">
               <div>
                 <h2 className="text-base font-semibold text-slate-100">Observed Activity</h2>
@@ -853,19 +1161,22 @@ export function SecurityCenter() {
                 <FileSearch size={15} aria-hidden="true" />
               </span>
             </div>
-            <div className="mt-4 space-y-2">
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
               <MetricRow icon={FileSearch} label="Transactions returned" value={countLabel(activityAvailable ? transactions.length : null, activityAvailable)} />
               <MetricRow icon={AlertTriangle} label="High-value outgoing" value={countLabel(activityAvailable ? largeOutgoing : null, activityAvailable)} tone={largeOutgoing > 0 ? 'amber' : 'slate'} />
               <MetricRow icon={XCircle} label="Failed transactions" value={countLabel(activityAvailable ? failedTransactions.length : null, activityAvailable)} tone={failedTransactions.length > 0 ? 'rose' : 'slate'} />
               <MetricRow icon={Fingerprint} label="Contract interactions" value={countLabel(activityAvailable ? contractInteractions.length : null, activityAvailable)} tone="cyan" />
+              <p className="text-[10px] leading-4 text-slate-600 sm:col-span-2">
+                Transactions classified as contract interactions in the latest ArcScan sample; this is not a count of individual calls or unique contracts.
+              </p>
               <MetricRow icon={ArrowUpRight} label="Outgoing transfers" value={countLabel(activityAvailable ? outgoingTransferCount : null, activityAvailable)} />
               <MetricRow icon={ArrowDownRight} label="Incoming transfers" value={countLabel(activityAvailable ? incomingTransferCount : null, activityAvailable)} />
             </div>
             {transactionsQuery.isError && <p className="mt-3 text-[10px] text-rose-200">Activity metrics unavailable because ArcScan returned an error.</p>}
           </Card>
 
-          <PageAnchor id="security-recommendations" />
-          <Card className="rounded-2xl border border-[#243331] bg-[#0b1212]/95 p-4 shadow-[0_14px_34px_rgba(0,0,0,.15)] sm:p-5">
+          <Card className="min-w-0 rounded-2xl border border-[#243331] bg-[#0b1212]/95 p-4 shadow-[0_14px_34px_rgba(0,0,0,.15)] sm:p-5">
+            <PageAnchor id="security-recommendations" />
             <div className="flex items-start gap-3">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-300/[.08] text-emerald-200">
                 <ShieldAlert size={16} aria-hidden="true" />
@@ -909,18 +1220,18 @@ export function SecurityCenter() {
             </div>
           </Card>
 
-          <Card className="rounded-2xl border border-[#243331] bg-[#0b1212]/95 p-4 shadow-[0_14px_34px_rgba(0,0,0,.12)]">
+          <Card className="min-w-0 rounded-2xl border border-[#243331] bg-[#0b1212]/95 p-4 shadow-[0_14px_34px_rgba(0,0,0,.12)] lg:col-span-2 sm:p-5">
             <h2 className="text-xs font-semibold text-slate-200">Coverage & verification</h2>
-            <div className="mt-3 space-y-2 text-[10px] leading-5 text-slate-500">
-              <p>Approval history is limited to the configured tokens and bounded Arc RPC history. Successful ranges are cached locally; uncovered ranges are retried on refresh.</p>
-              <p>Activity shows only the latest ArcScan page. Unverified or unavailable contract metadata is informational and does not mean a contract is malicious.</p>
-              <p>Security score remains Unknown unless approval coverage, required checks, and recent activity status are sufficient.</p>
+            <div className="mt-3 grid gap-3 text-[10px] leading-5 text-slate-500 sm:grid-cols-3">
+              <p>Approval coverage applies only to the selected block window for configured tokens; it is not complete historical wallet coverage. Successful ranges are cached locally; uncovered ranges are retried on refresh.</p>
+              <p>Activity uses the latest ArcScan sample (up to 20 transactions and transfer records). Unverified contract metadata is informational and does not mean a contract is malicious.</p>
+              <p>A completed window can be labeled Window assessed; older or unsupported approvals are not included.</p>
             </div>
             <div className="mt-3 flex items-center gap-2 border-t border-white/[.055] pt-3 text-[10px] text-slate-500">
-              {approvalsQuery.data?.isComplete && activityAvailable ? (
-                <><ShieldCheck size={13} className="text-emerald-300" /> Required data sources available</>
+              {assessment.status === 'Window assessed' ? (
+                <><ShieldCheck size={13} className="text-emerald-300" /> Selected approval window assessed · older history excluded</>
               ) : (
-                <><CircleHelp size={13} className="text-amber-200" /> At least one required check is incomplete</>
+                <><CircleHelp size={13} className="text-amber-200" /> {assessment.status}</>
               )}
             </div>
             <div className="mt-3 flex items-center gap-2 text-[10px] text-slate-500">

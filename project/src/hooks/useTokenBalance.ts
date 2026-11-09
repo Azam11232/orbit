@@ -26,6 +26,7 @@ export function useTokenBalance(token: TokenConfig, address?: Address, enabled =
     raw,
     formatted,
     isLoading: result.isLoading,
+    isFetching: result.isFetching,
     isError: result.isError,
     error: result.error,
     refetch: result.refetch,

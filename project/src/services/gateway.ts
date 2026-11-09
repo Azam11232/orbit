@@ -10,6 +10,15 @@ export const gatewayWalletAbi = [{
   stateMutability: 'nonpayable',
   inputs: [{ name: 'token', type: 'address' }, { name: 'value', type: 'uint256' }],
   outputs: [],
+}, {
+  type: 'event',
+  name: 'Deposited',
+  inputs: [
+    { name: 'token', type: 'address', indexed: true },
+    { name: 'depositor', type: 'address', indexed: true },
+    { name: 'sender', type: 'address', indexed: true },
+    { name: 'value', type: 'uint256', indexed: false },
+  ],
 }] as const;
 
 export const gatewayMinterAbi = [{
@@ -235,6 +244,19 @@ export function sumGatewayBalances(balances: GatewayBalance[]): bigint {
 
 export function sumGatewayPendingBatches(balances: GatewayBalance[]): bigint {
   return balances.reduce((total, balance) => total + balance.pendingBatchRaw, 0n);
+}
+
+export function getGatewayBalanceStatus({
+  hasData,
+  isLoading,
+  isError,
+}: {
+  hasData: boolean;
+  isLoading: boolean;
+  isError: boolean;
+}): 'loading' | 'unavailable' | 'available' | 'stale' {
+  if (hasData) return isError ? 'stale' : 'available';
+  return isLoading ? 'loading' : 'unavailable';
 }
 
 export { maxUint256 };

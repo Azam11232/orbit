@@ -122,15 +122,20 @@ export function useBridgeApproval(token: BridgeToken | undefined, owner: Address
   });
   const required = approvalState.required;
   const amountKey = amount?.toString();
+  const allowanceData = query.data;
+  const allowanceError = query.isError;
+  const allowanceFetching = query.isFetching;
+  const allowanceStale = query.isStale;
+  const refetchAllowance = query.refetch;
   useEffect(() => {
     setStatus('idle');
     setHash(undefined);
     setError(null);
   }, [token?.chainId, token?.address, spender, amountKey, owner]);
   useEffect(() => {
-    if (!query.isStale || query.isFetching || query.isError || query.data === undefined || !token || !owner || !spender || amount === null || amount <= 0n) return;
-    void query.refetch();
-  }, [amount, owner, query.data, query.isError, query.isFetching, query.isStale, query.refetch, spender, token]);
+    if (!allowanceStale || allowanceFetching || allowanceError || allowanceData === undefined || !token || !owner || !spender || amount === null || amount <= 0n) return;
+    void refetchAllowance();
+  }, [allowanceData, allowanceError, allowanceFetching, allowanceStale, amount, owner, refetchAllowance, spender, token]);
   const approve = async () => {
     if (!token || token.isNative || !token.address || !spender || !owner || !amount || amount <= 0n || !publicClient) return;
     if (!approvalGuardRef.current.claim()) return;
